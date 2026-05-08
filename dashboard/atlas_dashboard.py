@@ -92,6 +92,7 @@ def api_post(path: str, data: dict = None, timeout: int = 10) -> dict:
 # Text-to-speech — uses Windows SAPI directly via win32com (instant, reliable)
 # ---------------------------------------------------------------------------
 _tts_queue: queue.Queue = queue.Queue()
+_atlas_speaking = threading.Event()  # set while ATLAS is speaking — mutes listener
 
 def _tts_worker():
     try:
@@ -108,10 +109,10 @@ def _tts_worker():
         if not text:
             continue
         try:
+            _atlas_speaking.set()
             if speaker:
                 speaker.Speak(text)
             else:
-                # Fallback to PowerShell if win32com unavailable
                 safe = text.replace("'", " ").replace('"', " ")
                 subprocess.run(
                     ["powershell", "-Command",
@@ -122,6 +123,8 @@ def _tts_worker():
                 )
         except Exception:
             pass
+        finally:
+            _atlas_speaking.clear()
 
 _tts_thread = threading.Thread(target=_tts_worker, daemon=True)
 _tts_thread.start()
@@ -151,11 +154,21 @@ def record_and_transcribe() -> tuple[str, str]:
         import numpy as np
 
         sample_rate = 16000
-        duration    = 6
+        duration    = 15
         audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
                        channels=1, dtype="float32")
         sd.wait()
         audio = audio.flatten()
+
+        # Trim trailing silence — stop at last chunk with meaningful audio
+        chunk = sample_rate // 4  # 0.25 second chunks
+        threshold = 0.01
+        last_active = len(audio)
+        for i in range(len(audio) - chunk, 0, -chunk):
+            if np.max(np.abs(audio[i:i+chunk])) > threshold:
+                last_active = i + chunk
+                break
+        audio = audio[:max(last_active, sample_rate)]  # keep at least 1 second
     except Exception as e:
         return "", f"Microphone error: {e}"
 
@@ -172,6 +185,89 @@ def record_and_transcribe() -> tuple[str, str]:
         return text, ""
     except Exception as e:
         return "", f"Transcription error: {e}"
+
+# ---------------------------------------------------------------------------
+# Continuous voice listener
+# ---------------------------------------------------------------------------
+_listening_active = threading.Event()
+_listen_callback = None  # set by dashboard to handle transcribed text
+
+def _continuous_listen_worker():
+    """Monitors mic continuously, sends speech to ATLAS when detected."""
+    try:
+        import sounddevice as sd
+        import numpy as np
+    except Exception:
+        return
+
+    sample_rate  = 16000
+    chunk_frames = int(sample_rate * 0.3)   # 300ms chunks
+    silence_chunks_needed = 8               # ~2.4s silence to end utterance
+    speech_threshold = 0.015               # RMS threshold for voice activity
+    min_speech_chunks = 3                  # ignore taps < ~0.9s
+
+    while True:
+        _listening_active.wait()           # block until listening is enabled
+
+        audio_buffer = []
+        silence_count = 0
+        speech_count  = 0
+        recording     = False
+
+        try:
+            with sd.InputStream(samplerate=sample_rate, channels=1,
+                                dtype="float32", blocksize=chunk_frames) as stream:
+                while _listening_active.is_set():
+
+                    # Don't listen while ATLAS is speaking
+                    if _atlas_speaking.is_set():
+                        time.sleep(0.1)
+                        continue
+
+                    chunk, _ = stream.read(chunk_frames)
+                    rms = float(np.sqrt(np.mean(chunk ** 2)))
+
+                    if rms > speech_threshold:
+                        if not recording:
+                            recording = True
+                            audio_buffer = []
+                        audio_buffer.append(chunk.flatten())
+                        speech_count  += 1
+                        silence_count  = 0
+                    elif recording:
+                        audio_buffer.append(chunk.flatten())
+                        silence_count += 1
+                        if silence_count >= silence_chunks_needed:
+                            # End of utterance
+                            if speech_count >= min_speech_chunks:
+                                audio = np.concatenate(audio_buffer)
+                                threading.Thread(
+                                    target=_transcribe_and_send,
+                                    args=(audio,),
+                                    daemon=True
+                                ).start()
+                            recording     = False
+                            audio_buffer  = []
+                            speech_count  = 0
+                            silence_count = 0
+        except Exception:
+            time.sleep(1)
+
+def _transcribe_and_send(audio):
+    """Transcribe audio and send to ATLAS callback."""
+    try:
+        model = get_whisper()
+        if model is None:
+            return
+        result = model.transcribe(audio, fp16=False)
+        text = result.get("text", "").strip()
+        if text and _listen_callback:
+            _listen_callback(text)
+    except Exception:
+        pass
+
+_listen_thread = threading.Thread(target=_continuous_listen_worker, daemon=True)
+_listen_thread.start()
 
 # ---------------------------------------------------------------------------
 # Main Application Window
@@ -638,22 +734,39 @@ class ATLASDashboard(tk.Tk):
         f.columnconfigure(0, weight=1)
         f.rowconfigure(0, weight=1)
 
+        # Listening status bar
+        self._listen_bar = tk.Frame(f, bg="#1a1a35", pady=6)
+        self._listen_bar.grid(row=0, column=0, sticky="ew", padx=15, pady=(15, 0))
+        self._listen_bar.columnconfigure(1, weight=1)
+
+        self._listen_indicator = tk.Label(
+            self._listen_bar, text="⏸ Conversation paused",
+            font=FONT_SMALL, bg="#1a1a35", fg=FG_DIM)
+        self._listen_indicator.grid(row=0, column=0, padx=(10, 0))
+
+        self._listen_toggle = tk.Button(
+            self._listen_bar, text="▶ Start Conversation",
+            command=self._toggle_listening,
+            bg=GO_COLOR, fg="#ffffff", font=FONT_SMALL,
+            relief="flat", cursor="hand2", padx=10, pady=3)
+        self._listen_toggle.grid(row=0, column=2, padx=10)
+
         # Chat display
         self._chat_display = scrolledtext.ScrolledText(
             f, font=FONT_BODY, bg=BG_PANEL, fg=FG,
             insertbackground=FG, relief="flat", state="disabled",
             wrap="word")
-        self._chat_display.grid(row=0, column=0, sticky="nsew",
-                                padx=15, pady=(15, 0))
+        self._chat_display.grid(row=1, column=0, sticky="nsew",
+                                padx=15, pady=(6, 0))
 
         # Tag colors
-        self._chat_display.tag_config("atlas", foreground=ACCENT)
-        self._chat_display.tag_config("you",   foreground=GO_COLOR)
+        self._chat_display.tag_config("atlas",  foreground=ACCENT)
+        self._chat_display.tag_config("you",    foreground=GO_COLOR)
         self._chat_display.tag_config("system", foreground=FG_DIM)
 
         # Input area
         input_frame = tk.Frame(f, bg=BG, pady=8)
-        input_frame.grid(row=1, column=0, sticky="ew", padx=15, pady=(6, 15))
+        input_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(6, 15))
         input_frame.columnconfigure(0, weight=1)
 
         self._chat_entry = tk.Entry(input_frame, font=FONT_BODY, bg=BG_PANEL,
@@ -663,10 +776,14 @@ class ATLASDashboard(tk.Tk):
 
         self._btn(input_frame, "Send", self._send_chat, ACCENT, 8).grid(
             row=0, column=1, padx=(8, 0))
-        self._mic_btn = self._btn(input_frame, "🎤 Speak", self._start_voice, "#555577", 8)
+        self._mic_btn = self._btn(input_frame, "🎤 Once", self._start_voice, "#555577", 8)
         self._mic_btn.grid(row=0, column=2, padx=(4, 0))
 
-        self._chat_append("ATLAS", "Observatory systems online. How can I assist you?")
+        # Wire up continuous listener callback
+        global _listen_callback
+        _listen_callback = self._on_voice_input
+
+        self._chat_append("ATLAS", "Observatory systems online. Say anything to talk to me, or click 'Start Conversation' for hands-free mode.")
 
     def _chat_append(self, speaker: str, text: str):
         self._chat_display.configure(state="normal")
@@ -705,17 +822,34 @@ class ATLASDashboard(tk.Tk):
     def _start_voice(self):
         label = "🎤 Loading..." if _whisper_model is None else "🎤 Listening..."
         self._mic_btn.configure(text=label, bg=NOGO_COLOR)
-        self._chat_append("System", "Listening for 6 seconds...")
+        self._chat_append("System", "Listening — speak now (up to 15 seconds, stops on silence)...")
         threading.Thread(target=self._voice_worker, daemon=True).start()
 
     def _voice_worker(self):
         text, error = record_and_transcribe()
-        self.after(0, lambda: self._mic_btn.configure(text="🎤 Speak", bg="#555577"))
+        self.after(0, lambda: self._mic_btn.configure(text="🎤 Once", bg="#555577"))
         if error:
             self.after(0, lambda: self._chat_append("System", f"Voice error: {error}"))
         elif text:
             self.after(0, lambda: self._chat_entry.insert(0, text))
             self.after(0, self._send_chat)
+
+    def _toggle_listening(self):
+        if _listening_active.is_set():
+            _listening_active.clear()
+            self._listen_toggle.configure(text="▶ Start Conversation", bg=GO_COLOR)
+            self._listen_indicator.configure(text="⏸ Conversation paused", fg=FG_DIM)
+        else:
+            _listening_active.set()
+            self._listen_toggle.configure(text="■ Stop Conversation", bg=NOGO_COLOR)
+            self._listen_indicator.configure(text="🎙 Listening...", fg=GO_COLOR)
+
+    def _on_voice_input(self, text: str):
+        """Called by the continuous listener thread when speech is transcribed."""
+        def _handle():
+            self._chat_append("You", text)
+            threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
+        self.after(0, _handle)
 
     def _slew_to_target(self):
         target = self._slew_entry.get().strip()
