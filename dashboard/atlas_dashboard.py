@@ -21,7 +21,7 @@ from tkinter import ttk, scrolledtext, messagebox
 from pathlib import Path
 
 import requests
-import pyttsx3
+import subprocess
 
 # ---------------------------------------------------------------------------
 # Config — written by installer, read on startup
@@ -89,20 +89,37 @@ def api_post(path: str, data: dict = None, timeout: int = 10) -> dict:
         return {"error": str(e)}
 
 # ---------------------------------------------------------------------------
-# Text-to-speech
+# Text-to-speech — uses Windows SAPI directly via win32com (instant, reliable)
 # ---------------------------------------------------------------------------
-_tts_engine = pyttsx3.init()
-_tts_engine.setProperty("rate", 165)
 _tts_queue: queue.Queue = queue.Queue()
 
 def _tts_worker():
+    try:
+        import win32com.client
+        speaker = win32com.client.Dispatch("SAPI.SpVoice")
+        speaker.Rate = 1
+    except Exception:
+        speaker = None
+
     while True:
         text = _tts_queue.get()
         if text is None:
             break
+        if not text:
+            continue
         try:
-            _tts_engine.say(text)
-            _tts_engine.runAndWait()
+            if speaker:
+                speaker.Speak(text)
+            else:
+                # Fallback to PowerShell if win32com unavailable
+                safe = text.replace("'", " ").replace('"', " ")
+                subprocess.run(
+                    ["powershell", "-Command",
+                     f"Add-Type -AssemblyName System.Speech; "
+                     f"$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                     f"$s.Speak('{safe}')"],
+                    capture_output=True
+                )
         except Exception:
             pass
 
@@ -127,30 +144,34 @@ def get_whisper():
             pass
     return _whisper_model
 
-def record_and_transcribe() -> str:
-    """Record from microphone and return transcribed text."""
+def record_and_transcribe() -> tuple[str, str]:
+    """Record from microphone and return (transcribed text, error message)."""
     try:
         import sounddevice as sd
         import numpy as np
-        import tempfile
-        import soundfile as sf
 
         sample_rate = 16000
-        duration    = 5
+        duration    = 6
         audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
                        channels=1, dtype="float32")
         sd.wait()
+        audio = audio.flatten()
+    except Exception as e:
+        return "", f"Microphone error: {e}"
 
+    try:
         model = get_whisper()
         if model is None:
-            return ""
+            return "", "Whisper failed to load."
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            sf.write(f.name, audio, sample_rate)
-            result = model.transcribe(f.name)
-            return result.get("text", "").strip()
+        # Pass numpy array directly — no ffmpeg needed
+        result = model.transcribe(audio, fp16=False)
+        text = result.get("text", "").strip()
+        if not text:
+            return "", "No speech detected — try speaking louder or closer to the mic."
+        return text, ""
     except Exception as e:
-        return ""
+        return "", f"Transcription error: {e}"
 
 # ---------------------------------------------------------------------------
 # Main Application Window
@@ -260,16 +281,16 @@ class ATLASDashboard(tk.Tk):
         self._banner_verdict.grid(row=0, column=0)
 
         self._banner_reason = tk.Label(self._banner_frame, text="Connecting to observatory...",
-                                       font=FONT_REASON, bg=UNKNOWN_COLOR, fg="#ffffffcc")
+                                       font=FONT_REASON, bg=UNKNOWN_COLOR, fg="#dddddd")
         self._banner_reason.grid(row=1, column=0, pady=(4, 0))
 
         self._banner_time = tk.Label(self._banner_frame, text="",
-                                     font=FONT_SMALL, bg=UNKNOWN_COLOR, fg="#ffffff88")
+                                     font=FONT_SMALL, bg=UNKNOWN_COLOR, fg="#aaaaaa")
         self._banner_time.grid(row=2, column=0)
 
         refresh_btn = tk.Button(self._banner_frame, text="↻ Refresh",
                                 command=self._force_status_refresh,
-                                bg="#ffffff33", fg="#ffffff", font=FONT_SMALL,
+                                bg="#555577", fg="#ffffff", font=FONT_SMALL,
                                 relief="flat", cursor="hand2", padx=8, pady=2)
         refresh_btn.grid(row=0, column=1, padx=20)
 
@@ -332,15 +353,22 @@ class ATLASDashboard(tk.Tk):
             "CAUTION": CAUTION_COLOR,
             "NO-GO":   NOGO_COLOR,
         }
+        # CAUTION is yellow — use dark text for contrast; all others use white
+        text_colors = {
+            "GO":      "#ffffff",
+            "CAUTION": "#1a1a00",
+            "NO-GO":   "#ffffff",
+        }
         symbols = {"GO": "●", "CAUTION": "◆", "NO-GO": "✖"}
-        color = colors.get(verdict, UNKNOWN_COLOR)
-        sym   = symbols.get(verdict, "●")
+        color    = colors.get(verdict, UNKNOWN_COLOR)
+        fg       = text_colors.get(verdict, "#ffffff")
+        sym      = symbols.get(verdict, "●")
 
         self._banner_frame.configure(bg=color)
-        self._banner_verdict.configure(text=f"{sym}  {verdict}", bg=color)
-        self._banner_reason.configure(text=reason, bg=color)
+        self._banner_verdict.configure(text=f"{sym}  {verdict}", bg=color, fg=fg)
+        self._banner_reason.configure(text=reason, bg=color, fg=fg)
         self._banner_time.configure(
-            text=f"Last assessed: {updated}" if updated else "", bg=color)
+            text=f"Last assessed: {updated}" if updated else "", bg=color, fg=fg)
 
     # ── Telescope Tab ────────────────────────────────────────────────────────
 
@@ -675,15 +703,19 @@ class ATLASDashboard(tk.Tk):
         speak(reply)
 
     def _start_voice(self):
-        self._mic_btn.configure(text="🎤 Listening...", bg=NOGO_COLOR)
+        label = "🎤 Loading..." if _whisper_model is None else "🎤 Listening..."
+        self._mic_btn.configure(text=label, bg=NOGO_COLOR)
+        self._chat_append("System", "Listening for 6 seconds...")
         threading.Thread(target=self._voice_worker, daemon=True).start()
 
     def _voice_worker(self):
-        text = record_and_transcribe()
+        text, error = record_and_transcribe()
         self.after(0, lambda: self._mic_btn.configure(text="🎤 Speak", bg="#555577"))
-        if text:
-            self._chat_entry.insert(0, text)
-            self._send_chat()
+        if error:
+            self.after(0, lambda: self._chat_append("System", f"Voice error: {error}"))
+        elif text:
+            self.after(0, lambda: self._chat_entry.insert(0, text))
+            self.after(0, self._send_chat)
 
     def _slew_to_target(self):
         target = self._slew_entry.get().strip()
@@ -1034,7 +1066,7 @@ class ATLASDashboard(tk.Tk):
 
     def _update_clock(self):
         now = datetime.datetime.now()
-        utc = datetime.datetime.utcnow()
+        utc = datetime.datetime.now(datetime.timezone.utc)
         self._clock_label.configure(
             text=f"Local {now.strftime('%H:%M:%S')}  |  UTC {utc.strftime('%H:%M:%S')}")
         self.after(1_000, self._update_clock)

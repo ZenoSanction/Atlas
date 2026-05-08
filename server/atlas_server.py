@@ -212,17 +212,36 @@ async def atlas_assess() -> dict:
         guiding      = await phd2("get_app_state")
 
         weather_verdict_str, weather_reason = weather_verdict(weather_data)
+        c = weather_data.get("current", {})
+        temp   = c.get("temperature_2m", "N/A")
+        humid  = c.get("relative_humidity_2m", "N/A")
+        dew    = c.get("dew_point_2m", "N/A")
+        cloud  = c.get("cloud_cover", "N/A")
+        wind   = c.get("wind_speed_10m", "N/A")
+        gusts  = c.get("wind_gusts_10m", "N/A")
+        precip = c.get("precipitation", "N/A")
 
         context = f"""You are ATLAS, the autonomous observatory agent at {OBS_NAME}.
-Assess the current observatory status and provide a one-sentence verdict.
+All data below has already been retrieved for you. You do NOT need internet access.
+Assess the current observatory status and provide a verdict.
 
-Weather: {weather_verdict_str} — {weather_reason}
-Telescope connected: {telescope.get('Connected', 'unknown')}
-Camera connected: {camera.get('Connected', 'unknown')}
-PHD2 state: {guiding.get('result', 'unknown')}
+LIVE WEATHER DATA (already fetched):
+  Temperature : {temp}°F
+  Humidity    : {humid}%
+  Dew Point   : {dew}°F
+  Cloud Cover : {cloud}%
+  Wind Speed  : {wind} mph
+  Wind Gusts  : {gusts} mph
+  Precipitation: {precip}"
+  Weather verdict: {weather_verdict_str} — {weather_reason}
+
+EQUIPMENT STATUS:
+  Telescope connected: {telescope.get('Connected', 'unknown')}
+  Camera connected   : {camera.get('Connected', 'unknown')}
+  PHD2 state         : {guiding.get('result', 'unknown')}
 
 Respond with JSON only, in this exact format:
-{{"verdict": "GO|CAUTION|NO-GO", "reason": "one plain-English sentence explaining the status"}}"""
+{{"verdict": "GO|CAUTION|NO-GO", "reason": "one plain-English sentence summarizing conditions and equipment"}}"""
 
         response = ollama.chat(
             model=OLLAMA_MODEL,
@@ -507,17 +526,37 @@ async def atlas_chat(req: ChatRequest):
         guiding      = await phd2("get_app_state")
         verdict, reason = weather_verdict(weather_data)
 
+        c = weather_data.get("current", {})
+        temp   = c.get("temperature_2m", "N/A")
+        humid  = c.get("relative_humidity_2m", "N/A")
+        dew    = c.get("dew_point_2m", "N/A")
+        cloud  = c.get("cloud_cover", "N/A")
+        wind   = c.get("wind_speed_10m", "N/A")
+        gusts  = c.get("wind_gusts_10m", "N/A")
+        precip = c.get("precipitation", "N/A")
+
         system_prompt = f"""You are ATLAS — Automated Telescope & Long-term Astronomy System.
 You are the autonomous agent running {OBS_NAME}.
 You are speaking with your operator from the warm room.
+All data below has already been retrieved for you. You do NOT need internet access.
 
-Current status:
-- Observatory verdict: {verdict} — {reason}
-- Telescope connected: {telescope.get('Connected', 'unknown')}
-- PHD2 state: {guiding.get('result', 'unknown')}
+LIVE WEATHER DATA (already fetched):
+  Temperature : {temp}°F
+  Humidity    : {humid}%
+  Dew Point   : {dew}°F
+  Cloud Cover : {cloud}%
+  Wind Speed  : {wind} mph
+  Wind Gusts  : {gusts} mph
+  Precipitation: {precip}"
+  Observing verdict: {verdict} — {reason}
+
+EQUIPMENT STATUS:
+  Telescope connected: {telescope.get('Connected', 'unknown')}
+  PHD2 state         : {guiding.get('result', 'unknown')}
 
 Be concise, knowledgeable, and speak like a seasoned observatory operator.
-You care deeply about data quality and equipment safety."""
+You care deeply about data quality and equipment safety.
+When asked about weather or conditions, use the live data provided above."""
 
         _chat_history.append({"role": "user", "content": req.message})
 
