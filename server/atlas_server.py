@@ -567,74 +567,30 @@ EQUIPMENT STATUS:
         _chat_history.append({"role": "user", "content": req.message})
         messages = [{"role": "system", "content": system_prompt}] + _chat_history[-10:]
 
-        token_queue: asyncio.Queue = asyncio.Queue()
-        reply_parts: list = []
-        loop = asyncio.get_event_loop()
+        # Run ollama in a thread pool so it doesn't block the event loop
+        def call_ollama():
+            resp = ollama.chat(model=OLLAMA_MODEL, messages=messages)
+            return resp["message"]["content"]
 
-        def ollama_thread():
-            try:
-                buffer   = ""
-                in_think = False
-                for chunk in ollama.chat(
-                    model=OLLAMA_MODEL, messages=messages, stream=True
-                ):
-                    token = chunk["message"]["content"]
-                    reply_parts.append(token)
-                    buffer += token
+        raw   = await asyncio.get_event_loop().run_in_executor(None, call_ollama)
+        clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
-                    # Strip <think>...</think> blocks from the stream
-                    while buffer:
-                        if in_think:
-                            end = buffer.find("</think>")
-                            if end != -1:
-                                buffer   = buffer[end + 8:].lstrip("\n")
-                                in_think = False
-                            else:
-                                buffer = buffer[-8:]  # keep partial tag
-                                break
-                        else:
-                            start = buffer.find("<think>")
-                            if start != -1:
-                                out = buffer[:start]
-                                if out:
-                                    asyncio.run_coroutine_threadsafe(
-                                        token_queue.put(out), loop)
-                                buffer   = buffer[start + 7:]
-                                in_think = True
-                            else:
-                                safe = max(0, len(buffer) - 7)
-                                if safe > 0:
-                                    asyncio.run_coroutine_threadsafe(
-                                        token_queue.put(buffer[:safe]), loop)
-                                    buffer = buffer[safe:]
-                                break
+        _chat_history.append({"role": "assistant", "content": clean})
+        _chat_history[:] = _chat_history[-20:]
 
-                if buffer and not in_think:
-                    asyncio.run_coroutine_threadsafe(token_queue.put(buffer), loop)
-            except Exception as ex:
-                log.error(f"ollama stream error: {ex}")
-            finally:
-                asyncio.run_coroutine_threadsafe(token_queue.put(None), loop)
-
-        threading.Thread(target=ollama_thread, daemon=True).start()
-
+        # Stream the cleaned text in small chunks for progressive display
         async def generate():
-            while True:
-                token = await token_queue.get()
-                if token is None:
-                    break
-                yield token
-            raw   = "".join(reply_parts)
-            clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-            _chat_history.append({"role": "assistant", "content": clean})
-            _chat_history[:] = _chat_history[-20:]
+            size = 4
+            for i in range(0, len(clean), size):
+                yield clean[i:i + size]
+                await asyncio.sleep(0.01)
 
         return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
 
     except Exception as e:
         log.error(f"atlas_chat error: {e}")
         return StreamingResponse(
-            iter([f"ATLAS is temporarily unavailable: {e}"]),
+            iter([f"ATLAS unavailable: {e}"]),
             media_type="text/plain; charset=utf-8"
         )
 
