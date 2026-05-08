@@ -205,7 +205,8 @@ def record_and_transcribe() -> tuple[str, str]:
 # Continuous voice listener
 # ---------------------------------------------------------------------------
 _listening_active = threading.Event()
-_listen_callback = None  # set by dashboard to handle transcribed text
+_listen_callback = None            # set by dashboard to handle transcribed text
+_listen_indicator_callback = None  # set by dashboard to update status label
 
 def _continuous_listen_worker():
     """Monitors mic continuously, sends speech to ATLAS when detected."""
@@ -256,6 +257,8 @@ def _continuous_listen_worker():
                             # End of utterance
                             if speech_count >= min_speech_chunks:
                                 audio = np.concatenate(audio_buffer)
+                                if _listen_indicator_callback:
+                                    _listen_indicator_callback("⏳ Transcribing...")
                                 threading.Thread(
                                     target=_transcribe_and_send,
                                     args=(audio,),
@@ -271,8 +274,6 @@ def _continuous_listen_worker():
 def _transcribe_and_send(audio):
     """Transcribe audio and send to ATLAS callback."""
     try:
-        if _listen_callback:
-            _listen_callback("⏳ Transcribing...", system=True)
         model = get_whisper()
         if model is None:
             return
@@ -796,9 +797,10 @@ class ATLASDashboard(tk.Tk):
         self._mic_btn = self._btn(input_frame, "🎤 Once", self._start_voice, "#555577", 8)
         self._mic_btn.grid(row=0, column=2, padx=(4, 0))
 
-        # Wire up continuous listener callback
-        global _listen_callback
+        # Wire up continuous listener callbacks
+        global _listen_callback, _listen_indicator_callback
         _listen_callback = self._on_voice_input
+        _listen_indicator_callback = self._set_listen_indicator
 
         self._chat_append("ATLAS", "Observatory systems online. Say anything to talk to me, or click 'Start Conversation' for hands-free mode.")
 
@@ -856,22 +858,16 @@ class ATLASDashboard(tk.Tk):
             self._listen_toggle.configure(text="■ Stop Conversation", bg=NOGO_COLOR)
             self._listen_indicator.configure(text="🎙 Listening...", fg=GO_COLOR)
 
-    def _on_voice_input(self, text: str, system: bool = False):
+    def _set_listen_indicator(self, msg: str):
+        """Update the listening status label from any thread."""
+        self.after(0, lambda: self._listen_indicator.configure(text=msg))
+
+    def _on_voice_input(self, text: str):
         """Called by the continuous listener thread when speech is transcribed."""
         def _handle():
-            if system:
-                self._chat_append("System", text)
-            else:
-                # Remove the transcribing indicator if present
-                content = self._chat_display.get("1.0", "end")
-                if "⏳ Transcribing..." in content:
-                    self._chat_display.configure(state="normal")
-                    idx = self._chat_display.search("⏳ Transcribing...", "1.0", "end")
-                    if idx:
-                        self._chat_display.delete(f"{idx} linestart", f"{idx} lineend +1c")
-                    self._chat_display.configure(state="disabled")
-                self._chat_append("You", text)
-                threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
+            self._listen_indicator.configure(text="🎙 Listening...")
+            self._chat_append("You", text)
+            threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
         self.after(0, _handle)
 
     def _slew_to_target(self):
