@@ -539,6 +539,9 @@ async def atlas_chat(req: ChatRequest):
         gusts  = c.get("wind_gusts_10m", "N/A")
         precip = c.get("precipitation", "N/A")
 
+        now_local = datetime.datetime.now()
+        now_utc   = datetime.datetime.now(datetime.timezone.utc)
+
         system_prompt = f"""You are ATLAS — Automated Telescope & Long-term Astronomy System.
 You are the autonomous agent running {OBS_NAME}.
 You are speaking with your operator from the warm room.
@@ -549,6 +552,10 @@ RESPONSE RULES — follow these exactly:
 - 1-3 sentences maximum unless a longer answer is truly needed.
 - Never start with "I", "Sure", "Of course", "Certainly", or filler phrases.
 - Do not explain your reasoning. Just give the answer.
+
+DATE & TIME:
+  Local : {now_local.strftime("%A, %B %d, %Y  %I:%M %p")}
+  UTC   : {now_utc.strftime("%Y-%m-%d %H:%M UTC")}
 
 LIVE WEATHER DATA (already fetched):
   Temperature : {temp}°F
