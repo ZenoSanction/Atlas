@@ -50,6 +50,32 @@ CONFIG = load_config()
 SERVER = f"http://{CONFIG['observatory_ip']}:5000"
 
 # ---------------------------------------------------------------------------
+# Time / unit helpers
+# ---------------------------------------------------------------------------
+def _fmt_time(time_str: str) -> str:
+    """Convert an ISO datetime string or HH:MM to 12-hour AM/PM format (e.g. 9:00PM)."""
+    try:
+        # Handle "2026-05-08T21:00", "2026-05-08T21:00:00.000", or bare "21:00"
+        if "T" in time_str:
+            hhmm = time_str[11:16]
+        else:
+            hhmm = time_str[-5:]
+        h, m = int(hhmm[:2]), int(hhmm[3:5])
+        period = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        return f"{h12}:{m:02d}{period}"
+    except Exception:
+        return time_str
+
+def _fmt_datetime(iso: str) -> str:
+    """Convert an ISO datetime string to readable 12-hour format (e.g. May 8  9:00 PM)."""
+    try:
+        dt = datetime.datetime.fromisoformat(iso)
+        return dt.strftime("%b %-d  %I:%M %p").replace("  ", "  ")
+    except Exception:
+        return iso
+
+# ---------------------------------------------------------------------------
 # Colors & fonts
 # ---------------------------------------------------------------------------
 BG          = "#0d0d1a"
@@ -74,16 +100,18 @@ FONT_REASON = ("Segoe UI", 11)
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
+_session = requests.Session()
+
 def api_get(path: str, timeout: int = 5) -> dict:
     try:
-        r = requests.get(f"{SERVER}{path}", timeout=timeout)
+        r = _session.get(f"{SERVER}{path}", timeout=timeout)
         return r.json()
     except Exception as e:
         return {"error": str(e)}
 
 def api_post(path: str, data: dict = None, timeout: int = 10) -> dict:
     try:
-        r = requests.post(f"{SERVER}{path}", json=data or {}, timeout=timeout)
+        r = _session.post(f"{SERVER}{path}", json=data or {}, timeout=timeout)
         return r.json()
     except Exception as e:
         return {"error": str(e)}
@@ -299,6 +327,7 @@ class ATLASDashboard(tk.Tk):
         self.minsize(1024, 700)
         self.configure(bg=BG)
 
+        self._poll_running = {}     # guard against overlapping poll threads
         self._build_ui()
         self._start_polling()
 
@@ -483,7 +512,8 @@ class ATLASDashboard(tk.Tk):
         self._banner_verdict.configure(text=f"{sym}  {verdict}", bg=color, fg=fg)
         self._banner_reason.configure(text=reason, bg=color, fg=fg)
         self._banner_time.configure(
-            text=f"Last assessed: {updated}" if updated else "", bg=color, fg=fg)
+            text=f"Last assessed: {_fmt_datetime(updated)}" if updated else "",
+            bg=color, fg=fg)
 
     # ── Telescope Tab ────────────────────────────────────────────────────────
 
@@ -644,6 +674,8 @@ class ATLASDashboard(tk.Tk):
             fc, font=FONT_MONO, bg=BG_PANEL, fg=FG,
             insertbackground=FG, relief="flat", state="disabled")
         self._forecast_text.grid(row=0, column=0, sticky="nsew")
+        self._btn(fc, "↻ Refresh Forecast", self._refresh_forecast,
+                  ACCENT, 18).grid(row=1, column=0, pady=(6, 0), sticky="w")
 
     # ── Planning Tab ─────────────────────────────────────────────────────────
 
@@ -652,6 +684,7 @@ class ATLASDashboard(tk.Tk):
         f.columnconfigure(0, weight=1)
         f.columnconfigure(1, weight=1)
         f.rowconfigure(1, weight=1)
+        f.rowconfigure(2, weight=2)
 
         # Moon info
         mc = self._card(f, "Moon", 0, 0)
@@ -670,8 +703,8 @@ class ATLASDashboard(tk.Tk):
         self._btn(oc, "Look Up", self._lookup_object, ACCENT, 10).grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        # Results
-        rc = self._card(f, "Tonight's Best Targets", 1, 0, colspan=2)
+        # Hourly forecast
+        rc = self._card(f, "Tonight's Hourly Forecast", 1, 0, colspan=2)
         rc.columnconfigure(0, weight=1)
         rc.rowconfigure(0, weight=1)
         self._targets_text = scrolledtext.ScrolledText(
@@ -679,7 +712,25 @@ class ATLASDashboard(tk.Tk):
             insertbackground=FG, relief="flat", state="disabled")
         self._targets_text.grid(row=0, column=0, sticky="nsew")
         self._btn(rc, "↻ Refresh Targets", self._refresh_targets,
-                  ACCENT, 18).grid(row=1, column=0, pady=(6, 0))
+                  ACCENT, 18).grid(row=1, column=0, pady=(6, 0), sticky="w")
+
+        # ATLAS Session Plan
+        pc = self._card(f, "ATLAS Session Plan", 2, 0, colspan=2)
+        pc.columnconfigure(0, weight=1)
+        pc.rowconfigure(0, weight=1)
+        self._plan_text = scrolledtext.ScrolledText(
+            pc, font=FONT_MONO, bg=BG_PANEL, fg=FG,
+            insertbackground=FG, relief="flat", state="disabled", wrap="word")
+        self._plan_text.grid(row=0, column=0, sticky="nsew")
+
+        btn_row = tk.Frame(pc, bg=BG_CARD)
+        btn_row.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self._plan_btn = self._btn(btn_row, "✦ Generate Session Plan",
+                                   self._generate_session_plan, ACCENT, 22)
+        self._plan_btn.pack(side="left")
+        self._plan_status = tk.Label(btn_row, text="", font=FONT_SMALL,
+                                     bg=BG_CARD, fg=FG_DIM)
+        self._plan_status.pack(side="left", padx=(12, 0))
 
     # ── Session Tab ──────────────────────────────────────────────────────────
 
@@ -720,24 +771,80 @@ class ATLASDashboard(tk.Tk):
         f.columnconfigure(1, weight=2)
         f.rowconfigure(1, weight=1)
 
-        # Controls
+        self._wd_thresholds_loaded = False  # populate entries only on first poll
+
+        # ── Controls card ──
         cc = self._card(f, "Watchdog Controls", 0, 0)
+
         self._wd_status_label = tk.Label(cc, text="● STOPPED", font=FONT_HEAD,
                                           bg=BG_CARD, fg=NOGO_COLOR)
-        self._wd_status_label.pack(pady=(0, 8))
-        self._btn(cc, "▶ Start Watchdog", self._start_watchdog, GO_COLOR, 18).pack(fill="x", pady=2)
+        self._wd_status_label.pack(pady=(0, 10))
+
+        self._btn(cc, "▶ Start Watchdog", self._start_watchdog, GO_COLOR,  18).pack(fill="x", pady=2)
         self._btn(cc, "■ Stop Watchdog",  self._stop_watchdog,  NOGO_COLOR, 18).pack(fill="x", pady=2)
 
-        # Thresholds
-        tc = self._card(f, "Thresholds", 0, 1)
-        tc.columnconfigure(1, weight=1)
-        self._wd_cloud = self._label_pair(tc, "Cloud Cover Limit", 0)
-        self._wd_wind  = self._label_pair(tc, "Wind Speed Limit", 1)
-        self._wd_gusts = self._label_pair(tc, "Gust Limit", 2)
-        self._wd_humid = self._label_pair(tc, "Humidity Limit", 3)
-        self._wd_dew   = self._label_pair(tc, "Dew Spread Limit", 4)
+        ttk.Separator(cc, orient="horizontal").pack(fill="x", pady=10)
 
-        # Alert log
+        # Poll interval
+        interval_row = tk.Frame(cc, bg=BG_CARD)
+        interval_row.pack(fill="x")
+        tk.Label(interval_row, text="Poll interval (sec):", font=FONT_SMALL,
+                 bg=BG_CARD, fg=FG_DIM).pack(side="left")
+        self._wd_interval_entry = tk.Entry(interval_row, font=FONT_BODY,
+                                            bg=BG_PANEL, fg=FG,
+                                            insertbackground=FG, relief="flat", width=6)
+        self._wd_interval_entry.insert(0, "120")
+        self._wd_interval_entry.pack(side="left", padx=(8, 0))
+
+        ttk.Separator(cc, orient="horizontal").pack(fill="x", pady=10)
+
+        # Auto-actions
+        self._wd_auto_stop = tk.BooleanVar(value=True)
+        self._wd_auto_park = tk.BooleanVar(value=False)
+        tk.Checkbutton(cc, text="Auto-stop sequence on NO-GO",
+                       variable=self._wd_auto_stop,
+                       bg=BG_CARD, fg=FG, selectcolor=BG_PANEL,
+                       activebackground=BG_CARD, activeforeground=FG,
+                       font=FONT_SMALL).pack(anchor="w", pady=2)
+        tk.Checkbutton(cc, text="Auto-park telescope on NO-GO",
+                       variable=self._wd_auto_park,
+                       bg=BG_CARD, fg=FG, selectcolor=BG_PANEL,
+                       activebackground=BG_CARD, activeforeground=FG,
+                       font=FONT_SMALL).pack(anchor="w", pady=2)
+
+        # ── Thresholds card (editable) ──
+        tc = self._card(f, "Alert Thresholds  (edit and Save to apply)", 0, 1)
+        tc.columnconfigure(1, weight=1)
+        tc.columnconfigure(2, weight=0)
+
+        def _thresh_row(label, row, default, unit):
+            tk.Label(tc, text=label, font=FONT_SMALL,
+                     bg=BG_CARD, fg=FG_DIM, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=3)
+            entry = tk.Entry(tc, font=FONT_BODY, bg=BG_PANEL, fg=FG,
+                             insertbackground=FG, relief="flat", width=8)
+            entry.insert(0, str(default))
+            entry.grid(row=row, column=1, sticky="w", padx=(8, 4), pady=3)
+            tk.Label(tc, text=unit, font=FONT_SMALL,
+                     bg=BG_CARD, fg=FG_DIM).grid(row=row, column=2, sticky="w")
+            return entry
+
+        self._wd_cloud_entry = _thresh_row("Cloud Cover Limit",  0,  60,   "%")
+        self._wd_wind_entry  = _thresh_row("Wind Speed Limit",   1,  22,   "mph")
+        self._wd_gusts_entry = _thresh_row("Wind Gust Limit",    2,  31,   "mph")
+        self._wd_humid_entry = _thresh_row("Humidity Limit",     3,  90,   "%")
+        self._wd_dew_entry   = _thresh_row("Dew Spread Limit",   4,  4.5,  "°F")
+        self._wd_precip_entry= _thresh_row("Precipitation Limit",5,  0.005,"in")
+
+        btn_row = tk.Frame(tc, bg=BG_CARD)
+        btn_row.grid(row=6, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        self._btn(btn_row, "💾 Save Thresholds", self._save_watchdog_thresholds,
+                  ACCENT, 18).pack(side="left")
+        self._wd_save_status = tk.Label(btn_row, text="", font=FONT_SMALL,
+                                         bg=BG_CARD, fg=GO_COLOR)
+        self._wd_save_status.pack(side="left", padx=(12, 0))
+
+        # ── Alert log ──
         ac = self._card(f, "Alert Log", 1, 0, colspan=2)
         ac.columnconfigure(0, weight=1)
         ac.rowconfigure(0, weight=1)
@@ -745,6 +852,8 @@ class ATLASDashboard(tk.Tk):
             ac, font=FONT_MONO, bg=BG_PANEL, fg=FG,
             insertbackground=FG, relief="flat", state="disabled")
         self._wd_log.grid(row=0, column=0, sticky="nsew")
+        self._btn(ac, "Clear Log", lambda: self._set_text(self._wd_log, ""),
+                  "#555577", 10).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
     # ── ATLAS Chat Tab ───────────────────────────────────────────────────────
 
@@ -807,7 +916,11 @@ class ATLASDashboard(tk.Tk):
 
     def _chat_append(self, speaker: str, text: str):
         self._chat_display.configure(state="normal")
-        timestamp = datetime.datetime.now().strftime("%H:%M")
+        # Trim chat history to prevent unbounded memory growth
+        line_count = int(self._chat_display.index("end-1c").split(".")[0])
+        if line_count > 400:
+            self._chat_display.delete("1.0", f"{line_count - 300}.0")
+        timestamp = datetime.datetime.now().strftime("%I:%M %p")
         if speaker == "ATLAS":
             self._chat_display.insert("end", f"\n[{timestamp}] ATLAS: ", "atlas")
         elif speaker == "You":
@@ -876,7 +989,7 @@ class ATLASDashboard(tk.Tk):
             if _chat_busy.is_set():
                 self._listen_indicator.configure(text="⏳ ATLAS is responding...")
                 return
-            self._listen_indicator.configure(text="⏳ ATLAS is thinking...")
+            self._listen_indicator.configure(text="⏳ Asking ATLAS...")
             self._chat_append("You", text)
             threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
         self.after(0, _handle)
@@ -941,12 +1054,68 @@ class ATLASDashboard(tk.Tk):
         speak(f"Pre-session check complete. {status.get('verdict')}. {status.get('reason')}")
 
     def _start_watchdog(self):
+        # Apply current threshold settings before starting
+        self._save_watchdog_thresholds(silent=True)
         result = api_post("/watchdog/start")
-        self._log_session(f"Watchdog started: {result}")
+        self._log_session(f"Watchdog started: {result.get('status', result)}")
 
     def _stop_watchdog(self):
         result = api_post("/watchdog/stop")
-        self._log_session(f"Watchdog stopped: {result}")
+        self._log_session(f"Watchdog stopped: {result.get('status', result)}")
+
+    def _save_watchdog_thresholds(self, silent=False):
+        threading.Thread(
+            target=self._save_thresholds_worker, args=(silent,), daemon=True
+        ).start()
+
+    def _save_thresholds_worker(self, silent=False):
+        try:
+            thresholds = {
+                "cloud_cover_limit_pct":  float(self._wd_cloud_entry.get()),
+                "wind_speed_limit_mph":   float(self._wd_wind_entry.get()),
+                "wind_gust_limit_mph":    float(self._wd_gusts_entry.get()),
+                "humidity_limit_pct":     float(self._wd_humid_entry.get()),
+                "dew_spread_limit_f":     float(self._wd_dew_entry.get()),
+                "precip_limit_in":        float(self._wd_precip_entry.get()),
+                "poll_interval_sec":      int(self._wd_interval_entry.get()),
+                "auto_stop_sequence":     self._wd_auto_stop.get(),
+                "auto_park_telescope":    self._wd_auto_park.get(),
+            }
+        except ValueError as e:
+            if not silent:
+                self.after(0, lambda: self._wd_save_status.configure(
+                    text=f"Invalid value: {e}", fg=NOGO_COLOR))
+            return
+        result = api_post("/watchdog/thresholds", thresholds)
+        if not silent:
+            msg = "Saved." if "error" not in result else f"Error: {result['error']}"
+            clr = GO_COLOR if "error" not in result else NOGO_COLOR
+            self.after(0, lambda: self._wd_save_status.configure(text=msg, fg=clr))
+            def _clear_status():
+                try:
+                    self._wd_save_status.configure(text="")
+                except Exception:
+                    pass
+            self.after(3000, _clear_status)
+
+    def _generate_session_plan(self):
+        self._plan_btn.configure(state="disabled", text="⏳ Generating...")
+        self._plan_status.configure(text="Asking ATLAS — this takes about 15 seconds...")
+        self._set_text(self._plan_text, "")
+        threading.Thread(target=self._session_plan_worker, daemon=True).start()
+
+    def _session_plan_worker(self):
+        result = api_post("/atlas/session-plan", timeout=60)
+        plan = result.get("plan", "No plan returned.")
+        generated = result.get("generated", "")
+        timestamp = _fmt_datetime(generated) if generated else ""
+
+        def update():
+            self._set_text(self._plan_text, plan)
+            self._plan_btn.configure(state="normal", text="✦ Generate Session Plan")
+            self._plan_status.configure(
+                text=f"Generated {timestamp}" if timestamp else "")
+        self.after(0, update)
 
     def _lookup_object(self):
         name = self._lookup_entry.get().strip()
@@ -961,6 +1130,41 @@ class ATLASDashboard(tk.Tk):
                        f"Looking up {name}...\nWeather: {weather.get('verdict')}\n"
                        f"Moon: {moon.get('phase_name')} {moon.get('illumination_pct')}%")
 
+    def _refresh_forecast(self):
+        threading.Thread(target=self._forecast_worker, daemon=True).start()
+
+    def _forecast_worker(self):
+        self._set_text(self._forecast_text, "Fetching forecast...")
+        data = api_get("/weather/forecast?hours=24", timeout=15)
+        if isinstance(data, list) and data:
+            go   = sum(1 for h in data if h.get("verdict") == "GO")
+            caut = sum(1 for h in data if h.get("verdict") == "CAUTION")
+            nogo = sum(1 for h in data if h.get("verdict") == "NO-GO")
+            lines = []
+            lines.append(f"Next 24 hours:  GO={go}h   CAUTION={caut}h   NO-GO={nogo}h")
+            lines.append("")
+            lines.append(f"{'Time':<9} {'Verdict':<9} {'Cloud':>6} {'Wind':>7} {'Gusts':>7} {'Humid':>6} {'DewSprd':>8} {'Precip%':>8}")
+            lines.append("─" * 72)
+            for h in data:
+                t      = _fmt_time(h.get("time", ""))
+                verdict = h.get("verdict", "—")
+                cloud  = h.get("cloud_cover_pct", 0)
+                wind   = h.get("wind_speed_mph", 0)
+                gusts  = h.get("wind_gusts_mph", 0)
+                humid  = h.get("humidity_pct", 0)
+                dew    = h.get("dew_spread_f", 0)
+                precip = h.get("precip_probability_pct", 0)
+                lines.append(
+                    f"{t:<9} {verdict:<9} {cloud:>5.0f}%"
+                    f" {wind:>6.1f}  {gusts:>5.1f}"
+                    f"  {humid:>5.0f}%  {dew:>6.1f}°F  {precip:>6.0f}%"
+                )
+            self._set_text(self._forecast_text, "\n".join(lines))
+        elif isinstance(data, dict) and "error" in data:
+            self._set_text(self._forecast_text, f"Error: {data['error']}")
+        else:
+            self._set_text(self._forecast_text, "No forecast data returned.")
+
     def _refresh_targets(self):
         threading.Thread(target=self._targets_worker, daemon=True).start()
 
@@ -970,11 +1174,11 @@ class ATLASDashboard(tk.Tk):
         if isinstance(forecast, list):
             go_hours = sum(1 for h in forecast if h.get("verdict") == "GO")
             text = f"Good imaging hours in next 12h: {go_hours}\n\n"
-            text += f"{'Time':<8} {'Verdict':<10} {'Cloud':<8} {'Wind':<8} {'Humid':<8}\n"
+            text += f"{'Time':<9} {'Verdict':<10} {'Cloud':<8} {'Wind':<8} {'Humid':<8}\n"
             text += "─" * 50 + "\n"
             for h in forecast:
-                t = h.get("time", "")[-5:]
-                text += (f"{t:<8} {h.get('verdict',''):<10} "
+                t = _fmt_time(h.get("time", ""))
+                text += (f"{t:<9} {h.get('verdict',''):<10} "
                          f"{h.get('cloud_cover_pct',0):<8.0f}% "
                          f"{h.get('wind_speed_mph',0):<8.1f} "
                          f"{h.get('humidity_pct',0):<8.0f}%\n")
@@ -993,7 +1197,7 @@ class ATLASDashboard(tk.Tk):
         self.after(0, lambda: self._update_banner(verdict, reason, updated))
 
     def _log_session(self, msg: str):
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.datetime.now().strftime("%I:%M:%S %p")
         self._append_text(self._session_log, f"[{timestamp}] {msg}\n")
 
     def _set_text(self, widget, text: str):
@@ -1002,9 +1206,13 @@ class ATLASDashboard(tk.Tk):
         widget.insert("end", text)
         widget.configure(state="disabled")
 
-    def _append_text(self, widget, text: str):
+    def _append_text(self, widget, text: str, max_lines: int = 500):
         widget.configure(state="normal")
         widget.insert("end", text)
+        # Trim to prevent unbounded memory growth
+        line_count = int(widget.index("end-1c").split(".")[0])
+        if line_count > max_lines + 100:
+            widget.delete("1.0", f"{line_count - max_lines}.0")
         widget.see("end")
         widget.configure(state="disabled")
 
@@ -1016,200 +1224,256 @@ class ATLASDashboard(tk.Tk):
         self._poll_camera()
         self._poll_guiding()
         self._poll_weather()
+        self._poll_forecast()
         self._poll_watchdog()
         self._poll_moon()
 
     def _poll_status(self):
+        if self._poll_running.get("status"):
+            self.after(30_000, self._poll_status)
+            return
+        self._poll_running["status"] = True
         def worker():
-            data = api_get("/status")
-            verdict = data.get("verdict", "UNKNOWN")
-            reason  = data.get("reason", "No data")
-            updated = data.get("last_updated", "")
-            self.after(0, lambda: self._update_banner(verdict, reason, updated))
+            try:
+                data = api_get("/status")
+                verdict = data.get("verdict", "UNKNOWN")
+                reason  = data.get("reason", "No data")
+                updated = data.get("last_updated", "")
+                self.after(0, lambda: self._update_banner(verdict, reason, updated))
+            finally:
+                self._poll_running["status"] = False
         threading.Thread(target=worker, daemon=True).start()
         self.after(30_000, self._poll_status)
 
     def _poll_telescope(self):
+        if self._poll_running.get("telescope"):
+            self.after(5_000, self._poll_telescope)
+            return
+        self._poll_running["telescope"] = True
         def worker():
-            data = api_get("/telescope")
-            if "error" not in data:
-                connected = data.get("Connected", False)
-                ra  = data.get("RightAscension", 0)
-                dec = data.get("Declination", 0)
-                alt = data.get("Altitude", 0)
-                az  = data.get("Azimuth", 0)
+            try:
+                data = api_get("/telescope")
+                if "error" not in data:
+                    connected = data.get("Connected", False)
+                    ra  = data.get("RightAscension", 0)
+                    dec = data.get("Declination", 0)
+                    alt = data.get("Altitude", 0)
+                    az  = data.get("Azimuth", 0)
 
-                def update():
-                    status = "Connected" if connected else "Disconnected"
-                    color  = FG if connected else NOGO_COLOR
-                    self._tel_connected.configure(text=status, fg=color)
-                    self._ov_tel_status.configure(text=status, fg=color)
-                    ra_str = f"{ra:.4f}°"
-                    self._tel_ra.configure(text=ra_str)
-                    self._ov_tel_ra.configure(text=ra_str)
-                    dec_str = f"{dec:.4f}°"
-                    self._tel_dec.configure(text=dec_str)
-                    self._ov_tel_dec.configure(text=dec_str)
-                    alt_str = f"{alt:.1f}°"
-                    self._tel_alt.configure(text=alt_str)
-                    self._ov_tel_alt.configure(text=alt_str)
-                    self._tel_az.configure(text=f"{az:.1f}°")
-                    self._tel_tracking.configure(
-                        text="Yes" if data.get("Tracking") else "No")
-                    self._tel_slewing.configure(
-                        text="Yes" if data.get("Slewing") else "No")
-                    self._tel_pier.configure(text=data.get("SideOfPier", "—"))
-                self.after(0, update)
+                    def update():
+                        status = "Connected" if connected else "Disconnected"
+                        color  = FG if connected else NOGO_COLOR
+                        self._tel_connected.configure(text=status, fg=color)
+                        self._ov_tel_status.configure(text=status, fg=color)
+                        ra_str = f"{ra:.4f}°"
+                        self._tel_ra.configure(text=ra_str)
+                        self._ov_tel_ra.configure(text=ra_str)
+                        dec_str = f"{dec:.4f}°"
+                        self._tel_dec.configure(text=dec_str)
+                        self._ov_tel_dec.configure(text=dec_str)
+                        alt_str = f"{alt:.1f}°"
+                        self._tel_alt.configure(text=alt_str)
+                        self._ov_tel_alt.configure(text=alt_str)
+                        self._tel_az.configure(text=f"{az:.1f}°")
+                        self._tel_tracking.configure(
+                            text="Yes" if data.get("Tracking") else "No")
+                        self._tel_slewing.configure(
+                            text="Yes" if data.get("Slewing") else "No")
+                        self._tel_pier.configure(text=data.get("SideOfPier", "—"))
+                    self.after(0, update)
+            finally:
+                self._poll_running["telescope"] = False
         threading.Thread(target=worker, daemon=True).start()
         self.after(5_000, self._poll_telescope)
 
     def _poll_camera(self):
+        if self._poll_running.get("camera"):
+            self.after(5_000, self._poll_camera)
+            return
+        self._poll_running["camera"] = True
         def worker():
-            data = api_get("/camera")
-            if "error" not in data:
-                def update():
-                    connected = data.get("Connected", False)
-                    self._cam_connected.configure(
-                        text="Connected" if connected else "Disconnected",
-                        fg=FG if connected else NOGO_COLOR)
-                    self._cam_name.configure(text=data.get("Name", "—"))
-                    temp = data.get("Temperature")
-                    self._cam_temp.configure(
-                        text=f"{temp:.1f}°C" if temp is not None else "—")
-                    self._ov_cam_temp.configure(
-                        text=f"{temp:.1f}°C" if temp is not None else "—")
-                    self._cam_gain.configure(text=str(data.get("Gain", "—")))
-                    self._cam_offset.configure(text=str(data.get("Offset", "—")))
-                    binning = data.get("BinX", 1)
-                    self._cam_binning.configure(text=f"{binning}x{binning}")
-                    exposing = data.get("IsExposing", False)
-                    self._cam_exposing.configure(
-                        text="Yes" if exposing else "No",
-                        fg=GO_COLOR if exposing else FG)
-                    self._ov_cam_exp.configure(
-                        text="Yes" if exposing else "No",
-                        fg=GO_COLOR if exposing else FG)
-                    self._cam_exposure.configure(
-                        text=f"{data.get('LastExposureDuration', '—')}s")
-                self.after(0, update)
+            try:
+                data = api_get("/camera")
+                if "error" not in data:
+                    def update():
+                        connected = data.get("Connected", False)
+                        self._cam_connected.configure(
+                            text="Connected" if connected else "Disconnected",
+                            fg=FG if connected else NOGO_COLOR)
+                        self._cam_name.configure(text=data.get("Name", "—"))
+                        temp = data.get("Temperature")
+                        self._cam_temp.configure(
+                            text=f"{temp:.1f}°C" if temp is not None else "—")
+                        self._ov_cam_temp.configure(
+                            text=f"{temp:.1f}°C" if temp is not None else "—")
+                        self._cam_gain.configure(text=str(data.get("Gain", "—")))
+                        self._cam_offset.configure(text=str(data.get("Offset", "—")))
+                        binning = data.get("BinX", 1)
+                        self._cam_binning.configure(text=f"{binning}x{binning}")
+                        exposing = data.get("IsExposing", False)
+                        self._cam_exposing.configure(
+                            text="Yes" if exposing else "No",
+                            fg=GO_COLOR if exposing else FG)
+                        self._ov_cam_exp.configure(
+                            text="Yes" if exposing else "No",
+                            fg=GO_COLOR if exposing else FG)
+                        self._cam_exposure.configure(
+                            text=f"{data.get('LastExposureDuration', '—')}s")
+                    self.after(0, update)
+            finally:
+                self._poll_running["camera"] = False
         threading.Thread(target=worker, daemon=True).start()
         self.after(5_000, self._poll_camera)
 
     def _poll_guiding(self):
+        if self._poll_running.get("guiding"):
+            self.after(5_000, self._poll_guiding)
+            return
+        self._poll_running["guiding"] = True
         def worker():
-            state = api_get("/guiding/state")
-            stats = api_get("/guiding/stats")
+            try:
+                state = api_get("/guiding/state")
+                stats = api_get("/guiding/stats")
 
-            def update():
-                s = state.get("result", "—")
-                self._guide_state.configure(text=s)
-                self._ov_guide_state.configure(text=s)
+                def update():
+                    s = state.get("result", "—")
+                    self._guide_state.configure(text=s)
+                    self._ov_guide_state.configure(text=s)
 
-                if "result" in stats:
-                    r = stats["result"]
-                    rms_total = r.get("rms_total", 0)
-                    rms_ra    = r.get("rms_ra", 0)
-                    rms_dec   = r.get("rms_dec", 0)
-                    self._guide_rms.configure(text=f"{rms_total:.2f}\"")
-                    self._guide_rms_ra.configure(text=f"{rms_ra:.2f}\"")
-                    self._guide_rms_dec.configure(text=f"{rms_dec:.2f}\"")
-                    self._ov_guide_rms.configure(text=f"{rms_total:.2f}\"")
-                    self._ov_guide_ra.configure(text=f"{rms_ra:.2f}\"")
-                    self._ov_guide_dec.configure(text=f"{rms_dec:.2f}\"")
-                    self._guide_peak_ra.configure(
-                        text=f"{r.get('peak_ra', 0):.2f}\"")
-                    self._guide_peak_dec.configure(
-                        text=f"{r.get('peak_dec', 0):.2f}\"")
-                    self._guide_snr.configure(
-                        text=f"{r.get('snr', 0):.1f}")
+                    if "result" in stats:
+                        r = stats["result"]
+                        rms_total = r.get("rms_total", 0)
+                        rms_ra    = r.get("rms_ra", 0)
+                        rms_dec   = r.get("rms_dec", 0)
+                        self._guide_rms.configure(text=f"{rms_total:.2f}\"")
+                        self._guide_rms_ra.configure(text=f"{rms_ra:.2f}\"")
+                        self._guide_rms_dec.configure(text=f"{rms_dec:.2f}\"")
+                        self._ov_guide_rms.configure(text=f"{rms_total:.2f}\"")
+                        self._ov_guide_ra.configure(text=f"{rms_ra:.2f}\"")
+                        self._ov_guide_dec.configure(text=f"{rms_dec:.2f}\"")
+                        self._guide_peak_ra.configure(
+                            text=f"{r.get('peak_ra', 0):.2f}\"")
+                        self._guide_peak_dec.configure(
+                            text=f"{r.get('peak_dec', 0):.2f}\"")
+                        self._guide_snr.configure(
+                            text=f"{r.get('snr', 0):.1f}")
 
-                    # Update graph
-                    if self._guide_canvas:
-                        self._guide_ra_data.append(rms_ra)
-                        self._guide_dec_data.append(rms_dec)
-                        if len(self._guide_ra_data) > 120:
-                            self._guide_ra_data.pop(0)
-                            self._guide_dec_data.pop(0)
-                        x = list(range(len(self._guide_ra_data)))
-                        self._guide_ra_line.set_data(x, self._guide_ra_data)
-                        self._guide_dec_line.set_data(x, self._guide_dec_data)
-                        self._guide_ax.relim()
-                        self._guide_ax.autoscale_view()
-                        self._guide_canvas.draw()
-            self.after(0, update)
+                        # Update graph — draw_idle() is safe to call from UI thread
+                        if self._guide_canvas:
+                            self._guide_ra_data.append(rms_ra)
+                            self._guide_dec_data.append(rms_dec)
+                            if len(self._guide_ra_data) > 120:
+                                self._guide_ra_data.pop(0)
+                                self._guide_dec_data.pop(0)
+                            x = list(range(len(self._guide_ra_data)))
+                            self._guide_ra_line.set_data(x, self._guide_ra_data)
+                            self._guide_dec_line.set_data(x, self._guide_dec_data)
+                            self._guide_ax.relim()
+                            self._guide_ax.autoscale_view()
+                            self._guide_canvas.draw_idle()
+                self.after(0, update)
+            finally:
+                self._poll_running["guiding"] = False
         threading.Thread(target=worker, daemon=True).start()
         self.after(5_000, self._poll_guiding)
 
     def _poll_weather(self):
+        if self._poll_running.get("weather"):
+            self.after(60_000, self._poll_weather)
+            return
+        self._poll_running["weather"] = True
         def worker():
-            data = api_get("/weather")
-            if "error" not in data:
-                def update():
-                    v = data.get("verdict", "—")
-                    vc = {"GO": GO_COLOR, "CAUTION": CAUTION_COLOR,
-                          "NO-GO": NOGO_COLOR}.get(v, FG)
-                    self._wx_verdict.configure(text=v, fg=vc)
-                    self._wx_reason.configure(text=data.get("reason", "—"))
-                    self._wx_cloud.configure(
-                        text=f"{data.get('cloud_cover_pct', '—')}%")
-                    self._ov_wx_cloud.configure(
-                        text=f"{data.get('cloud_cover_pct', '—')}%")
-                    self._wx_temp.configure(
-                        text=f"{data.get('temperature_f', '—')}°F")
-                    self._wx_humid.configure(
-                        text=f"{data.get('humidity_pct', '—')}%")
-                    self._ov_wx_humid.configure(
-                        text=f"{data.get('humidity_pct', '—')}%")
-                    self._wx_dew.configure(
-                        text=f"{data.get('dew_point_f', '—')}°F")
-                    spread = data.get("temperature_f", 70) - data.get("dew_point_f", 60) \
-                        if data.get("temperature_f") and data.get("dew_point_f") else None
-                    self._wx_spread.configure(
-                        text=f"{spread:.1f}°F" if spread else "—")
-                    self._ov_wx_dew.configure(
-                        text=f"{spread:.1f}°F" if spread else "—")
-                    self._wx_wind.configure(
-                        text=f"{data.get('wind_speed_mph', '—')} mph")
-                    self._ov_wx_wind.configure(
-                        text=f"{data.get('wind_speed_mph', '—')} mph")
-                    self._wx_gusts.configure(
-                        text=f"{data.get('wind_gusts_mph', '—')} mph")
-                    self._wx_precip.configure(
-                        text=f"{data.get('precipitation_in', '—')}\"")
-                    self._wx_pressure.configure(
-                        text=f"{data.get('pressure_hpa', '—')} hPa")
-                self.after(0, update)
+            try:
+                data = api_get("/weather")
+                if "error" not in data:
+                    def update():
+                        v = data.get("verdict", "—")
+                        vc = {"GO": GO_COLOR, "CAUTION": CAUTION_COLOR,
+                              "NO-GO": NOGO_COLOR}.get(v, FG)
+                        self._wx_verdict.configure(text=v, fg=vc)
+                        self._wx_reason.configure(text=data.get("reason", "—"))
+                        self._wx_cloud.configure(
+                            text=f"{data.get('cloud_cover_pct', '—')}%")
+                        self._ov_wx_cloud.configure(
+                            text=f"{data.get('cloud_cover_pct', '—')}%")
+                        self._wx_temp.configure(
+                            text=f"{data.get('temperature_f', '—')}°F")
+                        self._wx_humid.configure(
+                            text=f"{data.get('humidity_pct', '—')}%")
+                        self._ov_wx_humid.configure(
+                            text=f"{data.get('humidity_pct', '—')}%")
+                        self._wx_dew.configure(
+                            text=f"{data.get('dew_point_f', '—')}°F")
+                        spread = data.get("temperature_f", 70) - data.get("dew_point_f", 60) \
+                            if data.get("temperature_f") and data.get("dew_point_f") else None
+                        self._wx_spread.configure(
+                            text=f"{spread:.1f}°F" if spread else "—")
+                        self._ov_wx_dew.configure(
+                            text=f"{spread:.1f}°F" if spread else "—")
+                        self._wx_wind.configure(
+                            text=f"{data.get('wind_speed_mph', '—')} mph")
+                        self._ov_wx_wind.configure(
+                            text=f"{data.get('wind_speed_mph', '—')} mph")
+                        self._wx_gusts.configure(
+                            text=f"{data.get('wind_gusts_mph', '—')} mph")
+                        self._wx_precip.configure(
+                            text=f"{data.get('precipitation_in', '—')}\"")
+                        self._wx_pressure.configure(
+                            text=f"{data.get('pressure_hpa', '—')} hPa")
+                    self.after(0, update)
+            finally:
+                self._poll_running["weather"] = False
         threading.Thread(target=worker, daemon=True).start()
         self.after(60_000, self._poll_weather)
 
+    def _poll_forecast(self):
+        threading.Thread(target=self._forecast_worker, daemon=True).start()
+        self.after(1_800_000, self._poll_forecast)  # refresh every 30 minutes
+
     def _poll_watchdog(self):
+        if self._poll_running.get("watchdog"):
+            self.after(15_000, self._poll_watchdog)
+            return
+        self._poll_running["watchdog"] = True
         def worker():
-            data = api_get("/watchdog")
-            if "error" not in data:
-                def update():
-                    running = data.get("enabled", False)
-                    self._wd_status_label.configure(
-                        text="● RUNNING" if running else "● STOPPED",
-                        fg=GO_COLOR if running else NOGO_COLOR)
-                    self._ov_watchdog.configure(
-                        text="Running" if running else "Stopped",
-                        fg=GO_COLOR if running else FG_DIM)
-                    self._wd_cloud.configure(
-                        text=f"{data.get('cloud_cover_limit_pct', '—')}%")
-                    self._wd_wind.configure(
-                        text=f"{data.get('wind_speed_limit_mph', '—')} mph")
-                    self._wd_gusts.configure(
-                        text=f"{data.get('wind_gust_limit_mph', '—')} mph")
-                    self._wd_humid.configure(
-                        text=f"{data.get('humidity_limit_pct', '—')}%")
-                    self._wd_dew.configure(
-                        text=f"{data.get('dew_spread_limit_f', '—')}°F")
-                    alerts = data.get("alerts", [])
-                    if alerts:
-                        log_text = "\n".join(
-                            f"[{a['time']}] {a['reason']}" for a in alerts[-20:])
-                        self._set_text(self._wd_log, log_text)
-                self.after(0, update)
+            try:
+                data = api_get("/watchdog")
+                if "error" not in data:
+                    def update():
+                        running = data.get("enabled", False)
+                        self._wd_status_label.configure(
+                            text="● RUNNING" if running else "● STOPPED",
+                            fg=GO_COLOR if running else NOGO_COLOR)
+                        self._ov_watchdog.configure(
+                            text="Running" if running else "Stopped",
+                            fg=GO_COLOR if running else FG_DIM)
+
+                        # Populate editable entries on first load only
+                        if not self._wd_thresholds_loaded:
+                            self._wd_thresholds_loaded = True
+                            def _set(entry, val):
+                                entry.delete(0, "end")
+                                entry.insert(0, str(val))
+                            _set(self._wd_cloud_entry,  data.get("cloud_cover_limit_pct", 60))
+                            _set(self._wd_wind_entry,   data.get("wind_speed_limit_mph",  22))
+                            _set(self._wd_gusts_entry,  data.get("wind_gust_limit_mph",   31))
+                            _set(self._wd_humid_entry,  data.get("humidity_limit_pct",    90))
+                            _set(self._wd_dew_entry,    data.get("dew_spread_limit_f",   4.5))
+                            _set(self._wd_precip_entry, data.get("precip_limit_in",     0.005))
+                            _set(self._wd_interval_entry, data.get("poll_interval_sec",  120))
+                            self._wd_auto_stop.set(data.get("auto_stop_sequence",  True))
+                            self._wd_auto_park.set(data.get("auto_park_telescope", False))
+
+                        # Alert log — append new alerts
+                        alerts = data.get("alerts", [])
+                        if alerts:
+                            log_text = "\n".join(
+                                f"[{_fmt_datetime(a['time'])}]  {a['reason']}"
+                                for a in alerts[-50:])
+                            self._set_text(self._wd_log, log_text)
+                    self.after(0, update)
+            finally:
+                self._poll_running["watchdog"] = False
         threading.Thread(target=worker, daemon=True).start()
         self.after(15_000, self._poll_watchdog)
 
@@ -1232,7 +1496,7 @@ class ATLASDashboard(tk.Tk):
         now = datetime.datetime.now()
         utc = datetime.datetime.now(datetime.timezone.utc)
         self._clock_label.configure(
-            text=f"Local {now.strftime('%H:%M:%S')}  |  UTC {utc.strftime('%H:%M:%S')}")
+            text=f"Local {now.strftime('%I:%M:%S %p')}  |  UTC {utc.strftime('%I:%M:%S %p')}")
         self.after(1_000, self._update_clock)
 
 
