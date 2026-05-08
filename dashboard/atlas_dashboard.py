@@ -148,27 +148,44 @@ def get_whisper():
     return _whisper_model
 
 def record_and_transcribe() -> tuple[str, str]:
-    """Record from microphone and return (transcribed text, error message)."""
+    """Record from microphone, stop automatically on silence, return (text, error)."""
     try:
         import sounddevice as sd
         import numpy as np
 
-        sample_rate = 16000
-        duration    = 15
-        audio = sd.rec(int(duration * sample_rate), samplerate=sample_rate,
-                       channels=1, dtype="float32")
-        sd.wait()
-        audio = audio.flatten()
+        sample_rate      = 16000
+        chunk_frames     = int(sample_rate * 0.3)   # 300ms chunks
+        speech_threshold = 0.015
+        silence_needed   = 8                         # ~2.4s silence to stop
+        max_chunks       = 100                       # hard cap ~30s
 
-        # Trim trailing silence — stop at last chunk with meaningful audio
-        chunk = sample_rate // 4  # 0.25 second chunks
-        threshold = 0.01
-        last_active = len(audio)
-        for i in range(len(audio) - chunk, 0, -chunk):
-            if np.max(np.abs(audio[i:i+chunk])) > threshold:
-                last_active = i + chunk
-                break
-        audio = audio[:max(last_active, sample_rate)]  # keep at least 1 second
+        audio_buffer  = []
+        silence_count = 0
+        speech_count  = 0
+        recording     = False
+
+        with sd.InputStream(samplerate=sample_rate, channels=1,
+                            dtype="float32", blocksize=chunk_frames) as stream:
+            for _ in range(max_chunks):
+                chunk, _ = stream.read(chunk_frames)
+                rms = float(np.sqrt(np.mean(chunk ** 2)))
+
+                if rms > speech_threshold:
+                    if not recording:
+                        recording = True
+                    audio_buffer.append(chunk.flatten())
+                    speech_count  += 1
+                    silence_count  = 0
+                elif recording:
+                    audio_buffer.append(chunk.flatten())
+                    silence_count += 1
+                    if silence_count >= silence_needed:
+                        break  # silence detected — done
+
+        if not audio_buffer or speech_count < 2:
+            return "", "No speech detected — try speaking louder or closer to the mic."
+
+        audio = np.concatenate(audio_buffer)
     except Exception as e:
         return "", f"Microphone error: {e}"
 
@@ -176,8 +193,6 @@ def record_and_transcribe() -> tuple[str, str]:
         model = get_whisper()
         if model is None:
             return "", "Whisper failed to load."
-
-        # Pass numpy array directly — no ffmpeg needed
         result = model.transcribe(audio, fp16=False)
         text = result.get("text", "").strip()
         if not text:
