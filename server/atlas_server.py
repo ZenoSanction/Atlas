@@ -23,6 +23,7 @@ import json
 import math
 import datetime
 import logging
+import re
 import subprocess
 import threading
 import httpx
@@ -248,8 +249,10 @@ Respond with JSON only, in this exact format:
         response = ollama.chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": context}],
+            think=False,
         )
-        text = response["message"]["content"].strip()
+        raw  = response["message"]["content"]
+        text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
         # Extract JSON from response
         start = text.find("{")
         end   = text.rfind("}") + 1
@@ -569,10 +572,44 @@ When asked about weather or conditions, use the live data provided above."""
 
         def ollama_thread():
             try:
-                for chunk in ollama.chat(model=OLLAMA_MODEL, messages=messages, stream=True):
+                buffer   = ""
+                in_think = False
+                for chunk in ollama.chat(
+                    model=OLLAMA_MODEL, messages=messages, stream=True, think=False
+                ):
                     token = chunk["message"]["content"]
                     reply_parts.append(token)
-                    asyncio.run_coroutine_threadsafe(token_queue.put(token), loop)
+                    buffer += token
+
+                    # Strip <think>...</think> blocks from the stream
+                    while buffer:
+                        if in_think:
+                            end = buffer.find("</think>")
+                            if end != -1:
+                                buffer   = buffer[end + 8:].lstrip("\n")
+                                in_think = False
+                            else:
+                                buffer = buffer[-8:]  # keep partial tag
+                                break
+                        else:
+                            start = buffer.find("<think>")
+                            if start != -1:
+                                out = buffer[:start]
+                                if out:
+                                    asyncio.run_coroutine_threadsafe(
+                                        token_queue.put(out), loop)
+                                buffer   = buffer[start + 7:]
+                                in_think = True
+                            else:
+                                safe = max(0, len(buffer) - 7)
+                                if safe > 0:
+                                    asyncio.run_coroutine_threadsafe(
+                                        token_queue.put(buffer[:safe]), loop)
+                                    buffer = buffer[safe:]
+                                break
+
+                if buffer and not in_think:
+                    asyncio.run_coroutine_threadsafe(token_queue.put(buffer), loop)
             except Exception as ex:
                 log.error(f"ollama stream error: {ex}")
             finally:
@@ -586,8 +623,9 @@ When asked about weather or conditions, use the live data provided above."""
                 if token is None:
                     break
                 yield token
-            reply = "".join(reply_parts)
-            _chat_history.append({"role": "assistant", "content": reply})
+            raw   = "".join(reply_parts)
+            clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            _chat_history.append({"role": "assistant", "content": clean})
             _chat_history[:] = _chat_history[-20:]
 
         return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
