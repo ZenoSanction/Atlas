@@ -25,8 +25,10 @@ config.local.json
 *.token
 .env
 
-# Logs
+# Logs & backups
 *.log
+*.bak
+logs/
 
 # OS
 .DS_Store
