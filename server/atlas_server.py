@@ -24,6 +24,7 @@ import math
 import datetime
 import logging
 import subprocess
+import threading
 import httpx
 import ollama
 
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 
@@ -519,7 +521,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/atlas/chat")
 async def atlas_chat(req: ChatRequest):
-    """Send a message to ATLAS and get a response via Ollama."""
+    """Stream a response from ATLAS via Ollama — tokens arrive as they're generated."""
     try:
         weather_data = await fetch_weather()
         telescope    = await nina_get("/equipment/telescope")
@@ -559,18 +561,43 @@ You care deeply about data quality and equipment safety.
 When asked about weather or conditions, use the live data provided above."""
 
         _chat_history.append({"role": "user", "content": req.message})
-
         messages = [{"role": "system", "content": system_prompt}] + _chat_history[-10:]
-        response = ollama.chat(model=OLLAMA_MODEL, messages=messages)
-        reply = response["message"]["content"]
 
-        _chat_history.append({"role": "assistant", "content": reply})
-        _chat_history[:] = _chat_history[-20:]
+        token_queue: asyncio.Queue = asyncio.Queue()
+        reply_parts: list = []
+        loop = asyncio.get_event_loop()
 
-        return {"reply": reply}
+        def ollama_thread():
+            try:
+                for chunk in ollama.chat(model=OLLAMA_MODEL, messages=messages, stream=True):
+                    token = chunk["message"]["content"]
+                    reply_parts.append(token)
+                    asyncio.run_coroutine_threadsafe(token_queue.put(token), loop)
+            except Exception as ex:
+                log.error(f"ollama stream error: {ex}")
+            finally:
+                asyncio.run_coroutine_threadsafe(token_queue.put(None), loop)
+
+        threading.Thread(target=ollama_thread, daemon=True).start()
+
+        async def generate():
+            while True:
+                token = await token_queue.get()
+                if token is None:
+                    break
+                yield token
+            reply = "".join(reply_parts)
+            _chat_history.append({"role": "assistant", "content": reply})
+            _chat_history[:] = _chat_history[-20:]
+
+        return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+
     except Exception as e:
         log.error(f"atlas_chat error: {e}")
-        return {"reply": f"ATLAS is temporarily unavailable: {e}"}
+        return StreamingResponse(
+            iter([f"ATLAS is temporarily unavailable: {e}"]),
+            media_type="text/plain; charset=utf-8"
+        )
 
 @app.delete("/atlas/chat/history")
 async def clear_chat_history():
