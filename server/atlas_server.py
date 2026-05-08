@@ -567,32 +567,19 @@ EQUIPMENT STATUS:
         _chat_history.append({"role": "user", "content": req.message})
         messages = [{"role": "system", "content": system_prompt}] + _chat_history[-10:]
 
-        # Run ollama in a thread pool so it doesn't block the event loop
-        def call_ollama():
-            resp = ollama.chat(model=OLLAMA_MODEL, messages=messages)
-            return resp["message"]["content"]
-
-        raw   = await asyncio.get_event_loop().run_in_executor(None, call_ollama)
+        response = ollama.chat(model=OLLAMA_MODEL, messages=messages)
+        raw   = response["message"]["content"]
         clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        reply = clean if clean else raw  # fallback if stripping leaves nothing
 
-        _chat_history.append({"role": "assistant", "content": clean})
+        _chat_history.append({"role": "assistant", "content": reply})
         _chat_history[:] = _chat_history[-20:]
 
-        # Stream the cleaned text in small chunks for progressive display
-        async def generate():
-            size = 4
-            for i in range(0, len(clean), size):
-                yield clean[i:i + size]
-                await asyncio.sleep(0.01)
-
-        return StreamingResponse(generate(), media_type="text/plain; charset=utf-8")
+        return {"reply": reply}
 
     except Exception as e:
         log.error(f"atlas_chat error: {e}")
-        return StreamingResponse(
-            iter([f"ATLAS unavailable: {e}"]),
-            media_type="text/plain; charset=utf-8"
-        )
+        return {"reply": f"ATLAS unavailable: {e}"}
 
 @app.delete("/atlas/chat/history")
 async def clear_chat_history():

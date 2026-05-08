@@ -824,35 +824,10 @@ class ATLASDashboard(tk.Tk):
         threading.Thread(target=self._chat_worker, args=(msg,), daemon=True).start()
 
     def _chat_worker(self, msg: str):
-        self.after(0, self._chat_stream_start)
-        full_reply = ""
-        try:
-            with requests.post(f"{SERVER}/atlas/chat", json={"message": msg},
-                               stream=True, timeout=60) as r:
-                for chunk in r.iter_content(chunk_size=None):
-                    if chunk:
-                        text = chunk.decode("utf-8", errors="replace")
-                        full_reply += text
-                        self.after(0, lambda t=text: self._chat_stream_append(t))
-        except Exception as e:
-            self.after(0, lambda: self._chat_stream_append(f"[Error: {e}]"))
-        if full_reply:
-            speak(full_reply)
-
-    def _chat_stream_start(self):
-        """Open a new ATLAS response line ready to receive streaming tokens."""
-        self._chat_display.configure(state="normal")
-        timestamp = datetime.datetime.now().strftime("%H:%M")
-        self._chat_display.insert("end", f"\n[{timestamp}] ATLAS: ", "atlas")
-        self._chat_display.configure(state="disabled")
-        self._chat_display.see("end")
-
-    def _chat_stream_append(self, chunk: str):
-        """Append a streaming token chunk to the current ATLAS response line."""
-        self._chat_display.configure(state="normal")
-        self._chat_display.insert("end", chunk)
-        self._chat_display.configure(state="disabled")
-        self._chat_display.see("end")
+        result = api_post("/atlas/chat", {"message": msg}, timeout=60)
+        reply  = result.get("reply", "No response from ATLAS.")
+        self.after(0, lambda: self._chat_append("ATLAS", reply))
+        self.after(0, lambda: speak(reply))
 
     def _start_voice(self):
         label = "🎤 Loading..." if _whisper_model is None else "🎤 Listening..."
