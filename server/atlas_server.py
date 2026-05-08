@@ -249,7 +249,6 @@ Respond with JSON only, in this exact format:
         response = ollama.chat(
             model=OLLAMA_MODEL,
             messages=[{"role": "user", "content": context}],
-            think=False,
         )
         raw  = response["message"]["content"]
         text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
@@ -575,7 +574,7 @@ When asked about weather or conditions, use the live data provided above."""
                 buffer   = ""
                 in_think = False
                 for chunk in ollama.chat(
-                    model=OLLAMA_MODEL, messages=messages, stream=True, think=False
+                    model=OLLAMA_MODEL, messages=messages, stream=True
                 ):
                     token = chunk["message"]["content"]
                     reply_parts.append(token)
