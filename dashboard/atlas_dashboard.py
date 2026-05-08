@@ -142,7 +142,7 @@ def get_whisper():
     if _whisper_model is None:
         try:
             import whisper
-            _whisper_model = whisper.load_model("base")
+            _whisper_model = whisper.load_model("tiny")
         except Exception:
             pass
     return _whisper_model
@@ -271,6 +271,8 @@ def _continuous_listen_worker():
 def _transcribe_and_send(audio):
     """Transcribe audio and send to ATLAS callback."""
     try:
+        if _listen_callback:
+            _listen_callback("⏳ Transcribing...", system=True)
         model = get_whisper()
         if model is None:
             return
@@ -854,11 +856,22 @@ class ATLASDashboard(tk.Tk):
             self._listen_toggle.configure(text="■ Stop Conversation", bg=NOGO_COLOR)
             self._listen_indicator.configure(text="🎙 Listening...", fg=GO_COLOR)
 
-    def _on_voice_input(self, text: str):
+    def _on_voice_input(self, text: str, system: bool = False):
         """Called by the continuous listener thread when speech is transcribed."""
         def _handle():
-            self._chat_append("You", text)
-            threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
+            if system:
+                self._chat_append("System", text)
+            else:
+                # Remove the transcribing indicator if present
+                content = self._chat_display.get("1.0", "end")
+                if "⏳ Transcribing..." in content:
+                    self._chat_display.configure(state="normal")
+                    idx = self._chat_display.search("⏳ Transcribing...", "1.0", "end")
+                    if idx:
+                        self._chat_display.delete(f"{idx} linestart", f"{idx} lineend +1c")
+                    self._chat_display.configure(state="disabled")
+                self._chat_append("You", text)
+                threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
         self.after(0, _handle)
 
     def _slew_to_target(self):

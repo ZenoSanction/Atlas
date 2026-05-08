@@ -567,10 +567,13 @@ EQUIPMENT STATUS:
         _chat_history.append({"role": "user", "content": req.message})
         messages = [{"role": "system", "content": system_prompt}] + _chat_history[-10:]
 
-        response = ollama.chat(model=OLLAMA_MODEL, messages=messages)
-        raw   = response["message"]["content"]
+        def call_ollama():
+            resp = ollama.chat(model=OLLAMA_MODEL, messages=messages)
+            return resp["message"]["content"]
+
+        raw   = await asyncio.get_event_loop().run_in_executor(None, call_ollama)
         clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-        reply = clean if clean else raw  # fallback if stripping leaves nothing
+        reply = clean if clean else raw
 
         _chat_history.append({"role": "assistant", "content": reply})
         _chat_history[:] = _chat_history[-20:]
