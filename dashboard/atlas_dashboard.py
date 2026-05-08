@@ -156,7 +156,7 @@ def record_and_transcribe() -> tuple[str, str]:
         sample_rate      = 16000
         chunk_frames     = int(sample_rate * 0.3)   # 300ms chunks
         speech_threshold = 0.015
-        silence_needed   = 8                         # ~2.4s silence to stop
+        silence_needed   = 15                        # ~4.5s silence to stop
         max_chunks       = 100                       # hard cap ~30s
 
         audio_buffer  = []
@@ -217,7 +217,7 @@ def _continuous_listen_worker():
 
     sample_rate  = 16000
     chunk_frames = int(sample_rate * 0.3)   # 300ms chunks
-    silence_chunks_needed = 8               # ~2.4s silence to end utterance
+    silence_chunks_needed = 15              # ~4.5s silence to end utterance
     speech_threshold = 0.015               # RMS threshold for voice activity
     min_speech_chunks = 3                  # ignore taps < ~0.9s
 
