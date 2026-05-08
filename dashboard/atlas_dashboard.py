@@ -156,7 +156,7 @@ def record_and_transcribe() -> tuple[str, str]:
         sample_rate      = 16000
         chunk_frames     = int(sample_rate * 0.3)   # 300ms chunks
         speech_threshold = 0.015
-        silence_needed   = 15                        # ~4.5s silence to stop
+        silence_needed   = 10                        # ~3s silence to stop
         max_chunks       = 100                       # hard cap ~30s
 
         audio_buffer  = []
@@ -205,8 +205,9 @@ def record_and_transcribe() -> tuple[str, str]:
 # Continuous voice listener
 # ---------------------------------------------------------------------------
 _listening_active = threading.Event()
-_listen_callback = None            # set by dashboard to handle transcribed text
-_listen_indicator_callback = None  # set by dashboard to update status label
+_chat_busy        = threading.Event()  # set while waiting for ATLAS reply
+_listen_callback = None
+_listen_indicator_callback = None
 
 def _continuous_listen_worker():
     """Monitors mic continuously, sends speech to ATLAS when detected."""
@@ -218,7 +219,7 @@ def _continuous_listen_worker():
 
     sample_rate  = 16000
     chunk_frames = int(sample_rate * 0.3)   # 300ms chunks
-    silence_chunks_needed = 15              # ~4.5s silence to end utterance
+    silence_chunks_needed = 10              # ~3s silence to end utterance
     speech_threshold = 0.015               # RMS threshold for voice activity
     min_speech_chunks = 3                  # ignore taps < ~0.9s
 
@@ -828,10 +829,17 @@ class ATLASDashboard(tk.Tk):
         threading.Thread(target=self._chat_worker, args=(msg,), daemon=True).start()
 
     def _chat_worker(self, msg: str):
-        result = api_post("/atlas/chat", {"message": msg}, timeout=60)
-        reply  = result.get("reply", "No response from ATLAS.")
-        self.after(0, lambda: self._chat_append("ATLAS", reply))
-        self.after(0, lambda: speak(reply))
+        _chat_busy.set()
+        try:
+            result = api_post("/atlas/chat", {"message": msg}, timeout=60)
+            reply  = result.get("reply", "No response from ATLAS.")
+            self.after(0, lambda: self._chat_append("ATLAS", reply))
+            self.after(0, lambda: speak(reply))
+        finally:
+            _chat_busy.clear()
+            if _listening_active.is_set():
+                self.after(0, lambda: self._listen_indicator.configure(
+                    text="🎙 Listening..."))
 
     def _start_voice(self):
         label = "🎤 Loading..." if _whisper_model is None else "🎤 Listening..."
@@ -865,7 +873,10 @@ class ATLASDashboard(tk.Tk):
     def _on_voice_input(self, text: str):
         """Called by the continuous listener thread when speech is transcribed."""
         def _handle():
-            self._listen_indicator.configure(text="🎙 Listening...")
+            if _chat_busy.is_set():
+                self._listen_indicator.configure(text="⏳ ATLAS is responding...")
+                return
+            self._listen_indicator.configure(text="⏳ ATLAS is thinking...")
             self._chat_append("You", text)
             threading.Thread(target=self._chat_worker, args=(text,), daemon=True).start()
         self.after(0, _handle)
