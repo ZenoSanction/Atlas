@@ -416,7 +416,7 @@ class ATLASDashboard(tk.Tk):
         f.rowconfigure(1, weight=1)
 
         # GO/NO-GO Banner
-        self._banner_frame = tk.Frame(f, bg=UNKNOWN_COLOR, pady=18)
+        self._banner_frame = tk.Frame(f, bg=UNKNOWN_COLOR, pady=14)
         self._banner_frame.grid(row=0, column=0, sticky="ew", padx=15, pady=(15, 8))
         self._banner_frame.columnconfigure(0, weight=1)
 
@@ -425,8 +425,15 @@ class ATLASDashboard(tk.Tk):
         self._banner_verdict.grid(row=0, column=0)
 
         self._banner_reason = tk.Label(self._banner_frame, text="Connecting to observatory...",
-                                       font=FONT_REASON, bg=UNKNOWN_COLOR, fg="#dddddd")
+                                       font=FONT_REASON, bg=UNKNOWN_COLOR, fg="#dddddd",
+                                       wraplength=900, justify="center")
         self._banner_reason.grid(row=1, column=0, pady=(4, 0))
+
+        # Keep wraplength in sync with window width so long reason text wraps to 3 lines
+        self._banner_frame.bind(
+            "<Configure>",
+            lambda e: self._banner_reason.configure(wraplength=max(200, e.width - 40))
+        )
 
         self._banner_time = tk.Label(self._banner_frame, text="",
                                      font=FONT_SMALL, bg=UNKNOWN_COLOR, fg="#aaaaaa")
