@@ -80,6 +80,7 @@ OBS_LAT    = _OBS_CFG.get("observatory", {}).get("latitude",    29.2274)
 OBS_LON    = _OBS_CFG.get("observatory", {}).get("longitude",  -82.0604)
 OBS_ELEV_M = _OBS_CFG.get("observatory", {}).get("elevation_m", 20)
 OBS_NAME   = _OBS_CFG.get("observatory", {}).get("name", "My Observatory")
+OBS_TZ     = _OBS_CFG.get("observatory", {}).get("timezone", "America/New_York")
 
 METEO_BASE      = "https://api.open-meteo.com/v1"
 SIMBAD_TAP      = "https://simbad.u-strasbg.fr/simbad/sim-tap/sync"
@@ -247,16 +248,46 @@ async def phd2(method: str, params=None) -> dict:
 # ---------------------------------------------------------------------------
 async def fetch_weather() -> dict:
     params = {
-        "latitude": OBS_LAT, "longitude": OBS_LON,
+        "latitude":  OBS_LAT,
+        "longitude": OBS_LON,
         "current": ["temperature_2m","relative_humidity_2m","dew_point_2m",
                     "precipitation","cloud_cover","wind_speed_10m",
                     "wind_gusts_10m","surface_pressure","visibility"],
-        "wind_speed_unit": "mph", "temperature_unit": "fahrenheit",
-        "precipitation_unit": "inch", "timezone": "America/New_York",
+        "hourly": ["cloud_cover","visibility","wind_speed_10m","wind_gusts_10m",
+                   "relative_humidity_2m","dew_point_2m","precipitation_probability",
+                   "temperature_2m"],
+        "daily":              ["sunrise","sunset"],
+        "wind_speed_unit":    "mph",
+        "temperature_unit":   "fahrenheit",
+        "precipitation_unit": "inch",
+        "timezone":           OBS_TZ,
+        "forecast_days":      2,
     }
     try:
         r = await _http_client.get(f"{METEO_BASE}/forecast", params=params)
-        return r.json()
+        data = r.json()
+
+        # ── Filter hourly data to tonight's observing window (sunset → sunrise) ──
+        daily    = data.get("daily", {})
+        sunsets  = daily.get("sunset",  [])
+        sunrises = daily.get("sunrise", [])
+
+        if sunsets and len(sunrises) > 1:
+            dusk_str = sunsets[0]
+            dawn_str = sunrises[1]
+
+            hourly   = data.get("hourly", {})
+            times    = hourly.get("time", [])
+            night_idx = [i for i, t in enumerate(times) if dusk_str <= t <= dawn_str]
+
+            filtered: dict = {}
+            for key, values in hourly.items():
+                filtered[key] = [values[i] for i in night_idx] if isinstance(values, list) else values
+
+            data["hourly"] = filtered
+            data["_night_window"] = {"dusk": dusk_str, "dawn": dawn_str}
+
+        return data
     except Exception as e:
         return {"error": str(e)}
 

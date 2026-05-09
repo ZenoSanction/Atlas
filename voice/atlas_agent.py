@@ -140,16 +140,49 @@ def phd2_call(method: str, params: list = None) -> dict:
 
 
 def get_weather_data() -> dict:
+    tz = _CFG.get("observatory", {}).get("timezone", "America/New_York")
     try:
-        url = (
-            f"https://api.open-meteo.com/v1/forecast"
-            f"?latitude={OBS_LAT}&longitude={OBS_LON}"
-            f"&hourly=cloudcover,visibility,windspeed_10m,windgusts_10m,"
-            f"relativehumidity_2m,dewpoint_2m,precipitation_probability,temperature_2m"
-            f"&current_weather=true&timezone=America%2FNew_York&forecast_days=2"
+        r = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude":  OBS_LAT,
+                "longitude": OBS_LON,
+                "hourly":    "cloud_cover,visibility,wind_speed_10m,wind_gusts_10m,"
+                             "relative_humidity_2m,dew_point_2m,precipitation_probability,temperature_2m",
+                "daily":     "sunrise,sunset",
+                "current_weather": "true",
+                "temperature_unit":   "fahrenheit",
+                "wind_speed_unit":    "mph",
+                "precipitation_unit": "inch",
+                "timezone":    tz,
+                "forecast_days": 2,
+            },
+            timeout=10,
         )
-        r = requests.get(url, timeout=10)
-        return r.json()
+        data = r.json()
+
+        # ── Filter hourly data to tonight's observing window (sunset → sunrise) ──
+        daily    = data.get("daily", {})
+        sunsets  = daily.get("sunset",  [])
+        sunrises = daily.get("sunrise", [])
+
+        if sunsets and len(sunrises) > 1:
+            dusk_str = sunsets[0]   # e.g. "2026-05-08T20:17"
+            dawn_str = sunrises[1]  # e.g. "2026-05-09T06:28"
+
+            hourly = data.get("hourly", {})
+            times  = hourly.get("time", [])
+
+            night_idx = [i for i, t in enumerate(times) if dusk_str <= t <= dawn_str]
+
+            filtered: dict = {}
+            for key, values in hourly.items():
+                filtered[key] = [values[i] for i in night_idx] if isinstance(values, list) else values
+
+            data["hourly"] = filtered
+            data["_night_window"] = {"dusk": dusk_str, "dawn": dawn_str}
+
+        return data
     except Exception as e:
         return {"error": str(e), "note": "Weather API unavailable — check internet connection. Use caution."}
 
