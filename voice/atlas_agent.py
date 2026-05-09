@@ -1,21 +1,23 @@
 """
 ATLAS - Automated Telescope & Long-term Astronomy System
-Autonomous observatory agent for Silver Springs Observatory
+Autonomous observatory agent
 
-Runs entirely on a local Ollama model — no internet required, no external dependencies.
-One model, one voice, one consistent identity every night.
+Uses the Anthropic Claude API (claude-opus-4-7) for autonomous dusk/dawn/weekly sessions.
+API key is read from ~/.atlas/config.json (shared with atlas_server.py).
 
 Usage: python atlas_agent.py --phase [dusk|dawn|weekly]
 """
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import anthropic
 import requests
 
 # ── Observatory config (loaded from obs_config.json, never committed to git) ──
@@ -55,10 +57,27 @@ OBS_LAT  = _CFG.get("observatory", {}).get("latitude",  0.0)
 OBS_LON  = _CFG.get("observatory", {}).get("longitude", 0.0)
 OBS_NAME = _CFG.get("observatory", {}).get("name", "My Observatory")
 
-# ── Local LLM ────────────────────────────────────────────────────────────────
+# ── Claude API ───────────────────────────────────────────────────────────────
 
-OLLAMA_MODEL = "qwen2.5:7b"
-OLLAMA_BASE  = "http://localhost:11434"
+AGENT_MODEL = "claude-opus-4-7"   # full intelligence for autonomous sessions
+
+_ATLAS_CONFIG = Path.home() / ".atlas" / "config.json"
+
+def _get_api_key() -> str:
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if key:
+        return key
+    if _ATLAS_CONFIG.exists():
+        try:
+            cfg = json.loads(_ATLAS_CONFIG.read_text(encoding="utf-8"))
+            key = cfg.get("ANTHROPIC_API_KEY", "").strip()
+            if key:
+                os.environ["ANTHROPIC_API_KEY"] = key
+                return key
+        except Exception:
+            pass
+    print("ERROR: No Anthropic API key found. Run atlas_server.py once to save it.")
+    sys.exit(1)
 
 # ── Memory files ─────────────────────────────────────────────────────────────
 
@@ -188,221 +207,164 @@ def send_windows_toast(title: str, message: str) -> str:
 
 TOOLS = [
     {
-        "type": "function",
-        "function": {
-            "name": "get_telescope_status",
-            "description": "Get current telescope mount status and position from NINA.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "get_telescope_status",
+        "description": "Get current telescope mount status and position from NINA.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_camera_status",
-            "description": "Get imaging camera status from NINA.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "get_camera_status",
+        "description": "Get imaging camera status from NINA.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_focuser_status",
-            "description": "Get ZWO EAF autofocuser status and current position from NINA.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "get_focuser_status",
+        "description": "Get ZWO EAF autofocuser status and current position from NINA.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_guiding_state",
-            "description": "Get current PHD2 guiding state (Stopped, Guiding, Calibrating, Paused, etc).",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "get_guiding_state",
+        "description": "Get current PHD2 guiding state (Stopped, Guiding, Calibrating, Paused, etc).",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_guiding_stats",
-            "description": "Get PHD2 guiding statistics including RMS total/RA/Dec and guide star SNR.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "get_guiding_stats",
+        "description": "Get PHD2 guiding statistics including RMS total/RA/Dec and guide star SNR.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get current weather and tonight's forecast for the observatory location.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "get_weather",
+        "description": "Get current weather and tonight's forecast for the observatory location.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "slew_to_target",
-            "description": "Slew the telescope to a named object or RA/Dec coordinates.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target_name": {"type": "string", "description": "Object name e.g. M51, NGC7000"},
-                    "ra":  {"type": "number", "description": "Right Ascension in hours (if no target_name)"},
-                    "dec": {"type": "number", "description": "Declination in degrees (if no target_name)"},
-                },
+        "name": "slew_to_target",
+        "description": "Slew the telescope to a named object or RA/Dec coordinates.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target_name": {"type": "string", "description": "Object name e.g. M51, NGC7000"},
+                "ra":  {"type": "number", "description": "Right Ascension in hours (if no target_name)"},
+                "dec": {"type": "number", "description": "Declination in degrees (if no target_name)"},
             },
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "start_guiding",
-            "description": "Start PHD2 autoguiding.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "recalibrate": {"type": "boolean", "description": "Force recalibration first (default false)"},
-                },
+        "name": "start_guiding",
+        "description": "Start PHD2 autoguiding.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recalibrate": {"type": "boolean", "description": "Force recalibration first (default false)"},
             },
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "stop_guiding",
-            "description": "Stop PHD2 autoguiding.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "stop_guiding",
+        "description": "Stop PHD2 autoguiding.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "start_sequence",
-            "description": "Start the NINA imaging sequence.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "start_sequence",
+        "description": "Start the NINA imaging sequence.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "stop_sequence",
-            "description": "Stop the active NINA imaging sequence.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "stop_sequence",
+        "description": "Stop the active NINA imaging sequence.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "move_focuser",
-            "description": "Move the ZWO EAF autofocuser to an absolute step position.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "position": {"type": "integer", "description": "Target position in steps"},
-                },
-                "required": ["position"],
+        "name": "move_focuser",
+        "description": "Move the ZWO EAF autofocuser to an absolute step position.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "position": {"type": "integer", "description": "Target position in steps"},
             },
+            "required": ["position"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "park_telescope",
-            "description": "Park the telescope mount safely.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
+        "name": "park_telescope",
+        "description": "Park the telescope mount safely.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "type": "function",
-        "function": {
-            "name": "read_memory_file",
-            "description": "Read an ATLAS memory file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string", "description": "Filename e.g. atlas_narrative.md"},
-                },
-                "required": ["filename"],
+        "name": "read_memory_file",
+        "description": "Read an ATLAS memory file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Filename e.g. atlas_narrative.md"},
             },
+            "required": ["filename"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "write_memory_file",
-            "description": "Overwrite an ATLAS memory file with new content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string"},
-                    "content":  {"type": "string"},
-                },
-                "required": ["filename", "content"],
+        "name": "write_memory_file",
+        "description": "Overwrite an ATLAS memory file with new content.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "content":  {"type": "string"},
             },
+            "required": ["filename", "content"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "append_memory_file",
-            "description": "Append a block of text to an ATLAS memory file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "filename": {"type": "string"},
-                    "content":  {"type": "string"},
-                },
-                "required": ["filename", "content"],
+        "name": "append_memory_file",
+        "description": "Append a block of text to an ATLAS memory file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "content":  {"type": "string"},
             },
+            "required": ["filename", "content"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "write_report",
-            "description": "Write a report to the ATLAS Observatory desktop folder.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "report_type": {
-                        "type": "string",
-                        "enum": ["morning", "session", "weekly"],
-                        "description": "morning → Morning Reports, session → Session Reports, weekly → Weekly Reports",
-                    },
-                    "filename": {"type": "string", "description": "Full filename e.g. ATLAS_Morning_Report_2026-05-08.txt"},
-                    "content":  {"type": "string"},
+        "name": "write_report",
+        "description": "Write a report to the ATLAS Observatory desktop folder.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "report_type": {
+                    "type": "string",
+                    "enum": ["morning", "session", "weekly"],
+                    "description": "morning → Morning Reports, session → Session Reports, weekly → Weekly Reports",
                 },
-                "required": ["report_type", "filename", "content"],
+                "filename": {"type": "string", "description": "Full filename e.g. ATLAS_Morning_Report_2026-05-08.txt"},
+                "content":  {"type": "string"},
             },
+            "required": ["report_type", "filename", "content"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "send_notification",
-            "description": "Send a local Windows desktop toast notification to the operator. Use for important events: weather deterioration, equipment errors, session complete, guiding lost, sequence aborted. Works without internet.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title":   {"type": "string", "description": "Short alert title e.g. 'ATLAS — Guiding Lost'"},
-                    "message": {"type": "string", "description": "One or two sentence description of the event"},
-                },
-                "required": ["title", "message"],
+        "name": "send_notification",
+        "description": "Send a local Windows desktop toast notification to the operator. Use for important events: weather deterioration, equipment errors, session complete, guiding lost, sequence aborted. Works without internet.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title":   {"type": "string", "description": "Short alert title e.g. 'ATLAS — Guiding Lost'"},
+                "message": {"type": "string", "description": "One or two sentence description of the event"},
             },
+            "required": ["title", "message"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "archive_finalized_image",
-            "description": "Copy a finalized stacked image from D:\\Astrophotography\\Final to the desktop Finalized Images folder with a proper ATLAS label.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "source_filename": {"type": "string", "description": "Filename in D:\\Astrophotography\\Final"},
-                    "object_name":     {"type": "string", "description": "Common name e.g. M51 Whirlpool Galaxy"},
-                    "date_str":        {"type": "string", "description": "Session date YYYY-MM-DD"},
-                    "integration":     {"type": "string", "description": "Total integration e.g. 3h20m"},
-                },
-                "required": ["source_filename", "object_name", "date_str", "integration"],
+        "name": "archive_finalized_image",
+        "description": "Copy a finalized stacked image from D:\\Astrophotography\\Final to the desktop Finalized Images folder with a proper ATLAS label.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_filename": {"type": "string", "description": "Filename in D:\\Astrophotography\\Final"},
+                "object_name":     {"type": "string", "description": "Common name e.g. M51 Whirlpool Galaxy"},
+                "date_str":        {"type": "string", "description": "Session date YYYY-MM-DD"},
+                "integration":     {"type": "string", "description": "Total integration e.g. 3h20m"},
             },
+            "required": ["source_filename", "object_name", "date_str", "integration"],
         },
     },
 ]
@@ -646,51 +608,55 @@ Make real decisions. Document everything honestly. Protect the gear first, image
 # AGENT LOOP
 # =============================================================================
 
-def run(system_prompt: str) -> None:
-    messages = [{"role": "system", "content": system_prompt}]
+def run(client: anthropic.Anthropic, system_prompt: str) -> None:
+    messages: list[dict] = []
 
-    print(f"[ATLAS] Running on {OLLAMA_MODEL}", flush=True)
+    print(f"[ATLAS] Running on {AGENT_MODEL}", flush=True)
 
     for _ in range(50):  # safety cap on iterations
         try:
-            r = requests.post(
-                f"{OLLAMA_BASE}/api/chat",
-                json={"model": OLLAMA_MODEL, "messages": messages, "tools": TOOLS, "stream": False},
-                timeout=300,
+            response = client.messages.create(
+                model=AGENT_MODEL,
+                max_tokens=8192,
+                thinking={"type": "disabled"},
+                system=system_prompt,
+                tools=TOOLS,
+                messages=messages,
             )
-            response = r.json()
         except Exception as e:
-            print(f"[ATLAS] Ollama error: {e}", flush=True)
+            print(f"[ATLAS] Claude API error: {e}", flush=True)
             _emergency_park()
             return
 
-        msg        = response.get("message", {})
-        content    = msg.get("content", "")
-        tool_calls = msg.get("tool_calls", [])
+        # Collect text output from response blocks
+        text_parts = [b.text for b in response.content if b.type == "text" and b.text]
+        if text_parts:
+            print("\n".join(text_parts), flush=True)
 
-        if content:
-            print(content, flush=True)
+        # Append assistant turn (preserve full content block list)
+        messages.append({"role": "assistant", "content": response.content})
 
-        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
-
-        if not tool_calls:
+        # Done if no tool calls
+        if response.stop_reason != "tool_use":
             break
 
-        for call in tool_calls:
-            fn   = call.get("function", {})
-            name = fn.get("name", "")
-            args = fn.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except Exception:
-                    args = {}
-
+        # Build tool_results for every tool_use block
+        tool_results = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            name = block.name
+            args = block.input or {}
             print(f"\n[TOOL] {name}({json.dumps(args)})", flush=True)
             result = execute_tool(name, args)
             print(f"[RESULT] {result[:300]}{'...' if len(result) > 300 else ''}", flush=True)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": block.id,
+                "content": result,
+            })
 
-            messages.append({"role": "tool", "name": name, "content": result})
+        messages.append({"role": "user", "content": tool_results})
 
 
 # =============================================================================
@@ -708,7 +674,7 @@ def _emergency_park() -> None:
     report    = dest / f"ATLAS_Session_Report_{date_str}.txt"
     with open(report, "a", encoding="utf-8") as f:
         f.write(f"\n\n⚠ EMERGENCY STOP — {datetime.now()}\n")
-        f.write("Ollama became unavailable mid-session.\n")
+        f.write("Claude API became unavailable mid-session.\n")
         f.write(f"Telescope park attempted. Result: {result}\n")
         f.write("Manual inspection recommended.\n")
 
@@ -726,17 +692,19 @@ def main() -> None:
     print(f"ATLAS  |  phase: {args.phase}  |  {datetime.now()}", flush=True)
     print(f"{'='*60}\n", flush=True)
 
-    # Verify Ollama is reachable before committing to a session
+    # Initialise Anthropic client and verify API key before committing to a session
+    _get_api_key()  # exits with message if key is missing
+    client = anthropic.Anthropic()
     try:
-        requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
-    except Exception:
-        print("[ATLAS] CRITICAL: Ollama is not running. Start Ollama and retry.", flush=True)
+        client.models.retrieve(AGENT_MODEL)
+    except Exception as e:
+        print(f"[ATLAS] CRITICAL: Cannot reach Anthropic API — {e}", flush=True)
         _emergency_park()
         sys.exit(1)
 
     memory = load_memory()
     prompt = build_system_prompt(args.phase, memory)
-    run(prompt)
+    run(client, prompt)
 
     print(f"\n{'='*60}", flush=True)
     print(f"ATLAS complete  |  {datetime.now()}", flush=True)
