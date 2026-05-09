@@ -58,6 +58,23 @@ PHD2_HOST   = ("localhost", 4400)
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 5000
 
+CONFIG_FILE = Path.home() / ".atlas" / "config.json"
+
+def _load_obs_config() -> dict:
+    """Load observatory config from obs_config.json (repo root) or home fallback."""
+    search = [
+        Path(__file__).parent.parent / "obs_config.json",
+        Path(__file__).parent / "obs_config.json",
+        Path.home() / ".atlas" / "obs_config.json",
+    ]
+    for path in search:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    log.warning("obs_config.json not found — copy obs_config.example.json and fill it in.")
+    return {}
+
+_OBS_CFG = _load_obs_config()
+
 OBS_LAT    = _OBS_CFG.get("observatory", {}).get("latitude",    29.2274)
 OBS_LON    = _OBS_CFG.get("observatory", {}).get("longitude",  -82.0604)
 OBS_ELEV_M = _OBS_CFG.get("observatory", {}).get("elevation_m", 20)
@@ -71,24 +88,6 @@ CHAT_MODEL      = "claude-haiku-4-5"  # fast model for live chat and status asse
 _IMAGING_CAMERA = _OBS_CFG.get("equipment", {}).get("imaging_camera", "Imaging Camera")
 _GUIDE_CAMERA   = _OBS_CFG.get("equipment", {}).get("guide_camera",   "Guide Camera")
 _FOCUSER        = _OBS_CFG.get("equipment", {}).get("focuser",        "Focuser")
-
-CONFIG_FILE    = Path.home() / ".atlas" / "config.json"
-OBS_CONFIG_FILE = Path(__file__).parent.parent / "obs_config.json"
-
-def _load_obs_config() -> dict:
-    """Load observatory config from obs_config.json (repo root) or home fallback."""
-    search = [
-        OBS_CONFIG_FILE,
-        Path(__file__).parent / "obs_config.json",
-        Path.home() / ".atlas" / "obs_config.json",
-    ]
-    for path in search:
-        if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
-    log.warning("obs_config.json not found — copy obs_config.example.json and fill it in.")
-    return {}
-
-_OBS_CFG = _load_obs_config()
 
 WATCHDOG_DEFAULTS = {
     "enabled":               False,
