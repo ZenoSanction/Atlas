@@ -33,6 +33,7 @@ import httpx
 import anthropic
 
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -163,9 +164,26 @@ _http_client: Optional[httpx.AsyncClient] = None
 _status_task: Optional[asyncio.Task] = None
 
 # ---------------------------------------------------------------------------
+# Lifespan (startup / shutdown)
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── Startup ──
+    global _anthropic_client, _http_client, _status_task
+    _http_client = httpx.AsyncClient(timeout=10)
+    _anthropic_client = anthropic.AsyncAnthropic()
+    _status_task = asyncio.create_task(status_refresh_loop())
+    yield
+    # ── Shutdown ──
+    if _status_task and not _status_task.done():
+        _status_task.cancel()
+    if _http_client:
+        await _http_client.aclose()
+
+# ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
-app = FastAPI(title="ATLAS Observatory Server", version="1.0.0")
+app = FastAPI(title="ATLAS Observatory Server", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -387,21 +405,6 @@ async def watchdog_loop():
             if _watchdog.get("auto_park_telescope"):
                 await nina_post("/equipment/mount/park")
         await asyncio.sleep(_watchdog.get("poll_interval_sec", 120))
-
-@app.on_event("startup")
-async def startup():
-    global _anthropic_client, _http_client, _status_task
-    _http_client = httpx.AsyncClient(timeout=10)
-    _anthropic_client = anthropic.AsyncAnthropic()
-    _status_task = asyncio.create_task(status_refresh_loop())
-
-@app.on_event("shutdown")
-async def shutdown():
-    global _status_task, _http_client
-    if _status_task and not _status_task.done():
-        _status_task.cancel()
-    if _http_client:
-        await _http_client.aclose()
 
 # ===========================================================================
 # API ENDPOINTS
