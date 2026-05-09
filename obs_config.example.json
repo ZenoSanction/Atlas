@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy this file to obs_config.json and fill in your observatory details.",
+
+  "observatory": {
+    "name": "My Observatory",
+    "latitude": 0.0,
+    "longitude": 0.0,
+    "elevation_m": 0,
+    "timezone": "America/New_York",
+    "state": "Your State"
+  },
+  "equipment": {
+    "imaging_camera": "My Imaging Camera",
+    "guide_camera": "My Guide Camera",
+    "focuser": "My Focuser",
+    "mount": "My Mount"
+  },
+  "network": {
+    "observatory_ip": "192.168.1.100",
+    "nina_port": 1888,
+    "phd2_port": 4400
+  },
+  "paths": {
+    "memory_dir": "C:\\Users\\YourName\\.claude\\projects\\YourProject\\memory",
+    "atlas_dir":  "C:\\Users\\YourName\\.claude\\atlas",
+    "reports_dir": "C:\\Users\\YourName\\Desktop\\ATLAS Observatory",
+    "astro_dir":  "D:\\Astrophotography"
+  }
+}

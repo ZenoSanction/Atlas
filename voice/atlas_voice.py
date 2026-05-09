@@ -38,7 +38,20 @@ NOISE_MULTIPLIER   = 4.0          # threshold = ambient RMS × this factor
 
 CONFIG_FILE = Path.home() / ".atlas" / "config.json"
 
-MEMORY_DIR = Path(r"C:\Users\nasan\.claude\projects\C--Users-nasan\memory")
+def _load_obs_config() -> dict:
+    search = [
+        Path(__file__).parent.parent / "obs_config.json",
+        Path(__file__).parent / "obs_config.json",
+        Path.home() / ".atlas" / "obs_config.json",
+    ]
+    for path in search:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
+_OBS_CFG = _load_obs_config()
+
+MEMORY_DIR = Path(_OBS_CFG.get("paths", {}).get("memory_dir", str(Path.home() / ".atlas" / "memory")))
 MEMORY_FILES = [
     "atlas_identity.md",
     "atlas_narrative.md",
@@ -133,7 +146,7 @@ def speak(text: str) -> None:
 VOICE_TOOLS = [
     {
         "name": "get_weather",
-        "description": "Get current weather conditions and tonight's forecast for Silver Springs Observatory.",
+        "description": "Get current weather conditions and tonight's forecast for the observatory.",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -169,8 +182,8 @@ VOICE_TOOLS = [
     },
 ]
 
-OBS_LAT = 29.2274
-OBS_LON = -82.0604
+OBS_LAT = _OBS_CFG.get("observatory", {}).get("latitude",  0.0)
+OBS_LON = _OBS_CFG.get("observatory", {}).get("longitude", 0.0)
 
 GO_NO_GO_KEYWORDS = {"go", "no-go", "tonight", "session", "image", "imaging", "observe", "sky", "clear"}
 
@@ -321,7 +334,7 @@ def _first_sentences(text: str, max_sentences: int = 2) -> str:
     return " ".join(sentences[:max_sentences])
 
 
-NOTIFY_LOG = Path(r"C:\Users\nasan\Desktop\ATLAS Observatory\ATLAS_Notifications.txt")
+NOTIFY_LOG = Path(_OBS_CFG.get("paths", {}).get("reports_dir", str(Path.home() / "Desktop" / "ATLAS Observatory"))) / "ATLAS_Notifications.txt"
 
 def _notify(title: str, message: str) -> None:
     """Show a dialog box AND append to persistent notification log on the desktop."""
@@ -429,7 +442,7 @@ def chat(conversation: list, system_prompt: str, client: anthropic.Anthropic) ->
 def build_system_prompt(memory: str) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""You are ATLAS (Automated Telescope & Long-term Astronomy System), \
-the autonomous observatory agent for Silver Springs Observatory, Florida.
+the autonomous observatory agent for {_OBS_CFG.get("observatory", {}).get("name", "this observatory")}.
 
 Current date and time: {now}
 
@@ -461,8 +474,8 @@ PHD2 STATE DEFINITIONS — use these exact meanings when reporting guiding state
 - "StarSelected" : Same as Selected — star chosen, ready to guide.
 
 CAMERA DISTINCTION — critical:
-- The NINA camera (get_camera_status) is the IMAGING camera (ASI 585MC Pro). It connects through NINA.
-- The GUIDE camera (SVBony SV205) connects through PHD2, NOT through NINA. Never say the guide camera
+- The NINA camera (get_camera_status) is the IMAGING camera ({_OBS_CFG.get("equipment", {}).get("imaging_camera", "imaging camera")}). It connects through NINA.
+- The GUIDE camera ({_OBS_CFG.get("equipment", {}).get("guide_camera", "guide camera")}) connects through PHD2, NOT through NINA. Never say the guide camera
   is disconnected based on NINA camera status — they are separate devices on separate software.
 - When the operator asks you to send a notification: ALWAYS call send_notification. Do not skip it.
 - When the operator asks to test notifications: call send_notification immediately with title "ATLAS Test" \

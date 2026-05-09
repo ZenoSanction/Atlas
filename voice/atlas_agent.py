@@ -18,23 +18,42 @@ from pathlib import Path
 
 import requests
 
-# ── Paths ────────────────────────────────────────────────────────────────────
+# ── Observatory config (loaded from obs_config.json, never committed to git) ──
 
-MEMORY_DIR  = Path(r"C:\Users\nasan\.claude\projects\C--Users-nasan\memory")
-DESKTOP_DIR = Path(r"C:\Users\nasan\Desktop\ATLAS Observatory")
-ASTRO_DIR   = Path(r"D:\Astrophotography")
+def _load_obs_config() -> dict:
+    """Load observatory config from obs_config.json (repo root or script dir)."""
+    search = [
+        Path(__file__).parent.parent / "obs_config.json",   # repo root
+        Path(__file__).parent / "obs_config.json",          # voice/
+        Path.home() / ".atlas" / "obs_config.json",         # user home fallback
+    ]
+    for path in search:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    print("WARNING: obs_config.json not found — copy obs_config.example.json and fill it in.")
+    return {}
+
+_CFG = _load_obs_config()
+
+MEMORY_DIR  = Path(_CFG.get("paths", {}).get("memory_dir",  r"C:\atlas\memory"))
+DESKTOP_DIR = Path(_CFG.get("paths", {}).get("reports_dir", r"C:\Users\Public\Desktop\ATLAS Observatory"))
+ASTRO_DIR   = Path(_CFG.get("paths", {}).get("astro_dir",   r"D:\Astrophotography"))
 FINAL_DIR   = ASTRO_DIR / "Final"
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
 
-NINA_BASE = "http://192.168.50.245:1888/v2/api"
-PHD2_HOST = ("192.168.50.245", 4400)
+_obs_ip   = _CFG.get("network", {}).get("observatory_ip", "localhost")
+_nina_port = _CFG.get("network", {}).get("nina_port", 1888)
+_phd2_port = _CFG.get("network", {}).get("phd2_port", 4400)
+
+NINA_BASE = f"http://{_obs_ip}:{_nina_port}/v2/api"
+PHD2_HOST = (_obs_ip, _phd2_port)
 
 # ── Observatory ───────────────────────────────────────────────────────────────
 
-OBS_LAT  = 29.2274
-OBS_LON  = -82.0604
-OBS_NAME = "Silver Springs Observatory"
+OBS_LAT  = _CFG.get("observatory", {}).get("latitude",  0.0)
+OBS_LON  = _CFG.get("observatory", {}).get("longitude", 0.0)
+OBS_NAME = _CFG.get("observatory", {}).get("name", "My Observatory")
 
 # ── Local LLM ────────────────────────────────────────────────────────────────
 
@@ -588,10 +607,14 @@ def build_system_prompt(phase: str, memory: str) -> str:
         .replace("{week}", week_str)
     )
 
-    return f"""You are ATLAS (Automated Telescope & Long-term Astronomy System), \
-the autonomous observatory agent for {OBS_NAME}, Florida (29.2274°N, 82.0604°W).
+    obs_state   = _CFG.get("observatory", {}).get("state", "")
+    obs_loc     = f"{abs(OBS_LAT):.4f}°{'N' if OBS_LAT >= 0 else 'S'}, {abs(OBS_LON):.4f}°{'E' if OBS_LON >= 0 else 'W'}"
+    reports_dir = str(DESKTOP_DIR)
 
-Date: {date_str}  Time: {time_str} Eastern
+    return f"""You are ATLAS (Automated Telescope & Long-term Astronomy System), \
+the autonomous observatory agent for {OBS_NAME}{(', ' + obs_state) if obs_state else ''} ({obs_loc}).
+
+Date: {date_str}  Time: {time_str} local
 
 Your memory and current observatory state:
 {memory}
@@ -602,10 +625,10 @@ PHASE: {phase.upper()}
 {instructions}
 
 Desktop output paths:
-  Morning Reports:  C:\\Users\\nasan\\Desktop\\ATLAS Observatory\\Morning Reports\\
-  Session Reports:  C:\\Users\\nasan\\Desktop\\ATLAS Observatory\\Session Reports\\
-  Weekly Reports:   C:\\Users\\nasan\\Desktop\\ATLAS Observatory\\Weekly Reports\\
-  Finalized Images: C:\\Users\\nasan\\Desktop\\ATLAS Observatory\\Finalized Images\\
+  Morning Reports:  {reports_dir}\\Morning Reports\\
+  Session Reports:  {reports_dir}\\Session Reports\\
+  Weekly Reports:   {reports_dir}\\Weekly Reports\\
+  Finalized Images: {reports_dir}\\Finalized Images\\
 
 File naming:
   Morning report:   ATLAS_Morning_Report_{date_str}.txt

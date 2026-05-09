@@ -25,6 +25,21 @@ config.local.json
 *.token
 .env
 
+# Observatory-specific config (copy obs_config.example.json → obs_config.json and fill in)
+obs_config.json
+dashboard/config.json
+
+# ATLAS memory files — unique to each observatory, never committed
+memory/
+*.memory.md
+atlas_identity.md
+atlas_narrative.md
+atlas_session_log.md
+atlas_target_history.md
+atlas_equipment_journal.md
+atlas_weather_patterns.md
+atlas_wishlist.md
+
 # Logs & backups
 *.log
 *.bak
