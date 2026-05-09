@@ -547,30 +547,55 @@ async def get_weather():
     }
 
 @app.get("/weather/forecast")
-async def get_forecast(hours: int = 12):
+async def get_forecast():
+    """Return per-hour GO/CAUTION/NO-GO verdicts for tonight's observing window (dusk → dawn)."""
     params = {
-        "latitude": OBS_LAT, "longitude": OBS_LON,
+        "latitude":  OBS_LAT,
+        "longitude": OBS_LON,
         "hourly": ["temperature_2m","relative_humidity_2m","dew_point_2m",
                    "precipitation_probability","cloud_cover","wind_speed_10m",
                    "wind_gusts_10m"],
-        "wind_speed_unit": "mph", "temperature_unit": "fahrenheit",
-        "precipitation_unit": "inch", "timezone": "America/New_York",
-        "forecast_days": 1,
+        "daily":              ["sunrise","sunset"],
+        "wind_speed_unit":    "mph",
+        "temperature_unit":   "fahrenheit",
+        "precipitation_unit": "inch",
+        "timezone":           OBS_TZ,
+        "forecast_days":      2,
     }
     try:
         r = await _http_client.get(f"{METEO_BASE}/forecast", params=params)
-        data = r.json()
+        data   = r.json()
         hourly = data.get("hourly", {})
-        times  = hourly.get("time", [])[:hours]
-        result = []
+        times  = hourly.get("time", [])
+        daily  = data.get("daily", {})
+        sunsets  = daily.get("sunset",  [])
+        sunrises = daily.get("sunrise", [])
+
+        if not (sunsets and len(sunrises) > 1):
+            return {"error": "Could not determine dusk/dawn times from forecast data"}
+
+        dusk_str = sunsets[0]    # tonight's sunset, e.g. "2026-05-08T20:17"
+        dawn_str = sunrises[1]   # tomorrow's sunrise, e.g. "2026-05-09T06:28"
+
+        cloud_l  = hourly.get("cloud_cover", [])
+        precip_l = hourly.get("precipitation_probability", [])
+        wind_l   = hourly.get("wind_speed_10m", [])
+        gusts_l  = hourly.get("wind_gusts_10m", [])
+        humid_l  = hourly.get("relative_humidity_2m", [])
+        temp_l   = hourly.get("temperature_2m", [])
+        dew_l    = hourly.get("dew_point_2m", [])
+
+        hours_out = []
         for i, t in enumerate(times):
-            cloud  = hourly.get("cloud_cover", [0]*24)[i]
-            precip = hourly.get("precipitation_probability", [0]*24)[i]
-            wind   = hourly.get("wind_speed_10m", [0]*24)[i]
-            gusts  = hourly.get("wind_gusts_10m", [0]*24)[i]
-            humid  = hourly.get("relative_humidity_2m", [0]*24)[i]
-            temp   = hourly.get("temperature_2m", [70]*24)[i]
-            dew    = hourly.get("dew_point_2m", [60]*24)[i]
+            if not (dusk_str <= t <= dawn_str):
+                continue
+            cloud  = cloud_l[i]  if i < len(cloud_l)  else 0
+            precip = precip_l[i] if i < len(precip_l) else 0
+            wind   = wind_l[i]   if i < len(wind_l)   else 0
+            gusts  = gusts_l[i]  if i < len(gusts_l)  else 0
+            humid  = humid_l[i]  if i < len(humid_l)  else 0
+            temp   = temp_l[i]   if i < len(temp_l)   else 70.0
+            dew    = dew_l[i]    if i < len(dew_l)    else 60.0
             spread = temp - dew
             if precip > 30 or cloud > 80 or gusts > 31:
                 v = "NO-GO"
@@ -578,16 +603,17 @@ async def get_forecast(hours: int = 12):
                 v = "CAUTION"
             else:
                 v = "GO"
-            result.append({
+            hours_out.append({
                 "time": t, "verdict": v,
-                "cloud_cover_pct": cloud,
+                "cloud_cover_pct":       cloud,
                 "precip_probability_pct": precip,
-                "wind_speed_mph": wind,
-                "wind_gusts_mph": gusts,
-                "humidity_pct": humid,
-                "dew_spread_f": round(spread, 1),
+                "wind_speed_mph":        wind,
+                "wind_gusts_mph":        gusts,
+                "humidity_pct":          humid,
+                "dew_spread_f":          round(spread, 1),
             })
-        return result
+
+        return {"dusk": dusk_str, "dawn": dawn_str, "hours": hours_out}
     except Exception as e:
         return {"error": str(e)}
 

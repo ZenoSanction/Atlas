@@ -1135,25 +1135,28 @@ class ATLASDashboard(tk.Tk):
 
     def _forecast_worker(self):
         self._set_text(self._forecast_text, "Fetching forecast...")
-        data = api_get("/weather/forecast?hours=24", timeout=15)
-        if isinstance(data, list) and data:
-            go   = sum(1 for h in data if h.get("verdict") == "GO")
-            caut = sum(1 for h in data if h.get("verdict") == "CAUTION")
-            nogo = sum(1 for h in data if h.get("verdict") == "NO-GO")
+        data = api_get("/weather/forecast", timeout=15)
+        if isinstance(data, dict) and "hours" in data:
+            hours = data["hours"]
+            dusk  = _fmt_time(data.get("dusk", ""))
+            dawn  = _fmt_time(data.get("dawn", ""))
+            go   = sum(1 for h in hours if h.get("verdict") == "GO")
+            caut = sum(1 for h in hours if h.get("verdict") == "CAUTION")
+            nogo = sum(1 for h in hours if h.get("verdict") == "NO-GO")
             lines = []
-            lines.append(f"Next 24 hours:  GO={go}h   CAUTION={caut}h   NO-GO={nogo}h")
+            lines.append(f"Tonight  {dusk} → {dawn}   GO={go}h   CAUTION={caut}h   NO-GO={nogo}h")
             lines.append("")
             lines.append(f"{'Time':<9} {'Verdict':<9} {'Cloud':>6} {'Wind':>7} {'Gusts':>7} {'Humid':>6} {'DewSprd':>8} {'Precip%':>8}")
             lines.append("─" * 72)
-            for h in data:
-                t      = _fmt_time(h.get("time", ""))
+            for h in hours:
+                t       = _fmt_time(h.get("time", ""))
                 verdict = h.get("verdict", "—")
-                cloud  = h.get("cloud_cover_pct", 0)
-                wind   = h.get("wind_speed_mph", 0)
-                gusts  = h.get("wind_gusts_mph", 0)
-                humid  = h.get("humidity_pct", 0)
-                dew    = h.get("dew_spread_f", 0)
-                precip = h.get("precip_probability_pct", 0)
+                cloud   = h.get("cloud_cover_pct", 0)
+                wind    = h.get("wind_speed_mph", 0)
+                gusts   = h.get("wind_gusts_mph", 0)
+                humid   = h.get("humidity_pct", 0)
+                dew     = h.get("dew_spread_f", 0)
+                precip  = h.get("precip_probability_pct", 0)
                 lines.append(
                     f"{t:<9} {verdict:<9} {cloud:>5.0f}%"
                     f" {wind:>6.1f}  {gusts:>5.1f}"
@@ -1170,13 +1173,16 @@ class ATLASDashboard(tk.Tk):
 
     def _targets_worker(self):
         self._set_text(self._targets_text, "Fetching tonight's best targets...")
-        forecast = api_get("/weather/forecast?hours=12")
-        if isinstance(forecast, list):
-            go_hours = sum(1 for h in forecast if h.get("verdict") == "GO")
-            text = f"Good imaging hours in next 12h: {go_hours}\n\n"
+        data = api_get("/weather/forecast")
+        if isinstance(data, dict) and "hours" in data:
+            hours    = data["hours"]
+            go_hours = sum(1 for h in hours if h.get("verdict") == "GO")
+            dusk     = _fmt_time(data.get("dusk", ""))
+            dawn     = _fmt_time(data.get("dawn", ""))
+            text  = f"Good imaging hours tonight ({dusk}–{dawn}): {go_hours}\n\n"
             text += f"{'Time':<9} {'Verdict':<10} {'Cloud':<8} {'Wind':<8} {'Humid':<8}\n"
             text += "─" * 50 + "\n"
-            for h in forecast:
+            for h in hours:
                 t = _fmt_time(h.get("time", ""))
                 text += (f"{t:<9} {h.get('verdict',''):<10} "
                          f"{h.get('cloud_cover_pct',0):<8.0f}% "
@@ -1184,7 +1190,7 @@ class ATLASDashboard(tk.Tk):
                          f"{h.get('humidity_pct',0):<8.0f}%\n")
             self._set_text(self._targets_text, text)
         else:
-            self._set_text(self._targets_text, f"Error: {forecast}")
+            self._set_text(self._targets_text, f"Error: {data}")
 
     def _force_status_refresh(self):
         threading.Thread(target=self._status_refresh_worker, daemon=True).start()
