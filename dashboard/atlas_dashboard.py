@@ -429,12 +429,6 @@ class ATLASDashboard(tk.Tk):
                                        wraplength=900, justify="center")
         self._banner_reason.grid(row=1, column=0, pady=(4, 0))
 
-        # Keep wraplength in sync with window width so long reason text wraps to 3 lines
-        self._banner_frame.bind(
-            "<Configure>",
-            lambda e: self._banner_reason.configure(wraplength=max(200, e.width - 40))
-        )
-
         self._banner_time = tk.Label(self._banner_frame, text="",
                                      font=FONT_SMALL, bg=UNKNOWN_COLOR, fg="#aaaaaa")
         self._banner_time.grid(row=2, column=0)
