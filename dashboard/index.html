@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATLAS Dashboard</title>
+<link rel="stylesheet" href="/static/css/atlas.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">ATLAS</span>
+    <span class="brand-sub">Autonomous Observatory</span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="tonight">Tonight</button>
+    <button class="tab" data-tab="plan">Plan</button>
+    <button class="tab" data-tab="science">Science</button>
+    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="atlas">ATLAS</button>
+    <button class="tab" data-tab="setup">Setup</button>
+  </nav>
+  <div class="controls">
+    <span id="ws-indicator" class="indicator" title="WebSocket status">●</span>
+    <button id="take-control" class="btn-secondary">Take Control</button>
+  </div>
+</header>
+
+<main>
+  <!-- TONIGHT -->
+  <section class="panel" id="tab-tonight">
+    <div id="gonogo" class="gonogo neutral">
+      <div class="gonogo-label">STATUS</div>
+      <div class="gonogo-text" id="gonogo-text">Loading…</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Session</h3>
+        <div id="session-info" class="kv">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Hardware</h3>
+        <div id="hardware-info" class="kv">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Agents</h3>
+        <div id="agents-info" class="kv">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Disk</h3>
+        <div id="disk-info" class="kv">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Active Alerts</h3>
+        <div id="alerts-info">No alerts.</div>
+      </div>
+    </div>
+
+    <div class="card events-card">
+      <h3>Agent Activity</h3>
+      <div id="events" class="events"></div>
+    </div>
+  </section>
+
+  <!-- PLAN -->
+  <section class="panel hidden" id="tab-plan">
+    <div class="row-spread">
+      <h2>Campaigns</h2>
+      <button id="new-campaign" class="btn-primary">+ New Campaign</button>
+    </div>
+    <div id="campaigns-list" class="list">Loading…</div>
+  </section>
+
+  <!-- SCIENCE -->
+  <section class="panel hidden" id="tab-science">
+    <h2>Submission Queue</h2>
+    <p class="hint">Every measurement queues here for your approval before it goes to MPC / AAVSO / TNS / NASA Exoplanet Watch.</p>
+    <div id="submissions-list" class="list">Loading…</div>
+  </section>
+
+  <!-- HISTORY -->
+  <section class="panel hidden" id="tab-history">
+    <h2>Session History</h2>
+    <div id="sessions-list" class="list">Loading…</div>
+  </section>
+
+  <!-- ATLAS CHAT -->
+  <section class="panel hidden" id="tab-atlas">
+    <h2>ATLAS Chat</h2>
+    <div id="chat-history" class="chat"></div>
+    <form id="chat-form" class="chat-form">
+      <input type="text" id="chat-input" placeholder="Ask ATLAS anything…" autocomplete="off">
+      <button type="button" id="voice-btn" title="Hold to speak">🎙</button>
+      <button type="submit" class="btn-primary">Send</button>
+    </form>
+  </section>
+
+  <!-- SETUP -->
+  <section class="panel hidden" id="tab-setup">
+    <h2>Setup</h2>
+    <div id="setup-status" class="setup-status">Loading…</div>
+
+    <div class="card" id="vault-card">
+      <h3>Master Password</h3>
+      <p class="hint">ATLAS encrypts all credentials (API keys, submission tokens) with a key derived from this password.</p>
+      <div id="vault-form"></div>
+    </div>
+
+    <div class="card">
+      <h3>Anthropic API Key</h3>
+      <p class="hint">Powers all 5 AI agents. Get yours at console.anthropic.com.</p>
+      <div class="cred-form" data-key="anthropic_api_key" data-desc="Anthropic API key for agent reasoning">
+        <input type="password" placeholder="sk-ant-..." class="cred-value">
+        <button class="btn-primary cred-save">Save</button>
+        <span class="cred-status"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Site</h3>
+      <form id="site-form" class="form-grid">
+        <label>Observatory name<input name="observatory_name" required></label>
+        <label>MPC code (optional)<input name="observatory_code" maxlength="8"></label>
+        <label>Latitude (deg)<input name="latitude" type="number" step="0.0001" required></label>
+        <label>Longitude (deg)<input name="longitude" type="number" step="0.0001" required></label>
+        <label>Elevation (m)<input name="elevation_m" type="number" step="1" value="0"></label>
+        <label>Timezone<input name="timezone" value="UTC" required></label>
+        <label>Horizon Alt min (deg)<input name="horizon_alt_min" type="number" step="1" value="20"></label>
+        <div class="form-actions">
+          <button class="btn-primary" type="submit">Save Site</button>
+          <span class="form-status"></span>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Equipment</h3>
+      <form id="equipment-form" class="form-grid">
+        <label>Camera type
+          <select name="camera_type">
+            <option value="OSC">One-Shot Colour (OSC)</option>
+            <option value="MONO">Mono + Filter Wheel</option>
+          </select>
+        </label>
+        <label>Filters (comma-separated, mono only)<input name="filters_csv" placeholder="L,R,G,B,Ha,V"></label>
+        <label>Sensor pixel size (μm)<input name="sensor_pixel_size_um" type="number" step="0.01" required></label>
+        <label>Focal length (mm)<input name="focal_length_mm" type="number" step="0.1" required></label>
+        <label>Aperture (mm)<input name="aperture_mm" type="number" step="0.1" required></label>
+        <label>NINA host<input name="nina_host" value="localhost"></label>
+        <label>NINA port<input name="nina_port" type="number" value="1888"></label>
+        <label>PHD2 host<input name="phd2_host" value="localhost"></label>
+        <label>PHD2 port<input name="phd2_port" type="number" value="4400"></label>
+        <label>ASTAP path (optional)<input name="astap_path" placeholder="C:\Program Files\astap\astap.exe"></label>
+        <label>Roof mode
+          <select name="roof_mode">
+            <option value="manual">Manual</option>
+            <option value="nina">NINA-controlled</option>
+            <option value="custom">Custom driver</option>
+          </select>
+        </label>
+        <label class="checkbox"><input type="checkbox" name="mount_supports_nonsidereal"> Mount supports non-sidereal tracking</label>
+        <div class="form-actions">
+          <button class="btn-primary" type="submit">Save Equipment</button>
+          <span class="form-status"></span>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>Notifications</h3>
+      <p class="hint">ntfy.sh push notifications. Pick a unique topic name and subscribe to it in the ntfy mobile app.</p>
+      <div class="cred-form" data-key="ntfy_topic" data-desc="ntfy.sh topic for ATLAS alerts">
+        <input type="text" placeholder="my-observatory-alerts-h7f3k2" class="cred-value">
+        <button class="btn-primary cred-save">Save</button>
+        <span class="cred-status"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Submission Credentials (optional)</h3>
+      <p class="hint">Only needed if you intend to submit science to these services.</p>
+      <div class="cred-form" data-key="aavso_observer_code" data-desc="AAVSO observer code">
+        <label>AAVSO observer code</label>
+        <input type="text" class="cred-value">
+        <button class="btn-primary cred-save">Save</button>
+        <span class="cred-status"></span>
+      </div>
+      <div class="cred-form" data-key="tns_api_token" data-desc="TNS API token">
+        <label>TNS API token</label>
+        <input type="password" class="cred-value">
+        <button class="btn-primary cred-save">Save</button>
+        <span class="cred-status"></span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>ATLAS <span id="version-pill">…</span></span>
+  <span class="muted">Five Claude agents · NINA · PHD2 · ASTAP · Siril · AutoStakkert!4</span>
+</footer>
+
+<script src="/static/js/app.js" type="module"></script>
+</body>
+</html>

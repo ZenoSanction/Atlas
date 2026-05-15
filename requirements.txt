@@ -1,0 +1,49 @@
+# ATLAS — runtime dependencies
+# Loose version pins to stay compatible with Python 3.11 and 3.12+.
+
+# Web server
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.30,<0.40
+websockets>=13,<16
+python-multipart>=0.0.9
+jinja2>=3.1
+
+# Database
+sqlalchemy>=2.0,<3.0
+
+# AI
+anthropic>=0.39,<1.0
+
+# HTTP client (used directly for ntfy.sh push too)
+httpx>=0.27,<1.0
+requests>=2.31
+
+# Astronomy
+astropy>=6.1
+astroquery>=0.4.7
+ephem>=4.1
+
+# Image / numerical
+numpy>=1.26,<3.0
+scipy>=1.13
+pillow>=10.0
+photutils>=2.0
+astroalign>=2.5
+
+# FITS handled by astropy.io.fits (already pulled in by astropy)
+
+# Security
+cryptography>=43
+argon2-cffi>=23
+
+# Utilities
+pydantic>=2.8
+pydantic-settings>=2.5
+python-dotenv>=1.0
+psutil>=6.0
+rich>=13
+
+# Testing (dev)
+pytest>=8.0
+pytest-asyncio>=0.24
+pytest-httpx>=0.32

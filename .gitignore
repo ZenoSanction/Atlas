@@ -1,55 +1,48 @@
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+*$py.class
+*.so
 .Python
-*.egg
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# Virtual environments
 venv/
-.venv/
 env/
+.venv
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
-# PyInstaller
-*.spec
-dist/
-build/
+# ATLAS runtime data
+data/atlas.db
+data/atlas.db-journal
+data/atlas.db-wal
+data/atlas.db-shm
+data/frames/
+data/references/
+data/reports/
+data/logs/
+data/cache/
 
-# Secrets & config
-config.local.json
-*.token
+# Credentials / secrets — never commit
 .env
-
-# Observatory-specific config (copy obs_config.example.json → obs_config.json and fill in)
-obs_config.json
-dashboard/config.json
-
-# ATLAS memory files — unique to each observatory, never committed
-memory/
-*.memory.md
-atlas_identity.md
-atlas_narrative.md
-atlas_session_log.md
-atlas_target_history.md
-atlas_equipment_journal.md
-atlas_weather_patterns.md
-atlas_wishlist.md
-
-# Logs & backups
-*.log
-*.bak
-logs/
-
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
+.env.local
+*.key
+*.pem
+config/credentials.encrypted
+master_password.lock
 
 # IDE
 .vscode/
 .idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Build artifacts
+dist/
+build/
+*.spec

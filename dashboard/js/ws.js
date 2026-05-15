@@ -1,0 +1,63 @@
+// WebSocket connection with auto-reconnect and event-stream rendering.
+
+let socket = null;
+let reconnectDelay = 1000;
+const MAX_EVENTS = 200;
+
+export function connectEvents() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${proto}://${location.host}/ws/events`;
+  socket = new WebSocket(url);
+
+  socket.onopen = () => {
+    reconnectDelay = 1000;
+    document.getElementById("ws-indicator").classList.add("connected");
+  };
+  socket.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      handleEvent(data);
+    } catch (e) {
+      console.error("WS parse:", e);
+    }
+  };
+  socket.onclose = () => {
+    document.getElementById("ws-indicator").classList.remove("connected");
+    setTimeout(connectEvents, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.5, 15000);
+  };
+  socket.onerror = (e) => console.warn("WS error:", e);
+}
+
+function handleEvent(data) {
+  if (data.type === "connected") return;
+  const events = document.getElementById("events");
+  if (!events) return;
+
+  const el = document.createElement("div");
+  el.className = "event";
+  if (data.type === "emergency") el.classList.add("emergency");
+  if (data.sender) el.classList.add(`from-${data.sender}`);
+
+  const ts = data.sent_at ? new Date(data.sent_at) : new Date();
+  const tsStr = ts.toLocaleTimeString();
+
+  if (data.type === "emergency") {
+    el.innerHTML = `<span class="ts">${tsStr}</span><span class="who">EMERGENCY</span>${esc(data.message || data.code)}`;
+  } else {
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">${esc(data.sender || "system")} → ${esc(data.recipient || "")}</span>
+      <span class="kind">[${esc(data.kind || "")}]</span>
+    `;
+  }
+  events.prepend(el);
+  while (events.children.length > MAX_EVENTS) {
+    events.removeChild(events.lastChild);
+  }
+}
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
