@@ -670,6 +670,18 @@ def make_brochure(filename):
         "Planner if conditions have changed.",
         st["body_dense"]))
 
+    story.append(Paragraph("Talk to ATLAS &#8212; text and voice", st["h_item"]))
+    story.append(Paragraph(
+        "The dashboard's ATLAS tab is a live conversation with the Operator "
+        "agent. Type, or tap the microphone and speak: the browser's Web "
+        "Speech API streams your voice to speech-to-text, ATLAS thinks, and "
+        "the answer comes back as both text and spoken audio. Ask for "
+        "tonight's GO/NO-GO, the current guiding RMS, why a target was "
+        "skipped, or to start a sequence -- all hands-free from the warm "
+        "room. No extra software is required on the warm-room PC; the "
+        "feature works in any modern Chromium browser on the LAN.",
+        st["body_dense"]))
+
     story.append(Paragraph("Decision audit trail", st["h_item"]))
     story.append(Paragraph(
         "Every major agent decision -- go/no-go, standby entry, target "

@@ -326,6 +326,8 @@ ATLAS is built around that asymmetry.
 
 - **Take Control toggle** in the top bar of every dashboard tab. Engage to pause agent command authority and gain direct hardware controls. Every action is logged into the session record.
 
+- **Talk to ATLAS — text *and* voice.** The dashboard's ATLAS tab is a live conversation with the Operator agent. Type, or tap the microphone and speak: the browser's Web Speech API streams your voice to speech-to-text, ATLAS thinks, and the answer comes back as both text and spoken audio. Ask for tonight's GO/NO-GO, the current guiding RMS, why a target was skipped, or to start a sequence — all hands-free from the warm room. No extra software; works in any modern Chromium browser on the LAN.
+
 - **Decision audit trail.** Every major agent decision writes a row to the `decisions` table with inputs, outputs, rationale, and outcome. The session report's Decision Audit section presents each decision in order with a hindsight verdict.
 
 - **The 10-section session report.** Executive summary, session timeline, per-target results, plan versions, equipment performance, processing recap, error log, decision audit, campaign status, recommendations for next session. Self-documenting. Reproducible. Ready to share.
