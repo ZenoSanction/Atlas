@@ -18,7 +18,8 @@ from atlas.db.models import (
     KnowledgeThread, Measurement, MeasurementKind, NotificationConfig,
     ReferenceFrame, RetentionPolicy, Session as SessionRow, SessionState,
     SiteConfig, StackProduct, StorageEvent, Submission,
-    SubmissionDestination, SubmissionStatus, Target, WorkflowKind,
+    SubmissionDestination, SubmissionStatus, Target, WeatherThresholds,
+    WorkflowKind,
 )
 from atlas.db.session import get_session
 from atlas.logging_setup import get_logger
@@ -94,6 +95,32 @@ class ConfigManager:
                 obj = NotificationConfig()
                 s.add(obj)
                 s.flush()
+            s.expunge(obj)
+            return obj
+
+    @staticmethod
+    def get_weather_thresholds() -> WeatherThresholds:
+        """Single-row table. Lazily seeded with defaults from the model."""
+        with get_session() as s:
+            obj = s.query(WeatherThresholds).first()
+            if obj is None:
+                obj = WeatherThresholds()
+                s.add(obj)
+                s.flush()
+            s.expunge(obj)
+            return obj
+
+    @staticmethod
+    def save_weather_thresholds(**fields) -> WeatherThresholds:
+        with get_session() as s:
+            obj = s.query(WeatherThresholds).first()
+            if obj is None:
+                obj = WeatherThresholds(**fields)
+                s.add(obj)
+            else:
+                for k, v in fields.items():
+                    setattr(obj, k, v)
+            s.flush()
             s.expunge(obj)
             return obj
 

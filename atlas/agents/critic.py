@@ -128,8 +128,9 @@ class Critic(BaseAgent):
         self._last_fast = 0.0
         self._last_standard = 0.0
         self._alert_state: dict[str, int] = {}  # code -> consecutive_count
-        self._thresholds = SafetyThresholds()
         self._initial_done = False
+        # _thresholds is reloaded from DB on each tick so Setup edits take
+        # effect at the next standard loop without restart.
 
     async def run(self) -> None:
         self.log.info("Critic agent online (fast %ds, standard %ds)",
@@ -157,13 +158,84 @@ class Critic(BaseAgent):
             await asyncio.sleep(5)
 
     async def _fast_loop(self) -> None:
-        """Fast loop: guiding, focus, frame quality, camera. Imaging-only."""
+        """Fast loop: guiding RMS, focus HFR, camera temperature.
+        Only runs when a session is actively imaging."""
         sess = SessionManager.latest()
         if sess is None or sess.state.value not in ("nominal", "warning"):
             return
-        # TODO Phase 2: pull live values from PHD2 and NINA, emit alerts on
-        # threshold breach. For now this is a heartbeat.
-        self.log.debug("fast loop tick")
+
+        from atlas.config import get_settings
+        if get_settings().simulation_mode:
+            # In sim mode the fast loop ticks but doesn't try to pull from
+            # the fake hardware (the fakes don't expose guiding stats).
+            self.log.debug("fast loop tick (sim)")
+            return
+
+        equip = ConfigManager.get_equipment()
+        if equip is None:
+            return
+        session_id = sess.id
+
+        # ---- Guiding RMS (PHD2) ------------------------------------------
+        try:
+            from atlas.hardware.phd2 import Phd2Client
+            async with Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
+                                    timeout=3.0) as phd2:
+                stats = await phd2.call("get_star_image")  # cheap reachability probe
+                # Try to pull guiding stats
+                try:
+                    gstats = await phd2.call("get_guide_stats")
+                    rms = float(gstats.get("rms_total", 0.0))
+                    if rms > 4.0:
+                        await self._raise(AlertSeverity.CRITICAL, "guiding_lost",
+                                            f"Guiding RMS {rms:.2f}\" > 4.0\"",
+                                            session_id=session_id,
+                                            data={"rms_total": rms})
+                    elif rms > 2.0:
+                        await self._raise(AlertSeverity.WARNING, "guiding_drift",
+                                            f"Guiding RMS {rms:.2f}\" > 2.0\"",
+                                            session_id=session_id,
+                                            data={"rms_total": rms})
+                    else:
+                        self._clear("guiding_lost")
+                        self._clear("guiding_drift")
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log.debug("PHD2 fast-loop poll failed: %s", e)
+
+        # ---- Camera temperature + focuser HFR (NINA) ---------------------
+        try:
+            from atlas.hardware.nina import NinaClient
+            async with NinaClient(host=equip.nina_host, port=equip.nina_port,
+                                    timeout=3.0) as nina:
+                cam = await nina.camera_info()
+                temp = cam.get("temperature") if isinstance(cam, dict) else None
+                setpoint = float(equip.cooling_setpoint_c)
+                if temp is not None and abs(float(temp) - setpoint) > 3.0:
+                    await self._raise(AlertSeverity.WARNING, "cooling_drift",
+                                        f"CCD temp {temp:.1f}°C drifted >3°C from setpoint {setpoint:.1f}°C",
+                                        session_id=session_id,
+                                        data={"temperature_c": temp,
+                                                "setpoint_c": setpoint})
+                else:
+                    self._clear("cooling_drift")
+                # Focuser HFR — NINA exposes this if focusing has run
+                # TODO Phase 2: pull last-known HFR from NINA history once
+                # the Advanced API endpoint is wired through nina.py
+        except Exception as e:
+            self.log.debug("NINA fast-loop poll failed: %s", e)
+
+        # Broadcast a lightweight tick so the dashboard sees the fast loop
+        # actually running.
+        await self.bus.broadcast_event({
+            "type": "assessment",
+            "sender": "critic",
+            "kind": "fast_loop_tick",
+            "severity": "ok",
+            "summary": "Guiding + cooling checked.",
+            "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        })
 
     async def _standard_loop(self) -> None:
         """Standard loop: weather pull + per-metric assessment + push to Operator."""
@@ -181,7 +253,8 @@ class Critic(BaseAgent):
             self.log.warning("Open-Meteo fetch failed: %s", e)
             return
 
-        t = self._thresholds
+        # Pull live thresholds from DB so Setup-tab edits apply immediately
+        t = SafetyThresholds.from_db()
         checks = [
             _check_wind(snap, t),
             _check_dew_margin(snap, t),

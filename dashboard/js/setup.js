@@ -5,7 +5,38 @@ export async function initSetup(api) {
   await renderVaultForm(api);
   await renderSiteForm(api);
   await renderEquipmentForm(api);
+  await renderThresholdsForm(api);
   wireCredentialForms(api);
+}
+
+async function renderThresholdsForm(api) {
+  const form = document.getElementById("thresholds-form");
+  if (!form) return;
+  try {
+    const cur = await api("/setup/weather-thresholds");
+    for (const [k, v] of Object.entries(cur)) {
+      const el = form.elements.namedItem(k);
+      if (el && v !== null && v !== undefined) el.value = v;
+    }
+  } catch {}
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const status = form.querySelector(".form-status");
+    const fd = new FormData(form);
+    const data = {};
+    for (const [k, v] of fd.entries()) {
+      if (v === "" || v === undefined) continue;
+      data[k] = Number(v);
+    }
+    try {
+      await api("/setup/weather-thresholds", { method: "POST",
+        body: JSON.stringify(data) });
+      status.textContent = "Saved — Critic picks up new values on its next tick. ✓";
+      status.className = "form-status ok";
+    } catch (err) {
+      status.textContent = err.message; status.className = "form-status err";
+    }
+  };
 }
 
 async function refreshStatus(api) {

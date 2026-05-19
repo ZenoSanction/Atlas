@@ -479,3 +479,68 @@ async def operator_verdict() -> dict:
         return {"verdict": "UNKNOWN", "reason": "Awaiting first Critic assessment.",
                  "decided_at": None, "sources": []}
     return v.to_jsonable()
+
+
+# ============================================================================
+# Weather thresholds (Setup tab)
+# ============================================================================
+
+@api_router.get("/setup/weather-thresholds")
+async def get_weather_thresholds() -> dict:
+    t = ConfigManager.get_weather_thresholds()
+    return {
+        "wind_speed_warn_ms": t.wind_speed_warn_ms,
+        "wind_speed_critical_ms": t.wind_speed_critical_ms,
+        "humidity_warn_pct": t.humidity_warn_pct,
+        "humidity_critical_pct": t.humidity_critical_pct,
+        "dew_margin_warn_c": t.dew_margin_warn_c,
+        "dew_margin_critical_c": t.dew_margin_critical_c,
+        "cloud_cover_warn_pct": t.cloud_cover_warn_pct,
+        "cloud_cover_critical_pct": t.cloud_cover_critical_pct,
+    }
+
+
+@api_router.post("/setup/weather-thresholds")
+async def save_weather_thresholds(body: dict) -> dict:
+    allowed = {
+        "wind_speed_warn_ms", "wind_speed_critical_ms",
+        "humidity_warn_pct", "humidity_critical_pct",
+        "dew_margin_warn_c", "dew_margin_critical_c",
+        "cloud_cover_warn_pct", "cloud_cover_critical_pct",
+    }
+    bad = set(body.keys()) - allowed
+    if bad:
+        raise HTTPException(400, f"Unknown fields: {sorted(bad)}")
+    fields = {k: float(v) for k, v in body.items()}
+    ConfigManager.save_weather_thresholds(**fields)
+    return {"ok": True}
+
+
+# ============================================================================
+# Plan — tonight's visible targets
+# ============================================================================
+
+@api_router.get("/plan/tonight")
+async def plan_tonight() -> dict:
+    """The Planner's latest visible-target list. Refreshed every 30 min and
+    on REVISION_REQUEST from the Operator. Returns null when no plan exists
+    yet (e.g., no active campaigns, no site config)."""
+    from atlas.agents.state import get_state
+    plan = get_state().get_tonight_plan()
+    return {"plan": plan}
+
+
+# ============================================================================
+# Agent activity (post-session + research summaries)
+# ============================================================================
+
+@api_router.get("/agents/activity")
+async def agents_activity() -> dict:
+    """Latest stored activity from Archivist + Oracle, for the Tonight
+    tab's Agent Activity card."""
+    from atlas.agents.state import get_state
+    st = get_state()
+    return {
+        "archivist": st.get_archivist_last(),
+        "oracle": st.get_oracle_last(),
+    }

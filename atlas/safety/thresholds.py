@@ -17,6 +17,28 @@ class SafetyThresholds:
     cloud_cover_warn_pct: float = 60.0
     cloud_cover_critical_pct: float = 85.0
 
+    @classmethod
+    def from_db(cls) -> "SafetyThresholds":
+        """Build a thresholds instance from the persisted Setup-tab values.
+        Falls back to defaults if the DB row doesn't exist yet (e.g., during
+        first-launch before any Setup save)."""
+        try:
+            from atlas.db.managers import ConfigManager
+            row = ConfigManager.get_weather_thresholds()
+            return cls(
+                wind_speed_warn_ms=row.wind_speed_warn_ms,
+                wind_speed_critical_ms=row.wind_speed_critical_ms,
+                humidity_warn_pct=row.humidity_warn_pct,
+                humidity_critical_pct=row.humidity_critical_pct,
+                dew_margin_warn_c=row.dew_margin_warn_c,
+                dew_margin_critical_c=row.dew_margin_critical_c,
+                cloud_cover_warn_pct=row.cloud_cover_warn_pct,
+                cloud_cover_critical_pct=row.cloud_cover_critical_pct,
+            )
+        except Exception:
+            # DB not ready (tests, first install, etc.) — use defaults
+            return cls()
+
 
 @dataclass
 class ThresholdResult:

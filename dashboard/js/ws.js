@@ -61,6 +61,38 @@ function handleEvent(data) {
       <span class="kind">[${esc(data.severity || "ok")}]</span>
       ${esc(data.summary || "")}
     `;
+  } else if (data.type === "plan_update") {
+    el.classList.add("kind-plan");
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">PLANNER</span>
+      <span class="kind">[${esc(data.kind || "plan")}]</span>
+      ${data.visible} visible / ${data.active_campaigns} active campaigns (${esc(data.reason || "")})
+    `;
+  } else if (data.type === "session_archived") {
+    el.classList.add("kind-archivist");
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">ARCHIVIST</span>
+      <span class="kind">[session_archived]</span>
+      ${esc(data.summary || "")}
+    `;
+  } else if (data.type === "archivist_tick") {
+    el.classList.add("kind-archivist");
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">ARCHIVIST</span>
+      <span class="kind">[idle]</span>
+      ${esc(data.summary || "")}
+    `;
+  } else if (data.type === "research_pass") {
+    el.classList.add("kind-oracle");
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">ORACLE</span>
+      <span class="kind">[${esc(data.kind || "research")}]</span>
+      ${esc(data.summary || "")}
+    `;
   } else {
     el.innerHTML = `
       <span class="ts">${tsStr}</span>

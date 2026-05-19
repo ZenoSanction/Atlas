@@ -362,3 +362,6 @@ footer .muted { color: var(--text-dim); }
 /* Agent activity feed — colour the new event kinds */
 .event.kind-verdict    { border-left: 3px solid var(--gold); padding-left: 8px; }
 .event.kind-assessment { border-left: 3px solid var(--accent); padding-left: 8px; }
+.event.kind-plan       { border-left: 3px solid #8b5cf6; padding-left: 8px; }   /* violet */
+.event.kind-archivist  { border-left: 3px solid #38bdf8; padding-left: 8px; }   /* sky */
+.event.kind-oracle     { border-left: 3px solid #ec4899; padding-left: 8px; }   /* pink */

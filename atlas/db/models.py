@@ -221,6 +221,25 @@ class VersionInfo(Base):
     installed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class WeatherThresholds(Base):
+    """User-tunable weather safety thresholds. Single-row table. The Critic
+    reads these on every standard-loop tick; the Setup tab edits them.
+    Defaults match atlas.safety.thresholds.SafetyThresholds()."""
+    __tablename__ = "weather_thresholds"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wind_speed_warn_ms: Mapped[float] = mapped_column(Float, default=6.7)
+    wind_speed_critical_ms: Mapped[float] = mapped_column(Float, default=8.9)
+    humidity_warn_pct: Mapped[float] = mapped_column(Float, default=85.0)
+    humidity_critical_pct: Mapped[float] = mapped_column(Float, default=95.0)
+    dew_margin_warn_c: Mapped[float] = mapped_column(Float, default=5.0)
+    dew_margin_critical_c: Mapped[float] = mapped_column(Float, default=2.0)
+    cloud_cover_warn_pct: Mapped[float] = mapped_column(Float, default=60.0)
+    cloud_cover_critical_pct: Mapped[float] = mapped_column(Float, default=85.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                  onupdate=datetime.utcnow)
+
+
 # ============================================================================
 # Astronomy
 # ============================================================================

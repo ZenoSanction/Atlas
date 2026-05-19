@@ -77,6 +77,9 @@ class _ObservatoryState:
         self._lock = Lock()
         self._assessment: WeatherAssessment | None = None
         self._verdict: OperatorVerdict | None = None
+        self._tonight_plan: dict | None = None
+        self._archivist_last: dict | None = None
+        self._oracle_last: dict | None = None
 
     # Critic writes here ----------------------------------------------------
     def set_assessment(self, a: WeatherAssessment) -> None:
@@ -99,6 +102,33 @@ class _ObservatoryState:
     def get_verdict(self) -> OperatorVerdict | None:
         with self._lock:
             return self._verdict
+
+    # Planner writes here ---------------------------------------------------
+    def set_tonight_plan(self, plan: dict) -> None:
+        with self._lock:
+            self._tonight_plan = plan
+
+    def get_tonight_plan(self) -> dict | None:
+        with self._lock:
+            return self._tonight_plan
+
+    # Archivist writes here -------------------------------------------------
+    def set_archivist_last(self, info: dict) -> None:
+        with self._lock:
+            self._archivist_last = info
+
+    def get_archivist_last(self) -> dict | None:
+        with self._lock:
+            return self._archivist_last
+
+    # Oracle writes here ----------------------------------------------------
+    def set_oracle_last(self, info: dict) -> None:
+        with self._lock:
+            self._oracle_last = info
+
+    def get_oracle_last(self) -> dict | None:
+        with self._lock:
+            return self._oracle_last
 
 
 _state: _ObservatoryState | None = None
