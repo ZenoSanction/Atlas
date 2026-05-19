@@ -135,14 +135,21 @@ class BaseAgent(ABC):
         ]
 
         for _ in range(max_tool_iters):
+            # Only pass `tools` when non-empty. The Anthropic API rejects
+            # `tools: null` with a 400 ("tools: Input should be a valid array"),
+            # so omit the kwarg entirely when this agent has no tools.
+            create_kwargs: dict[str, Any] = {
+                "model": self._settings.claude_model,
+                "max_tokens": self._settings.claude_max_tokens,
+                "system": self._system_prompt,
+                "messages": messages,
+            }
+            if tool_defs:
+                create_kwargs["tools"] = tool_defs
             try:
                 resp = await asyncio.to_thread(
                     client.messages.create,
-                    model=self._settings.claude_model,
-                    max_tokens=self._settings.claude_max_tokens,
-                    system=self._system_prompt,
-                    tools=tool_defs if tool_defs else None,
-                    messages=messages,
+                    **create_kwargs,
                 )
             except Exception as e:
                 self.log.warning("Claude API call failed: %s", e)
