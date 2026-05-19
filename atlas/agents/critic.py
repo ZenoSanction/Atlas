@@ -161,7 +161,10 @@ class Critic(BaseAgent):
         """Fast loop: guiding RMS, focus HFR, camera temperature.
         Only runs when a session is actively imaging."""
         sess = SessionManager.latest()
-        if sess is None or sess.state.value not in ("nominal", "warning"):
+        if sess is None:
+            return
+        state = sess.state.value if hasattr(sess.state, "value") else sess.state
+        if state not in ("nominal", "warning"):
             return
 
         from atlas.config import get_settings

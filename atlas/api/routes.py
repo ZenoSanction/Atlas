@@ -155,8 +155,11 @@ async def tonight_status() -> dict:
     agents = get_coordinator().status()
     disk = DiskMonitor().snapshot(record=False)
     alerts = [
-        {"id": a.id, "severity": a.severity.value, "code": a.code,
-          "message": a.message, "raised_at": a.raised_at.isoformat()}
+        {"id": a.id,
+          "severity": (a.severity.value if hasattr(a.severity, "value") else a.severity),
+          "code": a.code,
+          "message": a.message,
+          "raised_at": a.raised_at.isoformat()}
         for a in AlertManager.unresolved()
     ]
     hardware = await _hardware_snapshot()
