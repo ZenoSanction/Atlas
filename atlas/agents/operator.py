@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from atlas.agents.base import BaseAgent
+from atlas.agents.operator_tools import all_operator_tools
 from atlas.db.managers import AlertManager, SessionManager
 from atlas.db.models import (
     AgentMessageKind, AgentName, AlertSeverity, SessionState,
@@ -25,6 +26,11 @@ class Operator(BaseAgent):
         super().__init__()
         self._current_session_id: int | None = None
         self._auto_fix_attempts: dict[str, int] = {}  # code -> attempts
+        # Register chat-time tools (weather, system status). Without these,
+        # the dashboard's ATLAS-tab chat could only answer from training
+        # knowledge — the Operator literally had no way to fetch live state.
+        for spec in all_operator_tools():
+            self.register_tool(spec)
 
     async def run(self) -> None:
         self.log.info("Operator agent online — final authority")
