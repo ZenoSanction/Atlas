@@ -51,6 +51,44 @@ async function renderTonightTargets(api) {
 
 async function renderCampaigns(api) {
   const container = document.getElementById("campaigns-list");
+
+  // Bind the "+ New Campaign" button once, regardless of whether the
+  // list is empty or full. Previously this lived after an early
+  // `return` in the empty branch, so the button was unresponsive when
+  // the campaigns list was empty — exactly the state every new install
+  // ships in. The dataset guard prevents stacking multiple click
+  // handlers on repeated renderPlan() calls.
+  const newBtn = document.getElementById("new-campaign");
+  if (newBtn && !newBtn.dataset.bound) {
+    newBtn.dataset.bound = "1";
+    newBtn.addEventListener("click", async () => {
+      const name = prompt("Campaign name?");
+      if (!name) return;
+      const workflow = prompt(
+        "Workflow (astrometry / photometry / exoplanet / transient / planetary / deepsky)?");
+      if (!workflow) return;
+      try {
+        await api("/plan/campaigns", {
+          method: "POST",
+          body: JSON.stringify({ name, workflow, priority: 50 }),
+        });
+        renderPlan(api);
+      } catch (e) {
+        alert("Error: " + e.message);
+      }
+    });
+  }
+
+  // Activate / pause are wired on window for onclick="..." in the rows.
+  window.activateCampaign = async (id) => {
+    await api(`/plan/campaigns/${id}/activate`, { method: "POST" });
+    renderPlan(api);
+  };
+  window.pauseCampaign = async (id) => {
+    await api(`/plan/campaigns/${id}/pause`, { method: "POST" });
+    renderPlan(api);
+  };
+
   try {
     const rows = await api("/plan/campaigns");
     if (!rows.length) {
@@ -77,29 +115,6 @@ async function renderCampaigns(api) {
   } catch (e) {
     container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
   }
-
-  window.activateCampaign = async (id) => {
-    await api(`/plan/campaigns/${id}/activate`, { method: "POST" });
-    renderPlan(api);
-  };
-  window.pauseCampaign = async (id) => {
-    await api(`/plan/campaigns/${id}/pause`, { method: "POST" });
-    renderPlan(api);
-  };
-
-  document.getElementById("new-campaign").onclick = async () => {
-    const name = prompt("Campaign name?");
-    if (!name) return;
-    const workflow = prompt("Workflow (astrometry / photometry / exoplanet / transient / planetary / deepsky)?");
-    if (!workflow) return;
-    try {
-      await api("/plan/campaigns", { method: "POST",
-        body: JSON.stringify({ name, workflow, priority: 50 }) });
-      renderPlan(api);
-    } catch (e) {
-      alert("Error: " + e.message);
-    }
-  };
 }
 
 function esc(s) {
