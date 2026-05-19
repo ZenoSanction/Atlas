@@ -325,3 +325,40 @@ footer .muted { color: var(--text-dim); }
   border: 1px solid var(--line); background: var(--panel);
   font-family: "Cascadia Code", Consolas, monospace; font-size: 11px;
 }
+
+/* Weather tab — forecast table */
+.tbl {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.tbl th, .tbl td {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+}
+.tbl th {
+  color: var(--text-dim); font-weight: 600; background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+.tbl tr.row-ok   td { background: transparent; }
+.tbl tr.row-warn td { background: rgba(251, 191, 36, 0.10); }
+.tbl tr.row-crit td { background: rgba(248, 113, 113, 0.12); }
+
+/* Weather + assessment item rows (used outside .list .item) */
+#weather-checks .item-row {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 6px 0; border-bottom: 1px solid var(--line); align-items: center;
+}
+#weather-checks .item-row:last-child { border-bottom: none; }
+#weather-checks .pill {
+  display: inline-block; padding: 1px 8px; border-radius: 10px;
+  border: 1px solid var(--line); font-size: 11px; text-transform: uppercase;
+  margin-right: 6px;
+}
+#weather-checks .pill.warning  { color: var(--warn); border-color: var(--warn); }
+#weather-checks .pill.critical { color: var(--crit); border-color: var(--crit); }
+#weather-checks .pill.ok       { color: var(--ok); border-color: var(--ok); }
+
+#weather-verdict { margin-bottom: 16px; }
+#weather-updated { color: var(--text-dim); font-size: 12px; }
+
+/* Agent activity feed — colour the new event kinds */
+.event.kind-verdict    { border-left: 3px solid var(--gold); padding-left: 8px; }
+.event.kind-assessment { border-left: 3px solid var(--accent); padding-left: 8px; }

@@ -11,8 +11,14 @@ from __future__ import annotations
 
 import asyncio
 
+from datetime import datetime
+
 from atlas.agents.base import BaseAgent
 from atlas.agents.operator_tools import all_operator_tools
+from atlas.agents.state import (
+    OperatorVerdict, VERDICT_CAUTION, VERDICT_GO, VERDICT_NOGO,
+    VERDICT_UNKNOWN, get_state,
+)
 from atlas.db.managers import AlertManager, SessionManager
 from atlas.db.models import (
     AgentMessageKind, AgentName, AlertSeverity, SessionState,
@@ -48,6 +54,8 @@ class Operator(BaseAgent):
     async def _handle(self, msg) -> None:
         if msg.kind == AgentMessageKind.ALERT:
             await self._handle_alert(msg)
+        elif msg.kind == AgentMessageKind.STATUS:
+            await self._handle_status(msg)
         elif msg.kind == AgentMessageKind.REVISION_REQUEST:
             await self._forward_to_planner(msg)
         elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
@@ -56,6 +64,45 @@ class Operator(BaseAgent):
             await self._handle_human_command(msg)
         else:
             self.log.debug("Operator ignoring message kind: %s", msg.kind)
+
+    async def _handle_status(self, msg) -> None:
+        """Status updates from other agents — primarily the Critic's weather
+        assessment. Compute a verdict and broadcast on change."""
+        kind = msg.payload.get("kind")
+        if kind != "weather_assessment":
+            self.log.debug("Operator ignoring status kind: %s", kind)
+            return
+        await self._update_verdict_from_weather(msg.payload)
+
+    async def _update_verdict_from_weather(self, payload: dict) -> None:
+        sev = payload.get("overall_severity", "ok")
+        summary = payload.get("summary", "")
+        if sev == "critical":
+            verdict, reason = VERDICT_NOGO, summary or "Critical weather breach"
+        elif sev == "warning":
+            verdict, reason = VERDICT_CAUTION, summary or "Weather warning"
+        elif sev == "ok":
+            verdict, reason = VERDICT_GO, "Weather nominal."
+        else:
+            verdict, reason = VERDICT_UNKNOWN, "Weather assessment unavailable."
+
+        new = OperatorVerdict(
+            decided_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            verdict=verdict, reason=reason, sources=["critic.weather_assessment"],
+        )
+        prev = get_state().set_verdict(new)
+        if prev is None or prev.verdict != verdict:
+            self.log.info("Verdict changed: %s -> %s (%s)",
+                            prev.verdict if prev else "—", verdict, reason)
+            await self.bus.broadcast_event({
+                "type": "verdict",
+                "sender": "operator",
+                "kind": "go_nogo",
+                "verdict": verdict,
+                "reason": reason,
+                "previous": prev.verdict if prev else None,
+                "sent_at": new.decided_at,
+            })
 
     async def _handle_alert(self, msg) -> None:
         severity = AlertSeverity(msg.payload.get("severity", "info"))

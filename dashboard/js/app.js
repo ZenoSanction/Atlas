@@ -4,6 +4,7 @@
 import { initTabs } from "/static/js/tabs.js";
 import { connectEvents } from "/static/js/ws.js";
 import { renderTonight, refreshTonight } from "/static/js/tonight.js";
+import { renderWeather, refreshWeather } from "/static/js/weather.js";
 import { renderPlan } from "/static/js/plan.js";
 import { renderScience } from "/static/js/science.js";
 import { renderHistory } from "/static/js/history.js";
@@ -29,6 +30,7 @@ window.atlas = { api };
 (async function boot() {
   initTabs({
     tonight: refreshTonight,
+    weather: renderWeather,
     plan: renderPlan,
     science: renderScience,
     history: renderHistory,

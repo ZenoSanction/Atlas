@@ -44,6 +44,23 @@ function handleEvent(data) {
 
   if (data.type === "emergency") {
     el.innerHTML = `<span class="ts">${tsStr}</span><span class="who">EMERGENCY</span>${esc(data.message || data.code)}`;
+  } else if (data.type === "verdict") {
+    el.classList.add("kind-verdict");
+    const prev = data.previous ? ` (was ${esc(data.previous)})` : "";
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">OPERATOR</span>
+      <span class="kind">[verdict]</span>
+      ${esc(data.verdict)}${prev} — ${esc(data.reason || "")}
+    `;
+  } else if (data.type === "assessment") {
+    el.classList.add("kind-assessment");
+    el.innerHTML = `
+      <span class="ts">${tsStr}</span>
+      <span class="who">CRITIC</span>
+      <span class="kind">[${esc(data.severity || "ok")}]</span>
+      ${esc(data.summary || "")}
+    `;
   } else {
     el.innerHTML = `
       <span class="ts">${tsStr}</span>

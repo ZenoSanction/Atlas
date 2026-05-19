@@ -15,6 +15,7 @@
   </div>
   <nav class="tabs" id="tabs">
     <button class="tab active" data-tab="tonight">Tonight</button>
+    <button class="tab" data-tab="weather">Weather</button>
     <button class="tab" data-tab="plan">Plan</button>
     <button class="tab" data-tab="science">Science</button>
     <button class="tab" data-tab="history">History</button>
@@ -61,6 +62,39 @@
     <div class="card events-card">
       <h3>Agent Activity</h3>
       <div id="events" class="events"></div>
+    </div>
+  </section>
+
+  <!-- WEATHER -->
+  <section class="panel hidden" id="tab-weather">
+    <div class="row-spread">
+      <h2>Weather</h2>
+      <div>
+        <span id="weather-updated" class="muted">—</span>
+        <button id="weather-refresh" class="btn-secondary" style="margin-left:0.5rem">Refresh</button>
+      </div>
+    </div>
+
+    <div id="weather-verdict" class="gonogo neutral">
+      <div class="gonogo-label">VERDICT</div>
+      <div class="gonogo-text" id="weather-verdict-text">Loading…</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Now</h3>
+        <div id="weather-now" class="kv">Loading…</div>
+      </div>
+      <div class="card">
+        <h3>Critic Assessment</h3>
+        <div id="weather-checks">Loading…</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Next 12 hours</h3>
+      <p class="hint">Auto-refresh every hour. Highlighted rows have at least one metric at warning or critical.</p>
+      <div id="weather-forecast">Loading…</div>
     </div>
   </section>
 

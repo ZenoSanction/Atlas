@@ -383,3 +383,99 @@ async def atlas_chat(req: ChatRequest) -> ChatResponse:
             )
     reply = await op.think(req.message)
     return ChatResponse(reply=reply, safe_mode=op.safe_mode)
+
+
+# ============================================================================
+# Weather + GO/NO-GO verdict
+# ============================================================================
+
+@api_router.get("/weather/current")
+async def weather_current() -> dict:
+    """Live current-conditions snapshot from Open-Meteo at the configured site."""
+    site = ConfigManager.get_site()
+    if site is None:
+        raise HTTPException(409, "Site coordinates not configured. Open Setup.")
+    from atlas.weather.openmeteo import OpenMeteoClient
+    try:
+        client = OpenMeteoClient(latitude=float(site.latitude),
+                                  longitude=float(site.longitude))
+        snap = await client.current()
+    except Exception as e:
+        raise HTTPException(502, f"Open-Meteo request failed: {e}")
+    return {
+        "observed_at": snap.observed_at,
+        "temperature_c": round(snap.temperature_c, 1),
+        "humidity_pct": round(snap.humidity_pct, 0),
+        "dew_point_c": round(snap.dew_point_c, 1),
+        "dew_margin_c": round(snap.temperature_c - snap.dew_point_c, 1),
+        "wind_speed_ms": round(snap.wind_speed_ms, 1),
+        "wind_gust_ms": (round(snap.wind_gust_ms, 1)
+                          if snap.wind_gust_ms is not None else None),
+        "cloud_cover_pct": round(snap.cloud_cover_pct, 0),
+        "pressure_hpa": round(snap.pressure_hpa, 1),
+        "precip_mm": round(snap.precip_mm, 2),
+        "site_lat": float(site.latitude),
+        "site_lon": float(site.longitude),
+        "observatory_name": site.observatory_name,
+    }
+
+
+@api_router.get("/weather/forecast")
+async def weather_forecast(hours: int = 12) -> dict:
+    """Hourly forecast from Open-Meteo. Default 12 hours = 'tonight'."""
+    hours = max(1, min(48, int(hours)))
+    site = ConfigManager.get_site()
+    if site is None:
+        raise HTTPException(409, "Site coordinates not configured. Open Setup.")
+    from atlas.weather.openmeteo import OpenMeteoClient
+    try:
+        client = OpenMeteoClient(latitude=float(site.latitude),
+                                  longitude=float(site.longitude))
+        rows = await client.forecast_hours(hours=hours)
+    except Exception as e:
+        raise HTTPException(502, f"Open-Meteo request failed: {e}")
+    out_rows = []
+    for r in rows:
+        dm = r["temperature_c"] - r["dew_point_c"]
+        out_rows.append({
+            "time_utc": r["time"],
+            "temperature_c": round(r["temperature_c"], 1),
+            "humidity_pct": round(r["humidity_pct"], 0),
+            "dew_point_c": round(r["dew_point_c"], 1),
+            "dew_margin_c": round(dm, 1),
+            "wind_speed_ms": round(r["wind_speed_ms"], 1),
+            "wind_gust_ms": (round(r["wind_gust_ms"], 1)
+                              if r.get("wind_gust_ms") is not None else None),
+            "cloud_cover_pct": round(r["cloud_cover_pct"], 0),
+            "precip_mm": round(r["precip_mm"], 2),
+        })
+    return {
+        "hours": hours,
+        "site_lat": float(site.latitude),
+        "site_lon": float(site.longitude),
+        "observatory_name": site.observatory_name,
+        "hourly": out_rows,
+    }
+
+
+@api_router.get("/critic/assessment")
+async def critic_assessment() -> dict:
+    """The Critic's latest weather assessment (per-metric pass/fail).
+    Returns null if the Critic hasn't run yet (just started, no site config, etc.)."""
+    from atlas.agents.state import get_state
+    a = get_state().get_assessment()
+    if a is None:
+        return {"assessment": None}
+    return {"assessment": a.to_jsonable()}
+
+
+@api_router.get("/operator/verdict")
+async def operator_verdict() -> dict:
+    """The Operator's latest GO / CAUTION / NO-GO decision.
+    Returns UNKNOWN until the Critic has reported in."""
+    from atlas.agents.state import get_state
+    v = get_state().get_verdict()
+    if v is None:
+        return {"verdict": "UNKNOWN", "reason": "Awaiting first Critic assessment.",
+                 "decided_at": None, "sources": []}
+    return v.to_jsonable()

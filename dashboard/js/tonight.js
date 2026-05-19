@@ -10,26 +10,39 @@ export async function refreshTonight(api) {
     document.getElementById("gonogo-text").textContent = `Error: ${e.message}`;
     return;
   }
+
+  // Pull the Operator's verdict in parallel — that's the authoritative banner
+  // since the chain of command is Critic-reports / Operator-decides.
+  let verdict = null;
+  try { verdict = await api("/operator/verdict"); } catch {}
+
   const banner = document.getElementById("gonogo");
   const txt = document.getElementById("gonogo-text");
-
-  // GO/NO-GO from alerts
   const alerts = s.alerts || [];
-  const crit = alerts.find(a => a.severity === "critical");
-  const warn = alerts.find(a => a.severity === "warning");
   banner.classList.remove("ok", "warn", "crit", "neutral");
-  if (crit) {
-    banner.classList.add("crit");
-    txt.textContent = `NO-GO — ${crit.message}`;
-  } else if (warn) {
-    banner.classList.add("warn");
-    txt.textContent = `CAUTION — ${warn.message}`;
-  } else if (s.session && (s.session.state === "nominal" || s.session.state === "pre_session")) {
-    banner.classList.add("ok");
-    txt.textContent = "GO — all systems nominal.";
+
+  if (verdict && verdict.verdict && verdict.verdict !== "UNKNOWN") {
+    const v = verdict.verdict;
+    if (v === "GO") banner.classList.add("ok");
+    else if (v === "CAUTION") banner.classList.add("warn");
+    else if (v === "NO-GO") banner.classList.add("crit");
+    else banner.classList.add("neutral");
+    txt.textContent = `${v} — ${verdict.reason || ""}`;
   } else {
-    banner.classList.add("neutral");
-    txt.textContent = s.session ? `Session ${s.session.state}` : "No active session.";
+    // No verdict yet — fall back to alert-derived hint, but mark UNKNOWN
+    // rather than pretending we know.
+    const crit = alerts.find(a => a.severity === "critical");
+    const warn = alerts.find(a => a.severity === "warning");
+    if (crit) {
+      banner.classList.add("crit");
+      txt.textContent = `NO-GO — ${crit.message}`;
+    } else if (warn) {
+      banner.classList.add("warn");
+      txt.textContent = `CAUTION — ${warn.message}`;
+    } else {
+      banner.classList.add("neutral");
+      txt.textContent = "Awaiting first Critic assessment…";
+    }
   }
 
   // Session card
