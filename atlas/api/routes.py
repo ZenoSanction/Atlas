@@ -11,6 +11,7 @@ Organised by dashboard tab. Each tab gets a route prefix:
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Optional
 
@@ -180,10 +181,51 @@ async def tonight_status() -> dict:
     }
 
 
+# In-process cache for the hardware snapshot. The dashboard polls
+# /api/tonight/status every 5 seconds; without this cache each poll
+# made 5 serial NINA calls + 1 PHD2 call (~10 s total worst case),
+# which saturated the browser's 6-concurrent-fetches-per-origin limit
+# and starved the Weather / Plan / Science / History tabs of network
+# slots. 10 s TTL gives the warm-room display a fresh-enough view
+# while keeping NINA/PHD2 traffic bounded.
+_HARDWARE_SNAPSHOT_CACHE: dict = {"at": 0.0, "data": None}
+_HARDWARE_SNAPSHOT_TTL_S = 10.0
+_HARDWARE_SNAPSHOT_HARD_TIMEOUT_S = 4.0
+
+
 async def _hardware_snapshot() -> dict:
-    """Best-effort snapshot of hardware status via NINA. Returns 'offline' on
-    any failure so the dashboard can render without crashing if NINA is down.
+    """Best-effort snapshot of hardware status via NINA.
+
+    Cached for ~10 s, wrapped in a 4 s hard timeout so a stalled NINA
+    or PHD2 can't block the dashboard. Returns 'unknown' on timeout
+    or any failure so the dashboard always renders.
     """
+    import time as _time
+    now = _time.monotonic()
+    if (_HARDWARE_SNAPSHOT_CACHE["data"] is not None
+            and (now - _HARDWARE_SNAPSHOT_CACHE["at"]) < _HARDWARE_SNAPSHOT_TTL_S):
+        return _HARDWARE_SNAPSHOT_CACHE["data"]
+
+    try:
+        data = await asyncio.wait_for(_hardware_snapshot_inner(),
+                                       timeout=_HARDWARE_SNAPSHOT_HARD_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        data = {
+            "camera":     {"connected": False, "status": "timeout"},
+            "mount":      {"connected": False, "status": "timeout"},
+            "focuser":    {"connected": False, "status": "timeout"},
+            "filterwheel":{"connected": False, "status": "timeout"},
+            "guiding":    {"connected": False, "status": "timeout"},
+        }
+        log.warning("Hardware snapshot exceeded %.1fs — returning timeout state",
+                    _HARDWARE_SNAPSHOT_HARD_TIMEOUT_S)
+
+    _HARDWARE_SNAPSHOT_CACHE["data"] = data
+    _HARDWARE_SNAPSHOT_CACHE["at"] = now
+    return data
+
+
+async def _hardware_snapshot_inner() -> dict:
     out = {
         "camera":     {"connected": False, "status": "unknown"},
         "mount":      {"connected": False, "status": "unknown"},

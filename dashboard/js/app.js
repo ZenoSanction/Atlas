@@ -48,8 +48,12 @@ window.atlas = { api };
     document.getElementById("version-pill").textContent = "offline";
   }
 
+  // Live state pushes come via WebSocket; this poll is the belt-and-braces
+  // fallback. 15 s avoids saturating the browser's 6-concurrent-fetches
+  // limit if the underlying /api/tonight/status is ever slow (e.g. NINA
+  // not responding).
   renderTonight(api);
-  setInterval(() => refreshTonight(api), 5000);
+  setInterval(() => refreshTonight(api), 15000);
 
   // Take Control toggle
   const tc = document.getElementById("take-control");
