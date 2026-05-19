@@ -13,9 +13,10 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from atlas import __version__
 from atlas.agents.coordinator import get_coordinator
@@ -65,12 +66,33 @@ async def lifespan(app: FastAPI):
         log.info("Goodbye.")
 
 
+class NoStoreOnDashboardMiddleware(BaseHTTPMiddleware):
+    """Force the browser to revalidate dashboard HTML/JS/CSS on every load.
+
+    The dashboard is small (a few KB), and without this the browser would
+    happily serve cached old JS modules forever — so a deploy that ships
+    new tab handlers, new endpoints, or new element IDs would look 'broken'
+    until the user manually hard-refreshed. Cache-Control: no-store is the
+    safest knob; the dashboard is fast enough that no caching is fine.
+    """
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+
 app = FastAPI(
     title="ATLAS",
     description="Autonomous Telescope & Learning Astronomy System",
     version=__version__,
     lifespan=lifespan,
 )
+
+app.add_middleware(NoStoreOnDashboardMiddleware)
 
 # API routes
 app.include_router(api_router)
