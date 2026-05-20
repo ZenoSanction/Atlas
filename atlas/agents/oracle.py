@@ -86,7 +86,7 @@ class Oracle(BaseAgent):
                 self.set_task("research pass complete — standing by",
                               state="idle")
             else:
-                self.log.debug("Oracle ignoring kind: %s", msg.kind)
+                await self.handle_relayed_message(msg)
 
     async def _handle_new_data(self, msg) -> None:
         session_id = msg.payload.get("session_id")

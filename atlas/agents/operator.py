@@ -70,7 +70,9 @@ class Operator(BaseAgent):
         elif msg.kind == AgentMessageKind.OPERATOR_COMMAND:
             await self._handle_human_command(msg)
         else:
-            self.log.debug("Operator ignoring message kind: %s", msg.kind)
+            # Unknown kind — surface to dashboard via the default relay
+            # handler so chat-initiated hand-offs are visible at minimum.
+            await self.handle_relayed_message(msg)
 
     async def _handle_status(self, msg) -> None:
         """Status updates from other agents — primarily the Critic's weather

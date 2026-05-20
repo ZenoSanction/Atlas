@@ -81,8 +81,22 @@ class Planner(BaseAgent):
 
             if msg.kind == AgentMessageKind.REVISION_REQUEST:
                 await self._handle_revision(msg)
+            elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
+                # Oracle (or another agent) proposes a target. Log + rebuild.
+                self.set_task(
+                    f"received candidate target — {(msg.payload or {}).get('summary', '')[:60]}",
+                    state="working")
+                self.log_decision("candidate_received",
+                                    inputs={"sender": str(msg.sender),
+                                              "payload": msg.payload},
+                                    rationale="Phase-1 stub: log + rebuild plan",
+                                    session_id=msg.session_id)
+                try:
+                    await self._rebuild_plan(reason="candidate_target")
+                except Exception:
+                    self.log.exception("Plan rebuild on candidate failed")
             else:
-                self.log.debug("Planner ignoring kind: %s", msg.kind)
+                await self.handle_relayed_message(msg)
 
     def _publish_next_tick(self, now_monotonic: float) -> None:
         from datetime import datetime, timedelta

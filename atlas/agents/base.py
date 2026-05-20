@@ -57,6 +57,12 @@ class BaseAgent(ABC):
         from atlas.agents.memory_tools import make_memory_tools
         for spec in make_memory_tools(self):
             self.register_tool(spec)
+        # Every agent also gets the inter-agent relay tool so it can hand
+        # work to another agent (Planner → Critic for review, Critic →
+        # Operator for a verdict, Oracle → Planner with new targets, ...).
+        from atlas.agents.relay_tools import make_relay_tools
+        for spec in make_relay_tools(self):
+            self.register_tool(spec)
         # Live mission-control state initialised idle. Subclasses call
         # self.set_task(...) when they begin a phase of work.
         from atlas.agents.state import get_state as _get_state
@@ -250,6 +256,36 @@ class BaseAgent(ABC):
 
     def register_tool(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
+
+    # --- inbound relay handler (overridable by subclasses) ----------------
+
+    async def handle_relayed_message(self, msg) -> None:
+        """Default handler for inbound bus messages that aren't matched by
+        a subclass's specialised dispatch. Logs + updates the live task +
+        broadcasts a 'relay received' event so the Mission Control feed
+        shows the hand-off completing.
+
+        Subclasses with kind-specific logic (Planner handling
+        REVISION_REQUEST, Operator handling ALERT/STATUS, etc.) already
+        do their own thing and don't call this. The Critic + any future
+        agents that don't have rich dispatch use this as their default."""
+        kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
+        sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
+        summary = (msg.payload or {}).get("summary", "")
+        self.log.info("relay %s ← %s: %s", kind, sender, summary)
+        self.set_task(f"received {kind} from {sender}", state="working")
+        try:
+            from datetime import datetime as _dt
+            await self.bus.broadcast_event({
+                "type": "agent_relay_received",
+                "sender": sender,
+                "recipient": self.name.value,
+                "kind": kind,
+                "summary": summary,
+                "received_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+            })
+        except Exception:
+            pass
 
     # --- live mission-control hooks ----------------------------------------
 

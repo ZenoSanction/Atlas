@@ -65,7 +65,7 @@ class Archivist(BaseAgent):
                 await self._process_session(msg)
                 self.set_task("session archived — standing by", state="idle")
             else:
-                self.log.debug("Archivist ignoring kind: %s", msg.kind)
+                await self.handle_relayed_message(msg)
 
     async def _idle_heartbeat(self) -> None:
         """Emit a benign 'still here' tick so the dashboard sees the agent."""

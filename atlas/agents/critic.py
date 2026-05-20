@@ -149,29 +149,72 @@ class Critic(BaseAgent):
                        FAST_LOOP_S, STANDARD_LOOP_S)
         self.set_task("watchdog online — first weather pull next",
                       state="working")
+        # Background task: drain the bus queue so relays to the Critic
+        # (e.g., Planner asking for a fresh weather review) actually get
+        # picked up. Until now Critic never read from its queue.
+        drain_task = asyncio.create_task(self._drain_bus(), name="critic-bus-drain")
+        try:
+            while not self.should_stop:
+                now = asyncio.get_event_loop().time()
+                # Force an initial standard tick on startup so the dashboard
+                # has data without waiting 5 minutes.
+                if not self._initial_done:
+                    self._initial_done = True
+                    try:
+                        await self._standard_loop()
+                    except Exception:
+                        self.log.exception("Initial standard loop failed")
+                    self._last_standard = asyncio.get_event_loop().time()
+                if now - self._last_fast >= FAST_LOOP_S:
+                    await self._fast_loop()
+                    self._last_fast = now
+                if now - self._last_standard >= STANDARD_LOOP_S:
+                    try:
+                        await self._standard_loop()
+                    except Exception:
+                        self.log.exception("Standard loop failed")
+                    self._last_standard = asyncio.get_event_loop().time()
+                # Publish next-tick estimates so Mission Control can show countdowns
+                self._publish_next_ticks(now)
+                await asyncio.sleep(5)
+        finally:
+            drain_task.cancel()
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _drain_bus(self) -> None:
+        """Drain the Critic's bus queue. On inbound relays, react to the
+        ones we recognise; otherwise fall back to the BaseAgent default
+        (log + broadcast a 'received' event)."""
         while not self.should_stop:
-            now = asyncio.get_event_loop().time()
-            # Force an initial standard tick on startup so the dashboard
-            # has data without waiting 5 minutes.
-            if not self._initial_done:
-                self._initial_done = True
-                try:
-                    await self._standard_loop()
-                except Exception:
-                    self.log.exception("Initial standard loop failed")
-                self._last_standard = asyncio.get_event_loop().time()
-            if now - self._last_fast >= FAST_LOOP_S:
-                await self._fast_loop()
-                self._last_fast = now
-            if now - self._last_standard >= STANDARD_LOOP_S:
-                try:
-                    await self._standard_loop()
-                except Exception:
-                    self.log.exception("Standard loop failed")
-                self._last_standard = asyncio.get_event_loop().time()
-            # Publish next-tick estimates so Mission Control can show countdowns
-            self._publish_next_ticks(now)
-            await asyncio.sleep(5)
+            msg = await self.recv_with_timeout(timeout_s=5.0)
+            if msg is None:
+                continue
+            try:
+                await self._handle_relay(msg)
+            except Exception:
+                self.log.exception("Critic relay handler failed")
+
+    async def _handle_relay(self, msg) -> None:
+        """When a fresh review is requested by another agent (Planner
+        asking for a weather opinion on a plan, Operator asking for an
+        immediate re-check), run a standard loop right now. Otherwise
+        defer to the BaseAgent default behaviour."""
+        kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
+        summary = (msg.payload or {}).get("summary", "")
+        if kind in ("revision_request", "status"):
+            sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
+            self.set_task(f"re-checking weather on request of {sender}: {summary[:60]}",
+                          state="working")
+            try:
+                await self._standard_loop()
+            except Exception:
+                self.log.exception("On-demand standard loop failed")
+            self._last_standard = asyncio.get_event_loop().time()
+            return
+        await self.handle_relayed_message(msg)
 
     def _publish_next_ticks(self, now_monotonic: float) -> None:
         """Compute when the next fast + standard loops will fire (in wall
