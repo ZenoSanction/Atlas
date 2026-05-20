@@ -198,23 +198,23 @@ class Critic(BaseAgent):
                 self.log.exception("Critic relay handler failed")
 
     async def _handle_relay(self, msg) -> None:
-        """When a fresh review is requested by another agent (Planner
-        asking for a weather opinion on a plan, Operator asking for an
-        immediate re-check), run a standard loop right now. Otherwise
-        defer to the BaseAgent default behaviour."""
+        """Inbound relay handler. Always surfaces the message to the
+        dashboard + chat history first (via the BaseAgent default), then
+        for status/revision_request kinds runs a fresh weather pull so
+        the requesting agent gets an updated assessment quickly."""
+        # 1. Surface the relay everywhere visible (inbox, current_task,
+        #    chat history, broadcast event). The Bus already pushed to
+        #    the inbox via push_inbox; this adds the other channels.
+        await self.handle_relayed_message(msg)
+        # 2. For kinds where the requester wants the Critic to do its
+        #    job right now, kick the standard loop on demand.
         kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
-        summary = (msg.payload or {}).get("summary", "")
         if kind in ("revision_request", "status"):
-            sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
-            self.set_task(f"re-checking weather on request of {sender}: {summary[:60]}",
-                          state="working")
             try:
                 await self._standard_loop()
             except Exception:
                 self.log.exception("On-demand standard loop failed")
             self._last_standard = asyncio.get_event_loop().time()
-            return
-        await self.handle_relayed_message(msg)
 
     def _publish_next_ticks(self, now_monotonic: float) -> None:
         """Compute when the next fast + standard loops will fire (in wall

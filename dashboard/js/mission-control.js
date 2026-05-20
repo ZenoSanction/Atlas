@@ -74,6 +74,38 @@ export async function refreshMissionControl(api) {
     // Memory count (live from /api/mission-control)
     const memCount = lane.querySelector('[data-field="memory_count"]');
     if (memCount) memCount.textContent = status.memory_count ?? 0;
+
+    // Inbox — sticky display of recent inbound relays. Pulse when a
+    // new item arrives so the user actually notices the ping.
+    const inboxCount = lane.querySelector('[data-field="inbox_count"]');
+    const inboxItems = lane.querySelector('[data-field="inbox_items"]');
+    const inboxPanel = lane.querySelector('[data-field="inbox-panel"]');
+    const inbox = status.inbox || [];
+    if (inboxCount) inboxCount.textContent = inbox.length;
+    if (inboxItems) {
+      if (!inbox.length) {
+        inboxItems.innerHTML = '<div class="inbox-empty">no inbound relays yet</div>';
+      } else {
+        inboxItems.innerHTML = inbox.slice(0, 4).map(m => `
+          <div class="inbox-item">
+            <span class="inbox-from">${esc(m.sender)}</span>
+            <span class="inbox-kind">[${esc(m.kind)}]</span>
+            <span class="inbox-summary">${esc(m.summary || "(no summary)")}</span>
+            <span class="inbox-ts">${fmtClock(m.at)}</span>
+          </div>`).join("");
+      }
+    }
+    // Pulse animation when last_inbox_at changes vs what we showed last
+    if (inboxPanel && status.last_inbox_at) {
+      const prev = inboxPanel.dataset.lastAt;
+      if (prev && prev !== status.last_inbox_at) {
+        inboxPanel.classList.remove("ping");
+        // force reflow so the animation restarts even if class was just removed
+        void inboxPanel.offsetWidth;
+        inboxPanel.classList.add("ping");
+      }
+      inboxPanel.dataset.lastAt = status.last_inbox_at;
+    }
   }
 
   // Message flow

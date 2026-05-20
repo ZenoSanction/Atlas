@@ -524,6 +524,64 @@ footer .muted { color: var(--text-dim); }
 .message-flow .kind { color: var(--gold); margin-left: 4px; }
 .message-flow .empty { color: var(--text-dim); font-style: italic; padding: 4px; }
 
+/* Inbox panel — sticky relay visibility per lane */
+.agent-inbox {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--text-dim);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  transition: border-left-color 0.4s ease;
+}
+.agent-inbox.ping {
+  border-left-color: var(--gold);
+  animation: inbox-ping 1.2s ease-out;
+}
+@keyframes inbox-ping {
+  0%   { background: rgba(224, 184, 75, 0.18); }
+  100% { background: var(--bg); }
+}
+.inbox-head {
+  display: flex; justify-content: space-between; align-items: center;
+  color: var(--text-dim); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.inbox-count {
+  display: inline-block; min-width: 18px; text-align: center;
+  background: var(--panel-2); border-radius: 9px; padding: 0 6px;
+  color: var(--gold); font-weight: 600;
+}
+.inbox-items { margin-top: 4px; }
+.inbox-item {
+  padding: 3px 0;
+  border-bottom: 1px dotted var(--line);
+  display: grid;
+  grid-template-columns: max-content max-content 1fr max-content;
+  gap: 6px;
+  align-items: baseline;
+}
+.inbox-item:last-child { border-bottom: none; }
+.inbox-from {
+  font-family: "Cascadia Code", Consolas, monospace;
+  color: var(--accent);
+  text-transform: uppercase; font-size: 10px;
+}
+.inbox-kind {
+  color: var(--gold);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+.inbox-summary { color: var(--text); }
+.inbox-ts {
+  color: var(--text-dim);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+}
+.inbox-empty {
+  color: var(--text-dim); font-style: italic; padding: 4px 0;
+}
+
 /* Agent memory panel inside each lane */
 .agent-memories { font-size: 12px; }
 .agent-memories > summary { color: var(--text-dim); cursor: pointer; padding: 4px 0; }

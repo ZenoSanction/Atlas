@@ -65,10 +65,22 @@ class AgentBus:
         # Deliver
         await self._queues[msg.recipient].put(msg)
         log.debug("BUS %s -> %s [%s]", msg.sender, msg.recipient, msg.kind)
-        # Mirror to the Mission Control message-flow ring buffer
+        # Mirror to the Mission Control message-flow ring buffer + each
+        # agent's sticky inbox/outbox so the dashboard shows pings.
         try:
             from atlas.agents.state import get_state
-            get_state().push_message_flow(msg.to_jsonable())
+            st = get_state()
+            jsonable = msg.to_jsonable()
+            st.push_message_flow(jsonable)
+            item = {
+                "sender": jsonable["sender"],
+                "recipient": jsonable["recipient"],
+                "kind": jsonable["kind"],
+                "summary": (msg.payload or {}).get("summary", ""),
+                "at": jsonable["sent_at"],
+            }
+            st.push_inbox(jsonable["recipient"], item)
+            st.push_outbox(jsonable["sender"], item)
         except Exception:
             pass
         # Fan-out to dashboard

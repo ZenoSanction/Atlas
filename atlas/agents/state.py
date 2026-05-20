@@ -86,6 +86,12 @@ class AgentLiveStatus:
     updated_at: str = ""
     recent_decisions: list[dict] = field(default_factory=list)
     recent_messages: list[dict] = field(default_factory=list)
+    # Inter-agent relay tracking — kept sticky so the dashboard can show
+    # "📬 from planner: tonight plan ready" persistently in the lane,
+    # not just for the half-second between task transitions.
+    inbox: list[dict] = field(default_factory=list)
+    outbox: list[dict] = field(default_factory=list)
+    last_inbox_at: Optional[str] = None  # ISO timestamp of newest inbox item
 
     def to_jsonable(self) -> dict:
         return asdict(self)
@@ -202,6 +208,20 @@ class _ObservatoryState:
     def get_message_flow(self, limit: int = 80) -> list[dict]:
         with self._lock:
             return list(self._message_flow[:limit])
+
+    # Per-agent inbox + outbox (sticky relay visibility) --------------------
+    def push_inbox(self, agent: str, item: dict, limit: int = 8) -> None:
+        with self._lock:
+            status = self._agent_status.setdefault(agent, AgentLiveStatus(name=agent))
+            status.inbox.insert(0, item)
+            status.inbox = status.inbox[:limit]
+            status.last_inbox_at = item.get("at") or status.last_inbox_at
+
+    def push_outbox(self, agent: str, item: dict, limit: int = 8) -> None:
+        with self._lock:
+            status = self._agent_status.setdefault(agent, AgentLiveStatus(name=agent))
+            status.outbox.insert(0, item)
+            status.outbox = status.outbox[:limit]
 
 
 _state: _ObservatoryState | None = None

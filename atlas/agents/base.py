@@ -260,20 +260,36 @@ class BaseAgent(ABC):
     # --- inbound relay handler (overridable by subclasses) ----------------
 
     async def handle_relayed_message(self, msg) -> None:
-        """Default handler for inbound bus messages that aren't matched by
-        a subclass's specialised dispatch. Logs + updates the live task +
-        broadcasts a 'relay received' event so the Mission Control feed
-        shows the hand-off completing.
+        """Default handler for inbound bus messages.
+
+        Three visible effects:
+          1. Update current_task with a 📬 prefix so the lane signals
+             the relay (the next loop tick will overwrite this with the
+             agent's normal work, but the inbox stays).
+          2. Append the inbound message to the agent's persistent chat
+             history as a user-role turn ('[from <sender> | <kind>] <summary>').
+             So the relay shows up in the lane's chat panel and is part
+             of the agent's recall window the next time the human chats.
+          3. Broadcast a 'agent_relay_received' event for the message-flow
+             column.
 
         Subclasses with kind-specific logic (Planner handling
-        REVISION_REQUEST, Operator handling ALERT/STATUS, etc.) already
-        do their own thing and don't call this. The Critic + any future
-        agents that don't have rich dispatch use this as their default."""
+        REVISION_REQUEST, Operator handling ALERT, Critic running a
+        weather pull on STATUS) should still call this first so the
+        relay is visible, then run their own dispatch."""
         kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
         sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
         summary = (msg.payload or {}).get("summary", "")
         self.log.info("relay %s ← %s: %s", kind, sender, summary)
-        self.set_task(f"received {kind} from {sender}", state="working")
+        self.set_task(f"📬 {kind} from {sender}: {summary[:60]}", state="working")
+        # Persist the relay in this agent's chat history. The lane's
+        # chat panel will render it; future think() calls will recall it.
+        try:
+            from atlas.db.managers import ChatHistoryManager
+            chat_line = f"[relay from {sender} | {kind}] {summary}"
+            ChatHistoryManager.append(self.name.value, "user", chat_line)
+        except Exception:
+            pass
         try:
             from datetime import datetime as _dt
             await self.bus.broadcast_event({
