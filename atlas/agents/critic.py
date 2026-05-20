@@ -305,11 +305,17 @@ class Critic(BaseAgent):
                                        "no plan targets within 40°."),
                         ))
                 else:
+                    if moon_alt <= 0:
+                        note = "below horizon"
+                    elif illum <= 0.30:
+                        note = "too faint to interfere"
+                    else:
+                        note = "no impact"
                     review.critic_warnings.append(SessionWarning(
                         kind="moon",
                         severity="ok",
                         message=(f"Moon {illum*100:.0f}% illum, alt {moon_alt:.0f}° — "
-                                  "below horizon or faint; no impact."),
+                                  f"{note}."),
                     ))
 
         # 3. Hardware — reuse the cached snapshot from routes
