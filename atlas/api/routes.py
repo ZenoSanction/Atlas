@@ -447,18 +447,21 @@ async def weather_current() -> dict:
         snap = await client.current()
     except Exception as e:
         raise HTTPException(502, f"Open-Meteo request failed: {e}")
+    from atlas.units import (
+        c_to_f, c_delta_to_f, ms_to_mph, mm_to_in, hpa_to_inhg,
+    )
     return {
         "observed_at": snap.observed_at,
-        "temperature_c": round(snap.temperature_c, 1),
+        "temperature_f": round(c_to_f(snap.temperature_c), 1),
         "humidity_pct": round(snap.humidity_pct, 0),
-        "dew_point_c": round(snap.dew_point_c, 1),
-        "dew_margin_c": round(snap.temperature_c - snap.dew_point_c, 1),
-        "wind_speed_ms": round(snap.wind_speed_ms, 1),
-        "wind_gust_ms": (round(snap.wind_gust_ms, 1)
-                          if snap.wind_gust_ms is not None else None),
+        "dew_point_f": round(c_to_f(snap.dew_point_c), 1),
+        "dew_margin_f": round(c_delta_to_f(snap.temperature_c - snap.dew_point_c), 1),
+        "wind_speed_mph": round(ms_to_mph(snap.wind_speed_ms), 1),
+        "wind_gust_mph": (round(ms_to_mph(snap.wind_gust_ms), 1)
+                            if snap.wind_gust_ms is not None else None),
         "cloud_cover_pct": round(snap.cloud_cover_pct, 0),
-        "pressure_hpa": round(snap.pressure_hpa, 1),
-        "precip_mm": round(snap.precip_mm, 2),
+        "pressure_inhg": round(hpa_to_inhg(snap.pressure_hpa), 2),
+        "precip_in": round(mm_to_in(snap.precip_mm), 3),
         "site_lat": float(site.latitude),
         "site_lon": float(site.longitude),
         "observatory_name": site.observatory_name,
@@ -507,20 +510,21 @@ async def weather_forecast(hours: int = 24, nighttime_only: bool = True) -> dict
             if sun_altitude(float(site.latitude), float(site.longitude), t) < -12.0:
                 kept.append(r)
         rows = kept
+    from atlas.units import c_to_f, c_delta_to_f, ms_to_mph, mm_to_in
     out_rows = []
     for r in rows:
-        dm = r["temperature_c"] - r["dew_point_c"]
+        dm_c = r["temperature_c"] - r["dew_point_c"]
         out_rows.append({
             "time_utc": r["time"],
-            "temperature_c": round(r["temperature_c"], 1),
+            "temperature_f": round(c_to_f(r["temperature_c"]), 1),
             "humidity_pct": round(r["humidity_pct"], 0),
-            "dew_point_c": round(r["dew_point_c"], 1),
-            "dew_margin_c": round(dm, 1),
-            "wind_speed_ms": round(r["wind_speed_ms"], 1),
-            "wind_gust_ms": (round(r["wind_gust_ms"], 1)
-                              if r.get("wind_gust_ms") is not None else None),
+            "dew_point_f": round(c_to_f(r["dew_point_c"]), 1),
+            "dew_margin_f": round(c_delta_to_f(dm_c), 1),
+            "wind_speed_mph": round(ms_to_mph(r["wind_speed_ms"]), 1),
+            "wind_gust_mph": (round(ms_to_mph(r["wind_gust_ms"]), 1)
+                                if r.get("wind_gust_ms") is not None else None),
             "cloud_cover_pct": round(r["cloud_cover_pct"], 0),
-            "precip_mm": round(r["precip_mm"], 2),
+            "precip_in": round(mm_to_in(r["precip_mm"]), 3),
         })
     return {
         "hours": hours,
@@ -562,14 +566,16 @@ async def operator_verdict() -> dict:
 
 @api_router.get("/setup/weather-thresholds")
 async def get_weather_thresholds() -> dict:
+    """Return thresholds in imperial display units. Internally stored in SI."""
+    from atlas.units import ms_to_mph, c_delta_to_f
     t = ConfigManager.get_weather_thresholds()
     return {
-        "wind_speed_warn_ms": t.wind_speed_warn_ms,
-        "wind_speed_critical_ms": t.wind_speed_critical_ms,
+        "wind_speed_warn_mph": round(ms_to_mph(t.wind_speed_warn_ms), 1),
+        "wind_speed_critical_mph": round(ms_to_mph(t.wind_speed_critical_ms), 1),
         "humidity_warn_pct": t.humidity_warn_pct,
         "humidity_critical_pct": t.humidity_critical_pct,
-        "dew_margin_warn_c": t.dew_margin_warn_c,
-        "dew_margin_critical_c": t.dew_margin_critical_c,
+        "dew_margin_warn_f": round(c_delta_to_f(t.dew_margin_warn_c), 1),
+        "dew_margin_critical_f": round(c_delta_to_f(t.dew_margin_critical_c), 1),
         "cloud_cover_warn_pct": t.cloud_cover_warn_pct,
         "cloud_cover_critical_pct": t.cloud_cover_critical_pct,
     }
@@ -577,17 +583,31 @@ async def get_weather_thresholds() -> dict:
 
 @api_router.post("/setup/weather-thresholds")
 async def save_weather_thresholds(body: dict) -> dict:
+    """Accept thresholds in imperial. Convert to SI for storage."""
+    from atlas.units import mph_to_ms, f_delta_to_c
     allowed = {
-        "wind_speed_warn_ms", "wind_speed_critical_ms",
+        "wind_speed_warn_mph", "wind_speed_critical_mph",
         "humidity_warn_pct", "humidity_critical_pct",
-        "dew_margin_warn_c", "dew_margin_critical_c",
+        "dew_margin_warn_f", "dew_margin_critical_f",
         "cloud_cover_warn_pct", "cloud_cover_critical_pct",
     }
     bad = set(body.keys()) - allowed
     if bad:
         raise HTTPException(400, f"Unknown fields: {sorted(bad)}")
-    fields = {k: float(v) for k, v in body.items()}
-    ConfigManager.save_weather_thresholds(**fields)
+    si_fields = {}
+    for k, v in body.items():
+        v = float(v)
+        if k == "wind_speed_warn_mph":
+            si_fields["wind_speed_warn_ms"] = mph_to_ms(v)
+        elif k == "wind_speed_critical_mph":
+            si_fields["wind_speed_critical_ms"] = mph_to_ms(v)
+        elif k == "dew_margin_warn_f":
+            si_fields["dew_margin_warn_c"] = f_delta_to_c(v)
+        elif k == "dew_margin_critical_f":
+            si_fields["dew_margin_critical_c"] = f_delta_to_c(v)
+        else:
+            si_fields[k] = v
+    ConfigManager.save_weather_thresholds(**si_fields)
     return {"ok": True}
 
 

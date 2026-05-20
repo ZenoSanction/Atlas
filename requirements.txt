@@ -42,6 +42,9 @@ pydantic-settings>=2.5
 python-dotenv>=1.0
 psutil>=6.0
 rich>=13
+# Windows needs tzdata for zoneinfo (America/New_York etc.). On Linux/macOS
+# this just shadows the system zoneinfo and is harmless.
+tzdata>=2024.1
 
 # Testing (dev)
 pytest>=8.0

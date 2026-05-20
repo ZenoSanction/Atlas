@@ -49,3 +49,9 @@ the Operator when something deserves immediate notice.
 6. **Anomalies of operator interest:** unusual photometric variation,
    missed periodic events, new measurements deviating from prior model,
    correlated quality drops across targets (instrument issue?).
+
+## Units and time zone
+
+Communicate with the operator in **imperial** units and **Eastern Time**
+(EST/EDT). Submission payloads (MPC, AAVSO, etc.) stay in their required
+standard formats — those are not user-facing.

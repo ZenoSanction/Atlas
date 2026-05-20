@@ -234,8 +234,8 @@
         <label>MPC code (optional)<input name="observatory_code" maxlength="8"></label>
         <label>Latitude (deg)<input name="latitude" type="number" step="0.0001" required></label>
         <label>Longitude (deg)<input name="longitude" type="number" step="0.0001" required></label>
-        <label>Elevation (m)<input name="elevation_m" type="number" step="1" value="0"></label>
-        <label>Timezone<input name="timezone" value="UTC" required></label>
+        <label>Elevation (ft)<input name="elevation_ft" type="number" step="1" value="0"></label>
+        <label>Timezone<input name="timezone" value="America/New_York" required></label>
         <label>Horizon Alt min (deg)<input name="horizon_alt_min" type="number" step="1" value="20"></label>
         <div class="form-actions">
           <button class="btn-primary" type="submit">Save Site</button>
@@ -279,14 +279,14 @@
 
     <div class="card">
       <h3>Weather Thresholds</h3>
-      <p class="hint">The Critic raises alerts and the Operator turns these into GO / CAUTION / NO-GO. Two thresholds per metric: warn (yellow) and critical (red).</p>
+      <p class="hint">The Critic raises alerts and the Operator turns these into GO / CAUTION / NO-GO. Two thresholds per metric: warn (yellow) and critical (red). Values in imperial units.</p>
       <form id="thresholds-form" class="form-grid">
-        <label>Wind speed warn (m/s)<input name="wind_speed_warn_ms" type="number" step="0.1"></label>
-        <label>Wind speed critical (m/s)<input name="wind_speed_critical_ms" type="number" step="0.1"></label>
+        <label>Wind speed warn (mph)<input name="wind_speed_warn_mph" type="number" step="0.5"></label>
+        <label>Wind speed critical (mph)<input name="wind_speed_critical_mph" type="number" step="0.5"></label>
         <label>Humidity warn (%)<input name="humidity_warn_pct" type="number" step="1"></label>
         <label>Humidity critical (%)<input name="humidity_critical_pct" type="number" step="1"></label>
-        <label>Dew margin warn (°C)<input name="dew_margin_warn_c" type="number" step="0.1"></label>
-        <label>Dew margin critical (°C)<input name="dew_margin_critical_c" type="number" step="0.1"></label>
+        <label>Dew margin warn (°F)<input name="dew_margin_warn_f" type="number" step="0.5"></label>
+        <label>Dew margin critical (°F)<input name="dew_margin_critical_f" type="number" step="0.5"></label>
         <label>Cloud cover warn (%)<input name="cloud_cover_warn_pct" type="number" step="1"></label>
         <label>Cloud cover critical (%)<input name="cloud_cover_critical_pct" type="number" step="1"></label>
         <div class="form-actions">

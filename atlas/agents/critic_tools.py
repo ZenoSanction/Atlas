@@ -24,16 +24,18 @@ async def _get_assessment(_p: dict) -> dict:
 
 
 async def _get_thresholds(_p: dict) -> dict:
+    from atlas.units import ms_to_mph, c_delta_to_f
     t = SafetyThresholds.from_db()
     return {
-        "wind_speed_warn_ms": t.wind_speed_warn_ms,
-        "wind_speed_critical_ms": t.wind_speed_critical_ms,
+        "wind_speed_warn_mph": round(ms_to_mph(t.wind_speed_warn_ms), 1),
+        "wind_speed_critical_mph": round(ms_to_mph(t.wind_speed_critical_ms), 1),
         "humidity_warn_pct": t.humidity_warn_pct,
         "humidity_critical_pct": t.humidity_critical_pct,
-        "dew_margin_warn_c": t.dew_margin_warn_c,
-        "dew_margin_critical_c": t.dew_margin_critical_c,
+        "dew_margin_warn_f": round(c_delta_to_f(t.dew_margin_warn_c), 1),
+        "dew_margin_critical_f": round(c_delta_to_f(t.dew_margin_critical_c), 1),
         "cloud_cover_warn_pct": t.cloud_cover_warn_pct,
         "cloud_cover_critical_pct": t.cloud_cover_critical_pct,
+        "units": "imperial",
         "note": "Editable in the Setup tab. Critic re-reads these every 5 minutes.",
     }
 
@@ -61,18 +63,20 @@ async def _quick_weather(_p: dict) -> dict:
         snap = await c.current()
     except Exception as e:
         return {"error": f"Open-Meteo failed: {e}"}
-    dm = snap.temperature_c - snap.dew_point_c
+    from atlas.units import c_to_f, c_delta_to_f, ms_to_mph, mm_to_in
+    dm_c = snap.temperature_c - snap.dew_point_c
     return {
         "observed_at_utc": snap.observed_at,
-        "temperature_c": round(snap.temperature_c, 1),
+        "temperature_f": round(c_to_f(snap.temperature_c), 1),
         "humidity_pct": round(snap.humidity_pct, 0),
-        "dew_point_c": round(snap.dew_point_c, 1),
-        "dew_margin_c": round(dm, 1),
-        "wind_speed_ms": round(snap.wind_speed_ms, 1),
-        "wind_gust_ms": (round(snap.wind_gust_ms, 1)
-                          if snap.wind_gust_ms is not None else None),
+        "dew_point_f": round(c_to_f(snap.dew_point_c), 1),
+        "dew_margin_f": round(c_delta_to_f(dm_c), 1),
+        "wind_speed_mph": round(ms_to_mph(snap.wind_speed_ms), 1),
+        "wind_gust_mph": (round(ms_to_mph(snap.wind_gust_ms), 1)
+                            if snap.wind_gust_ms is not None else None),
         "cloud_cover_pct": round(snap.cloud_cover_pct, 0),
-        "precip_mm": round(snap.precip_mm, 2),
+        "precip_in": round(mm_to_in(snap.precip_mm), 3),
+        "units": "imperial",
     }
 
 

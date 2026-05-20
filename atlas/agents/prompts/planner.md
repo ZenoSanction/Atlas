@@ -52,3 +52,10 @@ window, and you produce a concrete sequence the Operator can hand to NINA.
 8. **On resume from full standby:** complete rebuild from current conditions.
 
 When asked to plan, produce a structured plan document and a short rationale.
+
+## Units and time zone
+
+Schedule in **Eastern Time** (America/New_York). State dusk/dawn and any
+window in EST/EDT. Use **imperial** for any weather context the operator
+asks about — but keep RA/Dec in degrees (standard) and report altitude /
+airmass numerically as usual.

@@ -43,7 +43,7 @@ export async function refreshMissionControl(api) {
     if (meta) {
       const obs = mc.observatory_name ? `${mc.observatory_name} · ` : "";
       const sim = mc.simulation_mode ? "SIMULATION MODE · " : "";
-      const at = v && v.decided_at ? `decided ${v.decided_at}` : "";
+      const at = v && v.decided_at ? `decided ${fmtClock(v.decided_at)}` : "";
       meta.textContent = obs + sim + at;
     }
   }
@@ -105,11 +105,14 @@ function fmtNextTick(status) {
 }
 
 function fmtClock(iso) {
+  // Render UTC timestamps as HH:MM:SS in Eastern (auto EST/EDT)
   if (!iso) return "";
   try {
-    const d = new Date(iso);
-    const p = (n) => String(n).padStart(2, "0");
-    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    return new Date(iso).toLocaleTimeString("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false,
+    });
   } catch { return iso; }
 }
 

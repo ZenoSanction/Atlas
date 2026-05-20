@@ -46,15 +46,15 @@ async function pullCurrent(api) {
     const c = await api("/weather/current");
     el.innerHTML = `
       <div><span>Site</span><span>${esc(c.observatory_name)}</span></div>
-      <div><span>Observed</span><span>${fmtTime(c.observed_at)} UTC</span></div>
-      <div><span>Temperature</span><span>${c.temperature_c} °C</span></div>
+      <div><span>Observed</span><span>${fmtEastern(c.observed_at)}</span></div>
+      <div><span>Temperature</span><span>${c.temperature_f} °F</span></div>
       <div><span>Humidity</span><span>${c.humidity_pct} %</span></div>
-      <div><span>Dew point</span><span>${c.dew_point_c} °C</span></div>
-      <div><span>Dew margin</span><span>${marginLabel(c.dew_margin_c)}</span></div>
-      <div><span>Wind</span><span>${c.wind_speed_ms} m/s${c.wind_gust_ms != null ? ` (gust ${c.wind_gust_ms})` : ""}</span></div>
+      <div><span>Dew point</span><span>${c.dew_point_f} °F</span></div>
+      <div><span>Dew margin</span><span>${marginLabel(c.dew_margin_f)}</span></div>
+      <div><span>Wind</span><span>${c.wind_speed_mph} mph${c.wind_gust_mph != null ? ` (gust ${c.wind_gust_mph})` : ""}</span></div>
       <div><span>Cloud cover</span><span>${c.cloud_cover_pct} %</span></div>
-      <div><span>Precip (last hr)</span><span>${c.precip_mm} mm</span></div>
-      <div><span>Pressure</span><span>${c.pressure_hpa} hPa</span></div>
+      <div><span>Precip (last hr)</span><span>${c.precip_in} in</span></div>
+      <div><span>Pressure</span><span>${c.pressure_inhg} inHg</span></div>
     `;
   } catch (e) {
     el.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
@@ -65,37 +65,41 @@ async function pullForecast(api) {
   const el = document.getElementById("weather-forecast");
   if (!el) return;
   try {
-    const f = await api("/weather/forecast?hours=12");
+    const f = await api("/weather/forecast?hours=24&nighttime_only=true");
     if (!f.hourly || f.hourly.length === 0) {
-      el.innerHTML = `<div class="empty">No forecast data.</div>`;
+      el.innerHTML = `<div class="empty">No usable night hours in the next 24 hours (sun-up all the way through).</div>`;
       return;
+    }
+    let nightHeader = "";
+    if (f.night) {
+      nightHeader = `<div class="hint">Dark window: ${fmtEastern(f.night.dusk_utc)} → ${fmtEastern(f.night.dawn_utc)} (${f.night.hours} h)</div>`;
     }
     const head = `
       <table class="tbl">
         <thead><tr>
-          <th>Time (UTC)</th>
-          <th>Temp °C</th>
+          <th>Time</th>
+          <th>Temp</th>
           <th>Humidity</th>
           <th>Dew margin</th>
-          <th>Wind m/s</th>
-          <th>Gust m/s</th>
+          <th>Wind</th>
+          <th>Gust</th>
           <th>Cloud</th>
-          <th>Precip mm</th>
+          <th>Precip</th>
         </tr></thead><tbody>`;
     const rows = f.hourly.map((h) => {
       const cls = severityFromRow(h);
       return `<tr class="row-${cls}">
-        <td>${fmtTime(h.time_utc)}</td>
-        <td>${h.temperature_c}</td>
+        <td>${fmtEastern(h.time_utc)}</td>
+        <td>${h.temperature_f} °F</td>
         <td>${h.humidity_pct}%</td>
-        <td>${marginLabel(h.dew_margin_c)}</td>
-        <td>${h.wind_speed_ms}</td>
-        <td>${h.wind_gust_ms ?? "—"}</td>
+        <td>${marginLabel(h.dew_margin_f)}</td>
+        <td>${h.wind_speed_mph} mph</td>
+        <td>${h.wind_gust_mph != null ? h.wind_gust_mph + " mph" : "—"}</td>
         <td>${h.cloud_cover_pct}%</td>
-        <td>${h.precip_mm}</td>
+        <td>${h.precip_in} in</td>
       </tr>`;
     }).join("");
-    el.innerHTML = head + rows + "</tbody></table>";
+    el.innerHTML = nightHeader + head + rows + "</tbody></table>";
   } catch (e) {
     el.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
@@ -112,7 +116,7 @@ async function pullAssessment(api) {
       return;
     }
     const overall = a.overall_severity || "ok";
-    const head = `<div class="row-spread"><div><span class="pill ${overall}">${overall.toUpperCase()}</span> ${esc(a.summary)}</div><span class="muted">${fmtTime(a.assessed_at)} UTC</span></div>`;
+    const head = `<div class="row-spread"><div><span class="pill ${overall}">${overall.toUpperCase()}</span> ${esc(a.summary)}</div><span class="muted">${fmtEastern(a.assessed_at)}</span></div>`;
     const rows = (a.checks || []).map((c) => `
       <div class="item-row">
         <span><span class="pill ${c.severity}">${c.severity}</span> ${esc(c.metric.replace(/_/g, " "))}</span>
@@ -151,30 +155,38 @@ async function pullVerdict(api) {
 
 // helpers --------------------------------------------------------------------
 
+// Thresholds the dashboard uses for row shading. Match the imperial display
+// of the default SafetyThresholds (warn 5°C / crit 2°C dew margin → 9°F /
+// 3.6°F; warn 6.7 m/s / crit 8.9 m/s → 15 / 19.9 mph).
 function severityFromRow(h) {
-  if (h.dew_margin_c <= 2 || h.wind_speed_ms >= 8.9 || h.cloud_cover_pct >= 85 || h.precip_mm >= 0.1) {
+  if (h.dew_margin_f <= 3.6 || h.wind_speed_mph >= 19.9
+      || h.cloud_cover_pct >= 85 || h.precip_in >= 0.004) {
     return "crit";
   }
-  if (h.dew_margin_c <= 5 || h.wind_speed_ms >= 6.7 || h.cloud_cover_pct >= 60) {
+  if (h.dew_margin_f <= 9 || h.wind_speed_mph >= 15
+      || h.cloud_cover_pct >= 60) {
     return "warn";
   }
   return "ok";
 }
 
-function marginLabel(margin) {
-  if (margin == null) return "—";
-  if (margin <= 2) return `${margin} °C ⚠ critical`;
-  if (margin <= 5) return `${margin} °C — watch`;
-  return `${margin} °C`;
+function marginLabel(margin_f) {
+  if (margin_f == null) return "—";
+  if (margin_f <= 3.6) return `${margin_f} °F ⚠ critical`;
+  if (margin_f <= 9) return `${margin_f} °F — watch`;
+  return `${margin_f} °F`;
 }
 
-function fmtTime(iso) {
+// Format a UTC ISO timestamp as America/New_York (auto EST/EDT) for display.
+function fmtEastern(iso) {
   if (!iso) return "—";
   try {
-    const t = new Date(iso);
-    // YYYY-MM-DD HH:MM (UTC)
-    const p = (n) => String(n).padStart(2, "0");
-    return `${t.getUTCFullYear()}-${p(t.getUTCMonth() + 1)}-${p(t.getUTCDate())} ${p(t.getUTCHours())}:${p(t.getUTCMinutes())}`;
+    return new Date(iso).toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZoneName: "short",
+    });
   } catch {
     return iso;
   }

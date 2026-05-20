@@ -14,6 +14,7 @@ async function renderThresholdsForm(api) {
   if (!form) return;
   try {
     const cur = await api("/setup/weather-thresholds");
+    // Server now returns imperial keys directly; form fields match by name.
     for (const [k, v] of Object.entries(cur)) {
       const el = form.elements.namedItem(k);
       if (el && v !== null && v !== undefined) el.value = v;
@@ -114,10 +115,17 @@ async function renderVaultForm(api) {
 
 async function renderSiteForm(api) {
   const form = document.getElementById("site-form");
+  const M_PER_FT = 0.3048;
   try {
     const cur = await api("/setup/site");
     if (cur) {
       for (const [k, v] of Object.entries(cur)) {
+        // Display elevation in feet even though it's stored in meters
+        if (k === "elevation_m") {
+          const ft = form.elements.namedItem("elevation_ft");
+          if (ft && v !== null && v !== undefined) ft.value = Math.round(v / M_PER_FT);
+          continue;
+        }
         const el = form.elements.namedItem(k);
         if (el && v !== null) el.value = v;
       }
@@ -126,8 +134,13 @@ async function renderSiteForm(api) {
   form.onsubmit = async (e) => {
     e.preventDefault();
     const status = form.querySelector(".form-status");
-    const data = Object.fromEntries(new FormData(form).entries());
-    // Coerce numeric fields
+    const fd = Object.fromEntries(new FormData(form).entries());
+    // Convert feet -> meters for storage
+    if (fd.elevation_ft !== "" && fd.elevation_ft !== undefined) {
+      fd.elevation_m = Number(fd.elevation_ft) * M_PER_FT;
+    }
+    delete fd.elevation_ft;
+    const data = fd;
     for (const k of ["latitude","longitude","elevation_m","horizon_alt_min"]) {
       if (data[k] !== "" && data[k] !== undefined) data[k] = Number(data[k]);
     }

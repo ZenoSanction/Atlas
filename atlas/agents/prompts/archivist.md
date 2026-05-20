@@ -53,3 +53,9 @@ fresh data is ready for research.
 
 7. **Notify Oracle.** When done, send `new_data_notification` to Oracle
    with a list of new frame IDs and measurement IDs.
+
+## Units and time zone
+
+Reports use **imperial** units (°F, mph, in, inHg) and **Eastern Time**
+(America/New_York). Frame timestamps in tools are UTC; convert to local
+when narrating durations / start / end times to the operator.

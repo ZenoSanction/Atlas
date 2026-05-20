@@ -44,21 +44,23 @@ async def _get_current_weather(_params: dict) -> dict:
         snap = await client.current()
     except Exception as e:  # network, API, etc.
         return {"error": f"Open-Meteo request failed: {e}"}
-    dew_margin = snap.temperature_c - snap.dew_point_c
+    from atlas.units import c_to_f, c_delta_to_f, ms_to_mph, mm_to_in, hpa_to_inhg
+    dm_c = snap.temperature_c - snap.dew_point_c
     return {
         "observed_at_utc": snap.observed_at,
-        "temperature_c": round(snap.temperature_c, 1),
+        "temperature_f": round(c_to_f(snap.temperature_c), 1),
         "humidity_pct": round(snap.humidity_pct, 0),
-        "dew_point_c": round(snap.dew_point_c, 1),
-        "dew_margin_c": round(dew_margin, 1),
-        "wind_speed_ms": round(snap.wind_speed_ms, 1),
-        "wind_gust_ms": (round(snap.wind_gust_ms, 1)
-                         if snap.wind_gust_ms is not None else None),
+        "dew_point_f": round(c_to_f(snap.dew_point_c), 1),
+        "dew_margin_f": round(c_delta_to_f(dm_c), 1),
+        "wind_speed_mph": round(ms_to_mph(snap.wind_speed_ms), 1),
+        "wind_gust_mph": (round(ms_to_mph(snap.wind_gust_ms), 1)
+                            if snap.wind_gust_ms is not None else None),
         "cloud_cover_pct": round(snap.cloud_cover_pct, 0),
-        "pressure_hpa": round(snap.pressure_hpa, 1),
-        "precip_mm": round(snap.precip_mm, 2),
+        "pressure_inhg": round(hpa_to_inhg(snap.pressure_hpa), 2),
+        "precip_in": round(mm_to_in(snap.precip_mm), 3),
         "site_lat": lat,
         "site_lon": lon,
+        "units": "imperial",
     }
 
 
@@ -75,26 +77,28 @@ async def _get_forecast(params: dict) -> dict:
         rows = await client.forecast_hours(hours=hours)
     except Exception as e:
         return {"error": f"Open-Meteo request failed: {e}"}
-    # Trim each row to the keys we care about + add dew margin.
+    from atlas.units import c_to_f, c_delta_to_f, ms_to_mph, mm_to_in
     trimmed = []
     for r in rows:
+        dm_c = r["temperature_c"] - r["dew_point_c"]
         trimmed.append({
             "time_utc": r["time"],
-            "temperature_c": round(r["temperature_c"], 1),
+            "temperature_f": round(c_to_f(r["temperature_c"]), 1),
             "humidity_pct": round(r["humidity_pct"], 0),
-            "dew_point_c": round(r["dew_point_c"], 1),
-            "dew_margin_c": round(r["temperature_c"] - r["dew_point_c"], 1),
-            "wind_speed_ms": round(r["wind_speed_ms"], 1),
-            "wind_gust_ms": (round(r["wind_gust_ms"], 1)
-                              if r.get("wind_gust_ms") is not None else None),
+            "dew_point_f": round(c_to_f(r["dew_point_c"]), 1),
+            "dew_margin_f": round(c_delta_to_f(dm_c), 1),
+            "wind_speed_mph": round(ms_to_mph(r["wind_speed_ms"]), 1),
+            "wind_gust_mph": (round(ms_to_mph(r["wind_gust_ms"]), 1)
+                                if r.get("wind_gust_ms") is not None else None),
             "cloud_cover_pct": round(r["cloud_cover_pct"], 0),
-            "precip_mm": round(r["precip_mm"], 2),
+            "precip_in": round(mm_to_in(r["precip_mm"]), 3),
         })
     return {
         "hours_requested": hours,
         "site_lat": lat,
         "site_lon": lon,
         "hourly": trimmed,
+        "units": "imperial",
     }
 
 

@@ -20,6 +20,10 @@ from atlas.agents.state import MetricCheck, WeatherAssessment, get_state
 from atlas.db.managers import AlertManager, ConfigManager, SessionManager
 from atlas.db.models import AgentMessageKind, AgentName, AlertSeverity
 from atlas.safety.thresholds import SafetyThresholds
+from atlas.units import (
+    c_to_f, c_delta_to_f, fmt_f, fmt_f_delta, fmt_in, fmt_mph,
+    ms_to_mph, mm_to_in,
+)
 from atlas.weather.openmeteo import OpenMeteoClient, WeatherSnapshot
 
 
@@ -38,28 +42,32 @@ def _max_sev(*severities: str) -> str:
 
 def _check_wind(snap: WeatherSnapshot, t: SafetyThresholds) -> MetricCheck:
     v = snap.wind_speed_ms
+    v_mph = ms_to_mph(v)
     if v >= t.wind_speed_critical_ms:
         return MetricCheck("wind", "critical", v, t.wind_speed_critical_ms,
-                            f"{v:.1f} m/s ≥ critical {t.wind_speed_critical_ms:.1f}")
+                            f"{v_mph:.1f} mph ≥ critical {ms_to_mph(t.wind_speed_critical_ms):.1f} mph")
     if v >= t.wind_speed_warn_ms:
         return MetricCheck("wind", "warning", v, t.wind_speed_warn_ms,
-                            f"{v:.1f} m/s ≥ warn {t.wind_speed_warn_ms:.1f}")
-    return MetricCheck("wind", "ok", v, t.wind_speed_warn_ms, "calm")
+                            f"{v_mph:.1f} mph ≥ warn {ms_to_mph(t.wind_speed_warn_ms):.1f} mph")
+    return MetricCheck("wind", "ok", v, t.wind_speed_warn_ms,
+                        f"calm ({v_mph:.1f} mph)")
 
 
 def _check_dew_margin(snap: WeatherSnapshot, t: SafetyThresholds) -> MetricCheck:
-    dm = snap.temperature_c - snap.dew_point_c
-    if dm <= t.dew_margin_critical_c:
-        return MetricCheck("dew_margin", "critical", dm, t.dew_margin_critical_c,
-                            f"{dm:.1f}°C ≤ critical {t.dew_margin_critical_c:.1f}°C")
-    if dm <= t.dew_margin_warn_c:
-        return MetricCheck("dew_margin", "warning", dm, t.dew_margin_warn_c,
-                            f"{dm:.1f}°C ≤ warn {t.dew_margin_warn_c:.1f}°C")
-    return MetricCheck("dew_margin", "ok", dm, t.dew_margin_warn_c,
-                        f"{dm:.1f}°C — comfortable")
+    dm_c = snap.temperature_c - snap.dew_point_c
+    dm_f = c_delta_to_f(dm_c)
+    if dm_c <= t.dew_margin_critical_c:
+        return MetricCheck("dew_margin", "critical", dm_c, t.dew_margin_critical_c,
+                            f"{dm_f:.1f}°F ≤ critical {c_delta_to_f(t.dew_margin_critical_c):.1f}°F")
+    if dm_c <= t.dew_margin_warn_c:
+        return MetricCheck("dew_margin", "warning", dm_c, t.dew_margin_warn_c,
+                            f"{dm_f:.1f}°F ≤ warn {c_delta_to_f(t.dew_margin_warn_c):.1f}°F")
+    return MetricCheck("dew_margin", "ok", dm_c, t.dew_margin_warn_c,
+                        f"{dm_f:.1f}°F — comfortable")
 
 
 def _check_humidity(snap: WeatherSnapshot, t: SafetyThresholds) -> MetricCheck:
+    # Humidity already unit-agnostic (%)
     v = snap.humidity_pct
     if v >= t.humidity_critical_pct:
         return MetricCheck("humidity", "critical", v, t.humidity_critical_pct,
@@ -82,31 +90,32 @@ def _check_cloud(snap: WeatherSnapshot, t: SafetyThresholds) -> MetricCheck:
 
 
 def _check_precip(snap: WeatherSnapshot) -> MetricCheck:
-    v = snap.precip_mm
-    if v >= 0.1:
-        return MetricCheck("precip", "critical", v, 0.1,
-                            f"{v:.2f} mm in the last hour — close the roof")
-    return MetricCheck("precip", "ok", v, 0.0, "dry")
+    v_mm = snap.precip_mm
+    v_in = mm_to_in(v_mm)
+    if v_mm >= 0.1:
+        return MetricCheck("precip", "critical", v_mm, 0.1,
+                            f"{v_in:.3f} in in the last hour — close the roof")
+    return MetricCheck("precip", "ok", v_mm, 0.0, "dry")
 
 
 def _hourly_severity(rows: list[dict], t: SafetyThresholds) -> list[dict]:
-    """Light per-hour shading for the dashboard — dew margin + cloud cover."""
+    """Light per-hour shading for the dashboard. Imperial display fields."""
     out = []
     for r in rows:
-        dm = r["temperature_c"] - r["dew_point_c"]
+        dm_c = r["temperature_c"] - r["dew_point_c"]
         sev = "ok"
-        if dm <= t.dew_margin_critical_c or r["cloud_cover_pct"] >= t.cloud_cover_critical_pct \
+        if dm_c <= t.dew_margin_critical_c or r["cloud_cover_pct"] >= t.cloud_cover_critical_pct \
                 or r["wind_speed_ms"] >= t.wind_speed_critical_ms \
                 or r["precip_mm"] >= 0.1:
             sev = "critical"
-        elif dm <= t.dew_margin_warn_c or r["cloud_cover_pct"] >= t.cloud_cover_warn_pct \
+        elif dm_c <= t.dew_margin_warn_c or r["cloud_cover_pct"] >= t.cloud_cover_warn_pct \
                 or r["wind_speed_ms"] >= t.wind_speed_warn_ms:
             sev = "warning"
         out.append({"time_utc": r["time"], "severity": sev,
-                     "dew_margin_c": round(dm, 1),
+                     "dew_margin_f": round(c_delta_to_f(dm_c), 1),
                      "cloud_cover_pct": round(r["cloud_cover_pct"], 0),
-                     "wind_speed_ms": round(r["wind_speed_ms"], 1),
-                     "precip_mm": round(r["precip_mm"], 2)})
+                     "wind_speed_mph": round(ms_to_mph(r["wind_speed_ms"]), 1),
+                     "precip_in": round(mm_to_in(r["precip_mm"]), 3)})
     return out
 
 
@@ -310,6 +319,7 @@ class Critic(BaseAgent):
         for c in checks:
             overall = _max_sev(overall, c.severity)
 
+        dm_c = snap.temperature_c - snap.dew_point_c
         assessment = WeatherAssessment(
             observed_at=snap.observed_at,
             assessed_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -317,15 +327,28 @@ class Critic(BaseAgent):
             summary=_summary_from_checks(checks, overall),
             checks=checks,
             raw_current={
-                "temperature_c": snap.temperature_c,
+                # Imperial (display) — what the dashboard + chat tools use
+                "temperature_f": round(c_to_f(snap.temperature_c), 1),
+                "dew_point_f": round(c_to_f(snap.dew_point_c), 1),
+                "dew_margin_f": round(c_delta_to_f(dm_c), 1),
+                "wind_speed_mph": round(ms_to_mph(snap.wind_speed_ms), 1),
+                "wind_gust_mph": (round(ms_to_mph(snap.wind_gust_ms), 1)
+                                    if snap.wind_gust_ms is not None else None),
+                "pressure_inhg": round(snap.pressure_hpa * 0.02953, 2),
+                "precip_in": round(mm_to_in(snap.precip_mm), 3),
+                # Unit-agnostic
                 "humidity_pct": snap.humidity_pct,
-                "dew_point_c": snap.dew_point_c,
-                "dew_margin_c": round(snap.temperature_c - snap.dew_point_c, 1),
-                "wind_speed_ms": snap.wind_speed_ms,
-                "wind_gust_ms": snap.wind_gust_ms,
                 "cloud_cover_pct": snap.cloud_cover_pct,
-                "pressure_hpa": snap.pressure_hpa,
-                "precip_mm": snap.precip_mm,
+                # SI originals retained for any internal calculation
+                "_si": {
+                    "temperature_c": snap.temperature_c,
+                    "dew_point_c": snap.dew_point_c,
+                    "dew_margin_c": round(dm_c, 1),
+                    "wind_speed_ms": snap.wind_speed_ms,
+                    "wind_gust_ms": snap.wind_gust_ms,
+                    "pressure_hpa": snap.pressure_hpa,
+                    "precip_mm": snap.precip_mm,
+                },
             },
             hourly_severity=_hourly_severity(forecast_rows, t),
         )
