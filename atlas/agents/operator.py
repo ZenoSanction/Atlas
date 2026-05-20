@@ -140,13 +140,114 @@ class Operator(BaseAgent):
             await self.handle_relayed_message(msg)
 
     async def _handle_status(self, msg) -> None:
-        """Status updates from other agents — primarily the Critic's weather
-        assessment. Compute a verdict and broadcast on change."""
-        kind = msg.payload.get("kind")
-        if kind != "weather_assessment":
-            self.log.debug("Operator ignoring status kind: %s", kind)
+        """Status updates from other agents — primarily the Critic's
+        weather assessment OR a SessionReview travelling through the
+        chain-of-command pipeline."""
+        payload = msg.payload or {}
+        phase = payload.get("phase")
+        if phase == "critic_review" and payload.get("review"):
+            await self._route_to_oracle(payload["review"])
             return
-        await self._update_verdict_from_weather(msg.payload)
+        if phase == "oracle_review" and payload.get("review"):
+            await self._decide_session(payload["review"])
+            return
+        kind = payload.get("kind")
+        if kind == "weather_assessment":
+            await self._update_verdict_from_weather(payload)
+            return
+        self.log.debug("Operator ignoring status kind=%s phase=%s", kind, phase)
+
+    async def _route_to_oracle(self, review_dict: dict) -> None:
+        """Phase 3 of pipeline: Operator hands the reviewed plan to Oracle
+        for revisit / extended-integration analysis."""
+        from atlas.agents.session_workflow import (
+            SessionReview, PHASE_ORACLE_QUERY,
+        )
+        review = SessionReview.from_jsonable(review_dict)
+        n_warn = sum(1 for w in review.critic_warnings if w.severity != "ok")
+        self.set_task(
+            f"routing plan {review.review_id} to Oracle ({n_warn} warning(s) from Critic)",
+            state="working")
+        review.advance(PHASE_ORACLE_QUERY, "operator",
+                        note="forwarded critic review to Oracle for revisit check")
+        get_state().set_session_review(review.to_jsonable())
+        await self.send(
+            AgentName.ORACLE, AgentMessageKind.STATUS,
+            payload={
+                "summary": (f"Plan {review.review_id} reviewed by Critic "
+                              f"({n_warn} warning(s)). Please check for "
+                              "revisits or targets needing extended integration."),
+                "phase": PHASE_ORACLE_QUERY,
+                "review": review.to_jsonable(),
+                "from_chat": False,
+            },
+        )
+
+    async def _decide_session(self, review_dict: dict) -> None:
+        """Phase 5 of pipeline: Operator weighs the Critic warnings + Oracle
+        suggestions and makes a final decision (proceed / re-plan / cancel),
+        then hands back to the Planner to either finalise or rebuild."""
+        from atlas.agents.session_workflow import (
+            SessionReview, PHASE_OPERATOR_DECN,
+        )
+        review = SessionReview.from_jsonable(review_dict)
+
+        critical = [w for w in review.critic_warnings if w.severity == "critical"]
+        warnings = [w for w in review.critic_warnings if w.severity == "warning"]
+        constraints: list[str] = []
+
+        if any(w.kind == "hardware" for w in critical):
+            decision = "cancel"
+            reason = ("Hardware critical — "
+                       + "; ".join(w.message for w in critical if w.kind == "hardware"))
+        elif any(w.kind == "weather" and w.severity == "critical" for w in critical):
+            decision = "cancel"
+            reason = ("Weather critical — "
+                       + "; ".join(w.message for w in critical if w.kind == "weather"))
+        elif any(w.kind == "moon" and w.severity == "critical" for w in critical):
+            decision = "replan"
+            constraints.append("avoid_moon")
+            reason = ("Moon critically impacts plan — re-plan avoiding "
+                       "targets within 40° of the moon.")
+        elif warnings:
+            # warnings only → proceed but record constraints to inform next rebuild
+            decision = "proceed"
+            for w in warnings:
+                if w.suggested_constraint and w.suggested_constraint not in constraints:
+                    constraints.append(w.suggested_constraint)
+            reason = (f"Proceeding with {len(warnings)} warning(s); "
+                       f"constraints noted: {', '.join(constraints) or 'none'}")
+        else:
+            decision = "proceed"
+            reason = "All gates clear; proceed with plan as-is."
+
+        review.operator_decision = decision
+        review.operator_constraints = constraints
+        review.operator_reason = reason
+        review.advance(PHASE_OPERATOR_DECN, "operator",
+                        note=f"decision={decision}; {reason[:80]}")
+        get_state().set_session_review(review.to_jsonable())
+        self.set_task(f"decision: {decision.upper()} — {reason[:60]}",
+                      state="waiting")
+        self.log_decision("session_decision",
+                            inputs={"review_id": review.review_id,
+                                      "critical_count": len(critical),
+                                      "warning_count": len(warnings),
+                                      "oracle_suggestions_count": len(review.oracle_suggestions)},
+                            outputs={"decision": decision,
+                                      "constraints": constraints,
+                                      "reason": reason},
+                            rationale=reason)
+        await self.send(
+            AgentName.PLANNER, AgentMessageKind.STATUS,
+            payload={
+                "summary": (f"Decision on plan {review.review_id}: "
+                              f"{decision.upper()} — {reason[:80]}"),
+                "phase": PHASE_OPERATOR_DECN,
+                "review": review.to_jsonable(),
+                "from_chat": False,
+            },
+        )
 
     async def _update_verdict_from_weather(self, payload: dict) -> None:
         sev = payload.get("overall_severity", "ok")

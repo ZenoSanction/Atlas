@@ -699,6 +699,7 @@ async def mission_control() -> dict:
         "observatory_name": (site.observatory_name if site else None),
         "verdict": verdict.to_jsonable() if verdict else None,
         "preflight": st.get_preflight(),
+        "session_review": st.get_session_review(),
         "agents": agents,
         "message_flow": st.get_message_flow(limit=40),
     }

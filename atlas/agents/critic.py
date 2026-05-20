@@ -199,15 +199,21 @@ class Critic(BaseAgent):
 
     async def _handle_relay(self, msg) -> None:
         """Inbound relay handler. Always surfaces the message to the
-        dashboard + chat history first (via the BaseAgent default), then
-        for status/revision_request kinds runs a fresh weather pull so
-        the requesting agent gets an updated assessment quickly."""
-        # 1. Surface the relay everywhere visible (inbox, current_task,
-        #    chat history, broadcast event). The Bus already pushed to
-        #    the inbox via push_inbox; this adds the other channels.
+        dashboard first, then dispatches by phase / kind:
+
+          phase=plan_built     → full session review (weather + moon +
+                                  hardware) → forward to Operator
+          kind=revision_request → on-demand standard loop
+          kind=status (no phase) → on-demand standard loop
+        """
         await self.handle_relayed_message(msg)
-        # 2. For kinds where the requester wants the Critic to do its
-        #    job right now, kick the standard loop on demand.
+        payload = msg.payload or {}
+        phase = payload.get("phase")
+
+        if phase == "plan_built" and payload.get("review"):
+            await self._review_session_plan(payload["review"])
+            return
+
         kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
         if kind in ("revision_request", "status"):
             try:
@@ -215,6 +221,137 @@ class Critic(BaseAgent):
             except Exception:
                 self.log.exception("On-demand standard loop failed")
             self._last_standard = asyncio.get_event_loop().time()
+
+    async def _review_session_plan(self, review_dict: dict) -> None:
+        """Step 2 of the session pipeline: review the plan for weather,
+        moon position vs. each visible target, and hardware readiness.
+        Append warnings to the SessionReview, advance to phase=critic_review,
+        and forward to the Operator."""
+        from atlas.agents.session_workflow import (
+            SessionReview, SessionWarning, PHASE_CRITIC_REVIEW,
+        )
+        from atlas.astronomy import (
+            angular_separation, compute_alt_az, moon_position,
+        )
+        from datetime import datetime as _dt
+
+        review = SessionReview.from_jsonable(review_dict)
+        self.set_task(f"reviewing plan {review.review_id}: weather + moon + hardware",
+                      state="working")
+
+        # Make sure our weather assessment is fresh
+        try:
+            await self._standard_loop()
+        except Exception:
+            self.log.exception("Standard loop on review failed")
+        self._last_standard = asyncio.get_event_loop().time()
+
+        # 1. Weather → pull from shared state (just-refreshed)
+        a = get_state().get_assessment()
+        if a is not None:
+            for c in a.checks:
+                if c.severity in ("warning", "critical"):
+                    review.critic_warnings.append(SessionWarning(
+                        kind="weather",
+                        severity=c.severity,
+                        message=f"{c.metric.replace('_',' ')}: {c.note}",
+                        suggested_constraint=("avoid_low_alt"
+                                                if c.metric == "dew_margin"
+                                                else None),
+                    ))
+
+        # 2. Moon — illumination + per-target separation
+        site = ConfigManager.get_site()
+        if site is not None:
+            now = _dt.utcnow()
+            try:
+                moon_ra, moon_dec, illum = moon_position(now)
+                moon_alt, _ = compute_alt_az(moon_ra, moon_dec,
+                                               float(site.latitude),
+                                               float(site.longitude), now)
+            except Exception as e:
+                self.log.warning("Moon position failed: %s", e)
+                moon_ra = moon_dec = illum = moon_alt = None
+
+            if illum is not None and moon_alt is not None:
+                # Only flag moon impact when moon is up AND bright (>30% illum)
+                if moon_alt > 0 and illum > 0.30:
+                    targets = review.plan.get("visible_targets") or []
+                    close_targets = []
+                    for t in targets:
+                        if t.get("ra_deg") is None or t.get("dec_deg") is None:
+                            continue
+                        sep = angular_separation(
+                            float(t["ra_deg"]), float(t["dec_deg"]),
+                            moon_ra, moon_dec,
+                        )
+                        if sep < 40.0:   # within 40° of bright moon
+                            close_targets.append((t["target_name"], sep))
+                    if close_targets:
+                        names = ", ".join(f"{n} ({s:.0f}°)" for n, s in close_targets[:5])
+                        sev = "warning" if illum < 0.7 else "critical"
+                        review.critic_warnings.append(SessionWarning(
+                            kind="moon",
+                            severity=sev,
+                            message=(f"Moon {illum*100:.0f}% illuminated, alt {moon_alt:.0f}°. "
+                                       f"{len(close_targets)} target(s) within 40°: {names}"),
+                            suggested_constraint="avoid_moon",
+                        ))
+                    else:
+                        review.critic_warnings.append(SessionWarning(
+                            kind="moon",
+                            severity="ok",
+                            message=(f"Moon {illum*100:.0f}% illum, alt {moon_alt:.0f}° — "
+                                       "no plan targets within 40°."),
+                        ))
+                else:
+                    review.critic_warnings.append(SessionWarning(
+                        kind="moon",
+                        severity="ok",
+                        message=(f"Moon {illum*100:.0f}% illum, alt {moon_alt:.0f}° — "
+                                  "below horizon or faint; no impact."),
+                    ))
+
+        # 3. Hardware — reuse the cached snapshot from routes
+        try:
+            from atlas.api.routes import _HARDWARE_SNAPSHOT_CACHE
+            snap = _HARDWARE_SNAPSHOT_CACHE.get("data") or {}
+            offline = [k for k, v in snap.items()
+                        if not v.get("connected") and v.get("status") != "n/a"
+                        and k != "guiding"]
+            if offline:
+                review.critic_warnings.append(SessionWarning(
+                    kind="hardware",
+                    severity="critical",
+                    message=f"Disconnected: {', '.join(offline)}",
+                ))
+        except Exception:
+            pass
+
+        # Advance phase and forward to Operator
+        sev_counts = {"ok": 0, "warning": 0, "critical": 0}
+        for w in review.critic_warnings:
+            sev_counts[w.severity] = sev_counts.get(w.severity, 0) + 1
+        review.advance(PHASE_CRITIC_REVIEW, "critic",
+                        note=(f"{sev_counts['critical']} critical, "
+                                f"{sev_counts['warning']} warning, "
+                                f"{sev_counts['ok']} ok"))
+        get_state().set_session_review(review.to_jsonable())
+
+        await self.send(
+            AgentName.OPERATOR, AgentMessageKind.STATUS,
+            payload={
+                "summary": (f"Reviewed plan {review.review_id}: "
+                              f"{sev_counts['critical']} critical, "
+                              f"{sev_counts['warning']} warning, "
+                              f"{sev_counts['ok']} ok"),
+                "phase": PHASE_CRITIC_REVIEW,
+                "review": review.to_jsonable(),
+                "from_chat": False,
+            },
+        )
+        self.set_task(f"plan {review.review_id} forwarded to Operator",
+                      state="idle")
 
     def _publish_next_ticks(self, now_monotonic: float) -> None:
         """Compute when the next fast + standard loops will fire (in wall

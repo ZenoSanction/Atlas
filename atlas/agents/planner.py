@@ -45,6 +45,9 @@ class Planner(BaseAgent):
         super().__init__()
         self._last_rebuild = 0.0
         self._initial_done = False
+        # Constraints injected by Operator decisions (e.g., ["avoid_moon"])
+        # — apply on the next rebuild then clear.
+        self._active_constraints: list[str] = []
         from atlas.agents.planner_tools import PLANNER_TOOLS
         for spec in PLANNER_TOOLS:
             self.register_tool(spec)
@@ -79,6 +82,13 @@ class Planner(BaseAgent):
                     self._publish_next_tick(now)
                 continue
 
+            if (msg.kind == AgentMessageKind.STATUS
+                and (msg.payload or {}).get("phase") == "operator_decision"
+                and (msg.payload or {}).get("review")):
+                # Final phase of the session pipeline — Operator's verdict
+                # comes back to us. Finalise, re-plan, or cancel.
+                await self._handle_session_decision(msg.payload["review"])
+                continue
             if msg.kind == AgentMessageKind.REVISION_REQUEST:
                 await self._handle_revision(msg)
             elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
@@ -114,6 +124,80 @@ class Planner(BaseAgent):
         self.log_decision("plan_revised", inputs={"details": msg.payload},
                             rationale="Rebuilt plan on revision request",
                             session_id=msg.session_id)
+
+    async def _handle_session_decision(self, review_dict: dict) -> None:
+        """Final phase of the session pipeline. Operator has decided:
+          proceed → mark plan finalised, broadcast
+          replan  → rebuild plan with the noted constraints
+          cancel  → mark cancelled, broadcast
+        """
+        from atlas.agents.session_workflow import (
+            SessionReview, PHASE_FINALISED, PHASE_CANCELLED, PHASE_REPLAN,
+        )
+        review = SessionReview.from_jsonable(review_dict)
+        decision = review.operator_decision or "proceed"
+        reason = review.operator_reason or ""
+        constraints = review.operator_constraints or []
+
+        self.set_task(f"received decision: {decision.upper()} — {reason[:60]}",
+                      state="working")
+
+        if decision == "proceed":
+            review.advance(PHASE_FINALISED, "planner",
+                            note="plan finalised; ready to execute")
+            get_state().set_session_review(review.to_jsonable())
+            self.log_decision("session_finalised",
+                                inputs={"review_id": review.review_id,
+                                          "constraints_noted": constraints},
+                                outputs={"phase": "finalised"},
+                                rationale=reason or "All checks passed")
+            await self.bus.broadcast_event({
+                "type": "session_finalised",
+                "sender": "planner",
+                "kind": "finalised",
+                "review_id": review.review_id,
+                "constraints": constraints,
+                "sent_at": review.final_at,
+            })
+            self.set_task(f"session {review.review_id} finalised — plan locked",
+                          state="waiting")
+        elif decision == "cancel":
+            review.advance(PHASE_CANCELLED, "planner",
+                            note="session cancelled by Operator decision")
+            get_state().set_session_review(review.to_jsonable())
+            self.log_decision("session_cancelled",
+                                inputs={"review_id": review.review_id,
+                                          "reason": reason},
+                                outputs={"phase": "cancelled"},
+                                rationale=reason)
+            await self.bus.broadcast_event({
+                "type": "session_cancelled",
+                "sender": "planner",
+                "kind": "cancelled",
+                "review_id": review.review_id,
+                "reason": reason,
+                "sent_at": review.final_at,
+            })
+            self.set_task(f"session {review.review_id} CANCELLED — {reason[:60]}",
+                          state="idle")
+        elif decision == "replan":
+            review.advance(PHASE_REPLAN, "planner",
+                            note=f"re-planning with constraints: {','.join(constraints)}")
+            get_state().set_session_review(review.to_jsonable())
+            self.log_decision("session_replan",
+                                inputs={"review_id": review.review_id,
+                                          "constraints": constraints},
+                                outputs={"phase": "replan"},
+                                rationale=reason)
+            # Store constraints so _rebuild_plan can use them
+            self._active_constraints = list(constraints)
+            try:
+                await self._rebuild_plan(reason=f"replan:{','.join(constraints) or 'operator'}")
+            finally:
+                self._active_constraints = []
+        else:
+            self.log.warning("Unknown decision %r on session %s",
+                              decision, review.review_id)
 
     async def _rebuild_plan(self, *, reason: str) -> None:
         self.set_task(f"rebuilding plan ({reason})", state="working")
@@ -228,6 +312,27 @@ class Planner(BaseAgent):
                 })
 
         full = (visible or from_catalog)
+
+        # Apply Operator-supplied constraints from the last session decision.
+        # Currently supported: 'avoid_moon' filters targets within 40° of the
+        # moon when it's above the horizon and >30% illuminated.
+        applied_constraints: list[str] = []
+        if "avoid_moon" in self._active_constraints:
+            try:
+                from atlas.astronomy import angular_separation, moon_position
+                m_ra, m_dec, illum = moon_position(mid_night)
+                m_alt, _ = compute_alt_az(m_ra, m_dec, lat, lon, mid_night)
+                if m_alt > 0 and illum > 0.30:
+                    before = len(full)
+                    full = [t for t in full
+                              if angular_separation(t["ra_deg"], t["dec_deg"],
+                                                       m_ra, m_dec) >= 40.0]
+                    if before != len(full):
+                        applied_constraints.append(
+                            f"avoid_moon (dropped {before - len(full)} target(s))")
+            except Exception:
+                self.log.exception("avoid_moon filter failed")
+
         full.sort(key=lambda x: (-x["priority"], -x["alt_deg"]))
 
         plan = {
@@ -240,6 +345,7 @@ class Planner(BaseAgent):
             "horizon_alt_min_deg": horizon_alt,
             "window": window,
             "fallback_to_catalog": not visible and bool(from_catalog),
+            "applied_constraints": applied_constraints,
             # TODO Phase 2: NINA sequence XML, meridian-flip annotations,
             # cadence weighting, per-target exposure plans.
         }
@@ -264,21 +370,36 @@ class Planner(BaseAgent):
         self.set_task(summary + "; next sweep in ~30 min", state="waiting")
         self.log.info(summary)
 
-        # Explicit chain-of-command hand-off: tell the Critic a new plan
-        # exists so it can confirm weather fit. Critic's _handle_relay
-        # treats status/revision_request as a trigger to run a fresh
-        # standard loop right now, so the operator sees an immediate
-        # weather re-check in response to every plan rebuild.
+        # Kick off the session-planning workflow:
+        # Planner → Critic with phase=plan_built and the full plan blob.
+        # Critic will weather/moon/hardware-review it and forward to the
+        # Operator. The Operator routes through Oracle for revisit checks,
+        # then decides; the decision comes back to Planner which either
+        # finalises or re-plans with constraints.
         try:
+            from atlas.agents.session_workflow import (
+                SessionReview, new_review_id, PHASE_PLAN_BUILT,
+            )
             top_names = [t["target_name"] for t in full[:5]]
+            review = SessionReview(
+                review_id=new_review_id(),
+                plan=plan,
+                started_at=plan["built_at"],
+                phase=PHASE_PLAN_BUILT,
+            )
+            review.advance(PHASE_PLAN_BUILT, "planner",
+                            note=f"plan rebuilt ({reason}); {len(full)} target(s)")
+            # Persist as the live session review so the dashboard pipeline
+            # panel shows the workflow starting.
+            get_state().set_session_review(review.to_jsonable())
             await self.send(
                 AgentName.CRITIC, AgentMessageKind.STATUS,
                 payload={
                     "summary": (f"Plan rebuilt ({reason}) — {len(full)} target(s). "
                                   f"Top: {', '.join(top_names) if top_names else '(none visible)'}. "
-                                  "Please confirm weather fit."),
-                    "plan_built_at": plan["built_at"],
-                    "visible_count": len(full),
+                                  "Please review weather + moon + hardware."),
+                    "phase": PHASE_PLAN_BUILT,
+                    "review": review.to_jsonable(),
                     "from_chat": False,
                 },
             )

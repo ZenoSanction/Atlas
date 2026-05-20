@@ -579,6 +579,112 @@ footer .muted { color: var(--text-dim); }
 .gate-unknown  { border-left-color: var(--text-dim); }
 .gate-unknown  .gate-icon { color: var(--text-dim); }
 
+/* Session Workflow pipeline — multi-phase chain of command */
+.workflow {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+}
+.workflow-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 12px;
+}
+.workflow-title {
+  font-size: 13px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+}
+.workflow-id { font-size: 12px; font-family: "Cascadia Code", Consolas, monospace; }
+.workflow-stages {
+  display: flex; align-items: center;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  gap: 4px;
+}
+.stage {
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  min-width: 120px; flex-shrink: 0;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 11px; text-align: center;
+}
+.stage-dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--panel-2); border: 2px solid var(--line);
+}
+.stage-label { color: var(--text); line-height: 1.3; }
+.stage-agent {
+  display: block;
+  font-family: "Cascadia Code", Consolas, monospace;
+  color: var(--text-dim);
+  text-transform: uppercase; font-size: 10px;
+  letter-spacing: 0.05em; margin-bottom: 2px;
+}
+.stage-ts {
+  font-family: "Cascadia Code", Consolas, monospace;
+  color: var(--text-dim); font-size: 10px;
+  min-height: 14px;
+}
+.stage-arrow {
+  color: var(--text-dim); font-size: 18px;
+  flex-shrink: 0;
+}
+
+.stage.pending .stage-dot   { background: var(--panel-2); border-color: var(--line); }
+.stage.pending .stage-label { color: var(--text-dim); }
+.stage.active .stage-dot    { background: var(--accent); border-color: var(--accent);
+                                animation: stage-pulse 1.5s ease-in-out infinite; }
+.stage.active               { background: rgba(79, 163, 255, 0.10); }
+.stage.done .stage-dot      { background: var(--ok); border-color: var(--ok); }
+.stage.cancelled .stage-dot { background: var(--crit); border-color: var(--crit); }
+.stage.cancelled            { background: rgba(248, 113, 113, 0.10); }
+.stage.replan .stage-dot    { background: var(--warn); border-color: var(--warn); }
+.stage.replan               { background: rgba(251, 191, 36, 0.10); }
+
+@keyframes stage-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.4); }
+}
+
+.workflow-details { margin-top: 12px; font-size: 12px; }
+.workflow-details summary { color: var(--text-dim); cursor: pointer; padding: 4px 0; }
+.workflow-detail-section { padding: 8px 0; border-bottom: 1px dotted var(--line); }
+.workflow-detail-section:last-child { border-bottom: none; }
+.workflow-detail-section h4 {
+  margin: 0 0 6px 0; font-size: 11px;
+  color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em;
+}
+.warn-item, .sug-item {
+  padding: 4px 6px; margin: 2px 0; border-radius: 4px;
+  background: var(--panel-2);
+}
+.warn-kind, .warn-sev {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10px; text-transform: uppercase;
+  color: var(--text-dim); margin-right: 4px;
+}
+.warn-warning .warn-sev  { color: var(--warn); }
+.warn-critical .warn-sev { color: var(--crit); }
+.warn-ok .warn-sev       { color: var(--ok); }
+.sug-bump { color: var(--gold); margin: 0 4px; font-weight: 600; }
+.decision {
+  padding: 8px 10px; border-radius: 4px;
+  border-left: 3px solid var(--line); background: var(--panel-2);
+}
+.decision strong { display: block; font-size: 13px; margin-bottom: 4px; }
+.decision-proceed { border-left-color: var(--ok); }
+.decision-proceed strong { color: var(--ok); }
+.decision-replan  { border-left-color: var(--warn); }
+.decision-replan  strong { color: var(--warn); }
+.decision-cancel  { border-left-color: var(--crit); }
+.decision-cancel  strong { color: var(--crit); }
+.decision .reason { color: var(--text-dim); }
+.decision .constraints {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px; color: var(--gold); margin: 2px 0;
+}
+
 /* Inbox panel — sticky relay visibility per lane */
 .agent-inbox {
   background: var(--bg);

@@ -157,6 +157,76 @@ def _find_sun_crossing(latitude_deg: float, longitude_deg: float,
     return lo + (hi - lo) / 2
 
 
+# ---- Moon position + phase + angular separation ---------------------------
+
+def moon_position(when_utc: datetime) -> tuple[float, float, float]:
+    """Approximate geocentric moon RA/Dec (J2000-ish degrees) + illumination
+    fraction (0..1). Precision is well inside 1° for sky position and
+    ~1% for illumination — fine for "is the moon close to this target?"
+    decisions. For sub-degree precision swap to astropy.
+    Algorithm: Meeus chapter 47 simplified."""
+    jd = julian_date(when_utc)
+    T = (jd - 2451545.0) / 36525.0
+    # Moon's mean longitude
+    L = (218.316 + 481267.8813 * T) % 360.0
+    # Moon's mean anomaly
+    M = math.radians((134.963 + 477198.8676 * T) % 360.0)
+    # Sun's mean anomaly
+    Ms = math.radians((357.528 + 35999.050 * T) % 360.0)
+    # Moon's mean elongation
+    D = math.radians((297.850 + 445267.1115 * T) % 360.0)
+    # Moon's argument of latitude
+    F = math.radians((93.272 + 483202.0175 * T) % 360.0)
+
+    # Longitude correction (radians worth of degrees)
+    lam_deg = (L
+                + 6.289 * math.sin(M)
+                - 1.274 * math.sin(M - 2 * D)
+                + 0.658 * math.sin(2 * D)
+                - 0.186 * math.sin(Ms)
+                - 0.059 * math.sin(2 * M - 2 * D)
+                - 0.057 * math.sin(M - 2 * D + Ms)
+                + 0.053 * math.sin(M + 2 * D)
+                + 0.046 * math.sin(2 * D - Ms))
+    # Ecliptic latitude
+    beta_deg = (5.128 * math.sin(F)
+                 + 0.281 * math.sin(M + F)
+                 - 0.278 * math.sin(F - M)
+                 - 0.173 * math.sin(F - 2 * D))
+
+    lam = math.radians(lam_deg)
+    beta = math.radians(beta_deg)
+    eps = math.radians(23.439 - 0.0000004 * (jd - 2451545.0))
+
+    ra = math.atan2(math.sin(lam) * math.cos(eps) - math.tan(beta) * math.sin(eps),
+                     math.cos(lam))
+    dec = math.asin(math.sin(beta) * math.cos(eps)
+                     + math.cos(beta) * math.sin(eps) * math.sin(lam))
+    ra_deg = math.degrees(ra) % 360.0
+    dec_deg = math.degrees(dec)
+
+    # Illumination fraction (phase angle from elongation)
+    sun_lon = math.radians((280.460 + 0.9856474 * (jd - 2451545.0)) % 360.0)
+    elong = math.acos(math.cos(beta) * math.cos(lam - sun_lon))
+    illum = (1.0 - math.cos(elong)) / 2.0   # 0 at new moon, 1 at full
+    return ra_deg, dec_deg, illum
+
+
+def angular_separation(ra1_deg: float, dec1_deg: float,
+                        ra2_deg: float, dec2_deg: float) -> float:
+    """Great-circle angle between two celestial points, in degrees.
+    Uses the haversine formula (numerically stable for small separations)."""
+    ra1 = math.radians(ra1_deg)
+    dec1 = math.radians(dec1_deg)
+    ra2 = math.radians(ra2_deg)
+    dec2 = math.radians(dec2_deg)
+    d_ra = ra2 - ra1
+    d_dec = dec2 - dec1
+    a = (math.sin(d_dec / 2) ** 2
+         + math.cos(dec1) * math.cos(dec2) * math.sin(d_ra / 2) ** 2)
+    return math.degrees(2 * math.asin(min(1.0, math.sqrt(a))))
+
+
 def night_window(latitude_deg: float, longitude_deg: float,
                   reference_utc: datetime | None = None,
                   altitude_deg: float = -12.0,

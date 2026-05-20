@@ -7,10 +7,11 @@ the precision an amateur observatory needs (~1 arcmin)."""
 from atlas.astronomy.visibility import (
     compute_alt_az, julian_date, local_sidereal_time, airmass,
     is_above_horizon, sun_ra_dec, sun_altitude, night_window,
+    moon_position, angular_separation,
 )
 
 __all__ = [
     "compute_alt_az", "julian_date", "local_sidereal_time",
     "airmass", "is_above_horizon", "sun_ra_dec", "sun_altitude",
-    "night_window",
+    "night_window", "moon_position", "angular_separation",
 ]

@@ -117,6 +117,10 @@ class _ObservatoryState:
         # The Operator runs this every 2 min and publishes the result here;
         # the dashboard's Session Readiness panel + the API both read it.
         self._preflight: dict | None = None
+        # Most recent SessionReview (dict form) — the deterministic
+        # plan → critic → operator → oracle → operator → planner pipeline.
+        # The dashboard's Session Workflow panel reads this.
+        self._session_review: dict | None = None
 
     # Critic writes here ----------------------------------------------------
     def set_assessment(self, a: WeatherAssessment) -> None:
@@ -221,6 +225,15 @@ class _ObservatoryState:
     def get_preflight(self) -> dict | None:
         with self._lock:
             return self._preflight
+
+    # Session-planning workflow (multi-phase pipeline) ----------------------
+    def set_session_review(self, review: dict) -> None:
+        with self._lock:
+            self._session_review = review
+
+    def get_session_review(self) -> dict | None:
+        with self._lock:
+            return self._session_review
 
     # Per-agent inbox + outbox (sticky relay visibility) --------------------
     def push_inbox(self, agent: str, item: dict, limit: int = 8) -> None:

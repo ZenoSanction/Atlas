@@ -85,6 +85,12 @@ class Oracle(BaseAgent):
                 await self._handle_new_data(msg)
                 self.set_task("research pass complete — standing by",
                               state="idle")
+            elif (msg.kind == AgentMessageKind.STATUS
+                  and (msg.payload or {}).get("phase") == "oracle_query"
+                  and (msg.payload or {}).get("review")):
+                # Session pipeline phase 4 — review the plan for revisits +
+                # extended integrations, then return to the Operator.
+                await self._review_for_revisits(msg.payload["review"])
             else:
                 await self.handle_relayed_message(msg)
 
@@ -121,6 +127,89 @@ class Oracle(BaseAgent):
                           f"{n_measurements or 0} measurements."),
             "sent_at": info["at"],
         })
+
+    async def _review_for_revisits(self, review_dict: dict) -> None:
+        """Phase 4 of the session pipeline: walk the plan's visible
+        targets and, for any with active knowledge threads or stale
+        recent imaging, propose a revisit / extended integration."""
+        from atlas.agents.session_workflow import (
+            SessionReview, OracleSuggestion, PHASE_ORACLE_REVIEW,
+        )
+        from atlas.db.session import get_session as _db_sess
+        from atlas.db.models import (
+            Target, KnowledgeThread, Frame, Measurement,
+        )
+        from datetime import datetime as _dt, timedelta
+
+        review = SessionReview.from_jsonable(review_dict)
+        self.set_task(f"reviewing plan {review.review_id} for revisits/extensions",
+                      state="working")
+
+        targets = review.plan.get("visible_targets") or []
+        cutoff_recent = _dt.utcnow() - timedelta(days=30)
+
+        with _db_sess() as s:
+            for t in targets:
+                name = t.get("target_name")
+                if not name:
+                    continue
+                tgt = s.query(Target).filter_by(name=name).first()
+                if tgt is None:
+                    # Target unknown to ATLAS yet — no revisit signal possible
+                    continue
+                # Active knowledge thread → revisit candidate
+                active = (s.query(KnowledgeThread)
+                            .filter_by(target_id=tgt.id, state="active")
+                            .first())
+                if active:
+                    review.oracle_suggestions.append(OracleSuggestion(
+                        target_name=name,
+                        reason=(f"active knowledge thread '{active.kind}' — "
+                                  "cadence may be due"),
+                        priority_bump=10,
+                    ))
+                    continue
+                # Recent measurements but low frame count → extended integration
+                n_meas_30d = (s.query(Measurement)
+                                .filter(Measurement.target_id == tgt.id,
+                                          Measurement.epoch_utc >= cutoff_recent)
+                                .count())
+                n_frames_30d = (s.query(Frame)
+                                  .filter(Frame.target_id == tgt.id,
+                                            Frame.captured_at >= cutoff_recent)
+                                  .count())
+                if n_meas_30d > 0 and n_frames_30d < 30:
+                    review.oracle_suggestions.append(OracleSuggestion(
+                        target_name=name,
+                        reason=(f"only {n_frames_30d} frame(s) in last 30 days "
+                                  f"with {n_meas_30d} measurement(s) — extend integration"),
+                        priority_bump=5,
+                    ))
+
+        n_sug = len(review.oracle_suggestions)
+        review.advance(PHASE_ORACLE_REVIEW, "oracle",
+                        note=f"{n_sug} revisit/extension suggestion(s)")
+        get_state().set_session_review(review.to_jsonable())
+        self.log_decision("oracle_session_review",
+                            inputs={"review_id": review.review_id,
+                                      "targets_checked": len(targets)},
+                            outputs={"suggestion_count": n_sug,
+                                      "suggestions": [s.target_name for s in review.oracle_suggestions]},
+                            rationale=f"Phase-1 stub revisit logic checked "
+                                       f"{len(targets)} target(s)")
+
+        await self.send(
+            AgentName.OPERATOR, AgentMessageKind.STATUS,
+            payload={
+                "summary": (f"Reviewed plan {review.review_id} for revisits — "
+                              f"{n_sug} suggestion(s)"),
+                "phase": PHASE_ORACLE_REVIEW,
+                "review": review.to_jsonable(),
+                "from_chat": False,
+            },
+        )
+        self.set_task(f"plan {review.review_id} returned to Operator",
+                      state="idle")
 
     async def _idle_research(self, *, reason: str) -> None:
         """Periodic background pass. Counts recent activity so the dashboard
