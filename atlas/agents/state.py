@@ -113,6 +113,10 @@ class _ObservatoryState:
         # Inter-agent message ring buffer for the live flow column
         self._message_flow: list[dict] = []
         self._max_messages = 80
+        # Latest comprehensive session-readiness pre-flight assessment.
+        # The Operator runs this every 2 min and publishes the result here;
+        # the dashboard's Session Readiness panel + the API both read it.
+        self._preflight: dict | None = None
 
     # Critic writes here ----------------------------------------------------
     def set_assessment(self, a: WeatherAssessment) -> None:
@@ -208,6 +212,15 @@ class _ObservatoryState:
     def get_message_flow(self, limit: int = 80) -> list[dict]:
         with self._lock:
             return list(self._message_flow[:limit])
+
+    # Comprehensive session pre-flight ---------------------------------------
+    def set_preflight(self, preflight: dict) -> None:
+        with self._lock:
+            self._preflight = preflight
+
+    def get_preflight(self) -> dict | None:
+        with self._lock:
+            return self._preflight
 
     # Per-agent inbox + outbox (sticky relay visibility) --------------------
     def push_inbox(self, agent: str, item: dict, limit: int = 8) -> None:

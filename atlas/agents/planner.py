@@ -264,6 +264,27 @@ class Planner(BaseAgent):
         self.set_task(summary + "; next sweep in ~30 min", state="waiting")
         self.log.info(summary)
 
+        # Explicit chain-of-command hand-off: tell the Critic a new plan
+        # exists so it can confirm weather fit. Critic's _handle_relay
+        # treats status/revision_request as a trigger to run a fresh
+        # standard loop right now, so the operator sees an immediate
+        # weather re-check in response to every plan rebuild.
+        try:
+            top_names = [t["target_name"] for t in full[:5]]
+            await self.send(
+                AgentName.CRITIC, AgentMessageKind.STATUS,
+                payload={
+                    "summary": (f"Plan rebuilt ({reason}) — {len(full)} target(s). "
+                                  f"Top: {', '.join(top_names) if top_names else '(none visible)'}. "
+                                  "Please confirm weather fit."),
+                    "plan_built_at": plan["built_at"],
+                    "visible_count": len(full),
+                    "from_chat": False,
+                },
+            )
+        except Exception:
+            self.log.exception("Failed to relay plan to Critic")
+
     async def safe_mode_step(self) -> None:
         # Planner doesn't talk to Claude in this phase, so safe mode is a no-op.
         await asyncio.sleep(30)

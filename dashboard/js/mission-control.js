@@ -28,23 +28,52 @@ export async function refreshMissionControl(api) {
     return;
   }
 
-  // GO/NO-GO banner
+  // GO/NO-GO/WAITING banner — driven by the comprehensive preflight if
+  // it has run, else falls back to the legacy weather-only verdict.
   const banner = document.getElementById("gonogo");
   const txt = document.getElementById("gonogo-text");
   const meta = document.getElementById("gonogo-meta");
   if (banner && txt) {
-    banner.classList.remove("ok", "warn", "crit", "neutral");
+    banner.classList.remove("ok", "warn", "crit", "neutral", "waiting");
+    const pf = mc.preflight;
     const v = mc.verdict;
-    if (v && v.verdict === "GO") banner.classList.add("ok");
-    else if (v && v.verdict === "CAUTION") banner.classList.add("warn");
-    else if (v && v.verdict === "NO-GO") banner.classList.add("crit");
+    let label = "UNKNOWN", reason = "", at = "";
+    if (pf && pf.verdict) {
+      label = pf.verdict; reason = pf.reason || ""; at = pf.assessed_at;
+    } else if (v) {
+      label = v.verdict; reason = v.reason || ""; at = v.decided_at;
+    }
+    if (label === "GO") banner.classList.add("ok");
+    else if (label === "CAUTION") banner.classList.add("warn");
+    else if (label === "NO-GO") banner.classList.add("crit");
+    else if (label === "WAITING") banner.classList.add("waiting");
     else banner.classList.add("neutral");
-    txt.textContent = v ? `${v.verdict} — ${v.reason || ""}` : "Awaiting first Critic assessment…";
+    txt.textContent = `${label} — ${reason || (label === "UNKNOWN" ? "starting up" : "")}`;
     if (meta) {
       const obs = mc.observatory_name ? `${mc.observatory_name} · ` : "";
       const sim = mc.simulation_mode ? "SIMULATION MODE · " : "";
-      const at = v && v.decided_at ? `decided ${fmtClock(v.decided_at)}` : "";
-      meta.textContent = obs + sim + at;
+      const t = at ? `decided ${fmtClock(at)}` : "";
+      meta.textContent = obs + sim + t;
+    }
+  }
+
+  // Session Readiness panel — per-gate breakdown
+  const gatesEl = document.getElementById("readiness-gates");
+  const nextEl = document.getElementById("readiness-next-action");
+  if (gatesEl) {
+    const pf = mc.preflight;
+    if (!pf || !pf.gates || !pf.gates.length) {
+      gatesEl.innerHTML = `<div class="empty">Pre-flight running — first cycle within 2 min.</div>`;
+      if (nextEl) nextEl.textContent = "";
+    } else {
+      gatesEl.innerHTML = pf.gates.map(g => `
+        <div class="gate gate-${g.status}">
+          <span class="gate-icon">${gateIcon(g.status)}</span>
+          <span class="gate-label">${esc(g.label)}</span>
+          <span class="gate-message">${esc(g.message)}</span>
+        </div>
+      `).join("");
+      if (nextEl) nextEl.textContent = pf.next_action || "";
     }
   }
 
@@ -284,4 +313,15 @@ function renderChatHistory(container, history) {
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function gateIcon(status) {
+  switch (status) {
+    case "ok":       return "✓";
+    case "warning":  return "⚠";
+    case "critical": return "✗";
+    case "missing":  return "○";
+    case "unknown":  return "?";
+    default:         return "·";
+  }
 }

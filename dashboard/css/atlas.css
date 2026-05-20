@@ -524,6 +524,61 @@ footer .muted { color: var(--text-dim); }
 .message-flow .kind { color: var(--gold); margin-left: 4px; }
 .message-flow .empty { color: var(--text-dim); font-style: italic; padding: 4px; }
 
+/* Session Readiness panel — sits between verdict banner and lanes */
+.gonogo.waiting { background: rgba(79, 163, 255, 0.10); border-color: var(--accent); }
+
+.readiness {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-top: 12px;
+}
+.readiness-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 8px;
+}
+.readiness-title {
+  font-size: 13px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600;
+}
+.readiness-next {
+  font-size: 13px; color: var(--gold); font-style: italic;
+}
+.readiness-gates {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 6px;
+}
+.gate {
+  display: grid;
+  grid-template-columns: 24px max-content 1fr;
+  gap: 10px;
+  align-items: baseline;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  font-size: 13px;
+  border-left: 3px solid var(--line);
+}
+.gate-icon { font-weight: 700; font-family: "Cascadia Code", Consolas, monospace; text-align: center; }
+.gate-label {
+  font-weight: 600; min-width: 130px;
+  font-size: 12px; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.gate-message { color: var(--text); }
+.gate-ok       { border-left-color: var(--ok); }
+.gate-ok       .gate-icon { color: var(--ok); }
+.gate-warning  { border-left-color: var(--warn); }
+.gate-warning  .gate-icon { color: var(--warn); }
+.gate-critical { border-left-color: var(--crit); }
+.gate-critical .gate-icon { color: var(--crit); }
+.gate-missing  { border-left-color: var(--crit); background: rgba(248, 113, 113, 0.08); }
+.gate-missing  .gate-icon { color: var(--crit); }
+.gate-unknown  { border-left-color: var(--text-dim); }
+.gate-unknown  .gate-icon { color: var(--text-dim); }
+
 /* Inbox panel — sticky relay visibility per lane */
 .agent-inbox {
   background: var(--bg);

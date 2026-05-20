@@ -560,6 +560,26 @@ async def operator_verdict() -> dict:
     return v.to_jsonable()
 
 
+@api_router.get("/preflight")
+async def session_preflight() -> dict:
+    """Latest comprehensive session-readiness pre-flight.
+
+    Aggregates 8 gates (weather, hardware, calibration, plan, disk,
+    vault, API health, dark window) into a single verdict
+    (GO / WAITING / CAUTION / NO-GO / UNKNOWN). Run every 2 minutes by
+    the Operator agent; the dashboard's Session Readiness panel polls
+    this endpoint."""
+    from atlas.agents.state import get_state
+    pf = get_state().get_preflight()
+    if pf is None:
+        return {"verdict": "UNKNOWN",
+                 "reason": "Operator pre-flight hasn't run yet.",
+                 "next_action": "Wait ~2 minutes for the first cycle.",
+                 "assessed_at": None,
+                 "gates": []}
+    return pf
+
+
 # ============================================================================
 # Weather thresholds (Setup tab)
 # ============================================================================
@@ -678,6 +698,7 @@ async def mission_control() -> dict:
         "simulation_mode": settings.simulation_mode,
         "observatory_name": (site.observatory_name if site else None),
         "verdict": verdict.to_jsonable() if verdict else None,
+        "preflight": st.get_preflight(),
         "agents": agents,
         "message_flow": st.get_message_flow(limit=40),
     }

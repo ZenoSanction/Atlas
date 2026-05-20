@@ -42,21 +42,86 @@ class Operator(BaseAgent):
         self.log.info("Operator agent online — final authority")
         self.set_task("standing by — final-authority watch on agent bus",
                       state="idle")
-        while not self.should_stop:
-            msg = await self.recv_with_timeout(timeout_s=5.0)
-            if msg is None:
-                # Periodic housekeeping when idle
-                await self._periodic_check()
-                continue
+        # Background task: run the comprehensive pre-flight every 2 min and
+        # publish the aggregated verdict (weather + hardware + calibration
+        # + plan + disk + vault + API + dark window) to shared state. The
+        # dashboard's Session Readiness panel reads this; the verdict-on-
+        # weather logic still fires immediately on Critic STATUS messages.
+        preflight_task = asyncio.create_task(self._preflight_loop(),
+                                               name="operator-preflight")
+        try:
+            while not self.should_stop:
+                msg = await self.recv_with_timeout(timeout_s=5.0)
+                if msg is None:
+                    await self._periodic_check()
+                    continue
+                try:
+                    kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
+                    sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
+                    self.set_task(f"processing {kind} from {sender}", state="working")
+                    await self._handle(msg)
+                    self.set_task("standing by — last action handled", state="idle")
+                except Exception:
+                    self.log.exception("Operator failed handling message: %s", msg.kind)
+                    self.set_task("error handling last message — see log",
+                                  state="idle")
+        finally:
+            preflight_task.cancel()
             try:
-                kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
-                sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
-                self.set_task(f"processing {kind} from {sender}", state="working")
-                await self._handle(msg)
-                self.set_task("standing by — last action handled", state="idle")
+                await preflight_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _preflight_loop(self) -> None:
+        """Run the comprehensive session-readiness pre-flight every 2
+        minutes. Update shared state + broadcast the verdict on change."""
+        from atlas.safety.preflight import run_session_preflight
+        INTERVAL_S = 120
+        last_verdict: str | None = None
+        # Fire an immediate first pass so the dashboard has data on load.
+        await asyncio.sleep(2)
+        while not self.should_stop:
+            try:
+                preflight = await run_session_preflight()
+                pf_dict = preflight.to_jsonable()
+                get_state().set_preflight(pf_dict)
+                # If the verdict has changed, also update OperatorVerdict
+                # (which is what the legacy banner reads) and broadcast.
+                if preflight.verdict != last_verdict:
+                    self.log.info("Pre-flight verdict: %s -> %s (%s)",
+                                    last_verdict, preflight.verdict,
+                                    preflight.reason)
+                    last_verdict = preflight.verdict
+                    new_verdict = OperatorVerdict(
+                        decided_at=preflight.assessed_at,
+                        verdict=preflight.verdict,
+                        reason=preflight.reason,
+                        sources=["session_preflight"],
+                    )
+                    get_state().set_verdict(new_verdict)
+                    self.log_decision(
+                        "preflight_verdict",
+                        inputs={"gates": [g.to_jsonable() for g in preflight.gates]},
+                        outputs={"verdict": preflight.verdict,
+                                  "reason": preflight.reason,
+                                  "next_action": preflight.next_action},
+                        rationale=preflight.reason,
+                    )
+                    try:
+                        await self.bus.broadcast_event({
+                            "type": "session_preflight",
+                            "sender": "operator",
+                            "kind": "preflight_verdict",
+                            "verdict": preflight.verdict,
+                            "reason": preflight.reason,
+                            "next_action": preflight.next_action,
+                            "sent_at": preflight.assessed_at,
+                        })
+                    except Exception:
+                        pass
             except Exception:
-                self.log.exception("Operator failed handling message: %s", msg.kind)
-                self.set_task("error handling last message — see log", state="idle")
+                self.log.exception("Preflight loop failed")
+            await asyncio.sleep(INTERVAL_S)
 
     async def _handle(self, msg) -> None:
         if msg.kind == AgentMessageKind.ALERT:
