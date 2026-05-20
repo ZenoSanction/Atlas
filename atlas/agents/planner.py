@@ -159,8 +159,12 @@ class Planner(BaseAgent):
                 "constraints": constraints,
                 "sent_at": review.final_at,
             })
-            self.set_task(f"session {review.review_id} finalised — plan locked",
-                          state="waiting")
+            # Session pipeline complete — match the other agents' "idle"
+            # post-work state. Periodic rebuild in 30 min will move us back
+            # through working → workflow → idle again.
+            self.set_task(
+                f"session {review.review_id} finalised — next rebuild in 30 min",
+                state="idle")
         elif decision == "cancel":
             review.advance(PHASE_CANCELLED, "planner",
                             note="session cancelled by Operator decision")
