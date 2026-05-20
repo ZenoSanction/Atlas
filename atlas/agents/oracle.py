@@ -26,7 +26,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 from atlas.agents.base import BaseAgent
-from atlas.agents.state import get_state
+from atlas.agents.state import get_state  # noqa: F401  used by run()
 from atlas.db.models import AgentMessageKind, AgentName
 from atlas.db.session import get_session
 from atlas.db.models import Frame, Measurement
@@ -42,9 +42,13 @@ class Oracle(BaseAgent):
         super().__init__()
         self._last_idle = 0.0
         self._initial_done = False
+        from atlas.agents.oracle_tools import ORACLE_TOOLS
+        for spec in ORACLE_TOOLS:
+            self.register_tool(spec)
 
     async def run(self) -> None:
         self.log.info("Oracle agent online — research + transient pipeline")
+        self.set_task("oracle online — initial database scan", state="working")
         while not self.should_stop:
             if not self._initial_done:
                 self._initial_done = True
@@ -64,9 +68,23 @@ class Oracle(BaseAgent):
                     except Exception:
                         self.log.exception("Idle research pass failed")
                     self._last_idle = now
+                else:
+                    from datetime import datetime, timedelta
+                    nxt = datetime.utcnow() + timedelta(
+                        seconds=max(0, IDLE_PASS_INTERVAL_S - (now - self._last_idle)))
+                    get_state().update_agent_status(
+                        "oracle",
+                        next_tick_at=nxt.isoformat(timespec="seconds") + "Z",
+                        next_tick_kind="research_scan",
+                    )
                 continue
             if msg.kind == AgentMessageKind.NEW_DATA:
+                self.set_task(
+                    f"new data received — session {msg.payload.get('session_id')}",
+                    state="working")
                 await self._handle_new_data(msg)
+                self.set_task("research pass complete — standing by",
+                              state="idle")
             else:
                 self.log.debug("Oracle ignoring kind: %s", msg.kind)
 

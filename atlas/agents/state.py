@@ -72,6 +72,25 @@ class OperatorVerdict:
 
 # ---- Singleton store --------------------------------------------------------
 
+@dataclass
+class AgentLiveStatus:
+    """What an agent is doing *right now*. Updated by the agent each time
+    it transitions to a new phase. Read by the dashboard for the Mission
+    Control lanes."""
+    name: str                            # "planner" | "critic" | ...
+    current_task: str = "idle"
+    state: str = "idle"                  # "idle" | "working" | "waiting" | "safe-mode"
+    last_decision: str = ""              # decision_type of the most recent log
+    next_tick_at: Optional[str] = None   # ISO timestamp when next loop fires
+    next_tick_kind: Optional[str] = None # e.g. "fast_loop" / "standard_loop"
+    updated_at: str = ""
+    recent_decisions: list[dict] = field(default_factory=list)
+    recent_messages: list[dict] = field(default_factory=list)
+
+    def to_jsonable(self) -> dict:
+        return asdict(self)
+
+
 class _ObservatoryState:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -80,6 +99,14 @@ class _ObservatoryState:
         self._tonight_plan: dict | None = None
         self._archivist_last: dict | None = None
         self._oracle_last: dict | None = None
+        # Per-agent live status. Mission Control reads from here.
+        self._agent_status: dict[str, AgentLiveStatus] = {
+            n: AgentLiveStatus(name=n)
+            for n in ("planner", "critic", "operator", "archivist", "oracle")
+        }
+        # Inter-agent message ring buffer for the live flow column
+        self._message_flow: list[dict] = []
+        self._max_messages = 80
 
     # Critic writes here ----------------------------------------------------
     def set_assessment(self, a: WeatherAssessment) -> None:
@@ -129,6 +156,52 @@ class _ObservatoryState:
     def get_oracle_last(self) -> dict | None:
         with self._lock:
             return self._oracle_last
+
+    # Per-agent live status (Mission Control) -------------------------------
+    def update_agent_status(self, agent: str, **fields) -> AgentLiveStatus:
+        """Patch fields on the named agent's live status. Returns the updated
+        snapshot. The dashboard reads these via /api/mission-control."""
+        with self._lock:
+            status = self._agent_status.get(agent)
+            if status is None:
+                status = AgentLiveStatus(name=agent)
+                self._agent_status[agent] = status
+            for k, v in fields.items():
+                if hasattr(status, k):
+                    setattr(status, k, v)
+            status.updated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            return status
+
+    def push_agent_decision(self, agent: str, decision: dict, limit: int = 8) -> None:
+        with self._lock:
+            status = self._agent_status.setdefault(agent, AgentLiveStatus(name=agent))
+            status.recent_decisions.insert(0, decision)
+            status.recent_decisions = status.recent_decisions[:limit]
+            status.last_decision = decision.get("decision_type", "")
+
+    def push_agent_message(self, agent: str, message: dict, limit: int = 12) -> None:
+        with self._lock:
+            status = self._agent_status.setdefault(agent, AgentLiveStatus(name=agent))
+            status.recent_messages.insert(0, message)
+            status.recent_messages = status.recent_messages[:limit]
+
+    def get_agent_status(self, agent: str) -> AgentLiveStatus | None:
+        with self._lock:
+            return self._agent_status.get(agent)
+
+    def get_all_agent_status(self) -> dict[str, AgentLiveStatus]:
+        with self._lock:
+            return dict(self._agent_status)
+
+    # Inter-agent message flow ----------------------------------------------
+    def push_message_flow(self, message: dict) -> None:
+        with self._lock:
+            self._message_flow.insert(0, message)
+            self._message_flow = self._message_flow[:self._max_messages]
+
+    def get_message_flow(self, limit: int = 80) -> list[dict]:
+        with self._lock:
+            return list(self._message_flow[:limit])
 
 
 _state: _ObservatoryState | None = None

@@ -3,7 +3,7 @@
 
 import { initTabs } from "/static/js/tabs.js";
 import { connectEvents } from "/static/js/ws.js";
-import { renderTonight, refreshTonight } from "/static/js/tonight.js";
+import { renderMissionControl, refreshMissionControl } from "/static/js/mission-control.js";
 import { renderWeather, refreshWeather } from "/static/js/weather.js";
 import { renderPlan } from "/static/js/plan.js";
 import { renderScience } from "/static/js/science.js";
@@ -29,7 +29,7 @@ window.atlas = { api };
 // Boot
 (async function boot() {
   initTabs({
-    tonight: refreshTonight,
+    tonight: refreshMissionControl,
     weather: renderWeather,
     plan: renderPlan,
     science: renderScience,
@@ -48,12 +48,10 @@ window.atlas = { api };
     document.getElementById("version-pill").textContent = "offline";
   }
 
-  // Live state pushes come via WebSocket; this poll is the belt-and-braces
-  // fallback. 15 s avoids saturating the browser's 6-concurrent-fetches
-  // limit if the underlying /api/tonight/status is ever slow (e.g. NINA
-  // not responding).
-  renderTonight(api);
-  setInterval(() => refreshTonight(api), 15000);
+  // Mission Control is the new Tonight view. It self-polls every 3 s
+  // inside its module (cheap in-memory state read), so we just kick it
+  // off once at boot.
+  renderMissionControl(api);
 
   // Take Control toggle
   const tc = document.getElementById("take-control");

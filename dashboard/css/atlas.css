@@ -365,3 +365,161 @@ footer .muted { color: var(--text-dim); }
 .event.kind-plan       { border-left: 3px solid #8b5cf6; padding-left: 8px; }   /* violet */
 .event.kind-archivist  { border-left: 3px solid #38bdf8; padding-left: 8px; }   /* sky */
 .event.kind-oracle     { border-left: 3px solid #ec4899; padding-left: 8px; }   /* pink */
+
+/* ============================================================================
+   MISSION CONTROL — Tonight tab redesign
+   ============================================================================ */
+
+.gonogo-meta { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+
+.mc-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  margin-top: 16px;
+}
+@media (max-width: 1100px) {
+  .mc-grid { grid-template-columns: 1fr; }
+}
+
+.mc-lanes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 14px;
+}
+
+.agent-lane {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.agent-lane[data-agent="planner"]   { border-top: 3px solid #8b5cf6; }
+.agent-lane[data-agent="critic"]    { border-top: 3px solid var(--accent); }
+.agent-lane[data-agent="operator"]  { border-top: 3px solid var(--gold); }
+.agent-lane[data-agent="archivist"] { border-top: 3px solid #38bdf8; }
+.agent-lane[data-agent="oracle"]    { border-top: 3px solid #ec4899; }
+
+.agent-lane header {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.agent-name {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px; letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.agent-state {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  border: 1px solid var(--line); color: var(--text-dim);
+}
+.agent-state.stateworking  { color: var(--ok); border-color: var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+.agent-state.statewaiting  { color: var(--accent); border-color: var(--accent); }
+.agent-state.stateidle     { color: var(--text-dim); }
+.agent-state.statesafemode { color: var(--warn); border-color: var(--warn); }
+.agent-state.statestopped  { color: var(--crit); border-color: var(--crit); }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+.agent-task {
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text);
+  min-height: 38px;
+}
+.agent-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-dim);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.next-tick { font-family: "Cascadia Code", Consolas, monospace; }
+.last-decision { font-style: italic; }
+
+.agent-decisions { font-size: 12px; }
+.agent-decisions summary { color: var(--text-dim); cursor: pointer; padding: 4px 0; }
+.agent-decisions ul { list-style: none; padding: 0; margin: 4px 0 0 0; }
+.agent-decisions li { padding: 3px 0; border-bottom: 1px dotted var(--line); }
+.agent-decisions li:last-child { border-bottom: none; }
+.agent-decisions .ts {
+  font-family: "Cascadia Code", Consolas, monospace;
+  color: var(--text-dim);
+  margin-right: 6px;
+}
+.agent-decisions .rationale { color: var(--text-dim); }
+.agent-decisions li.empty { color: var(--text-dim); font-style: italic; }
+
+.agent-chat {
+  display: flex; gap: 6px; margin-top: 4px;
+}
+.agent-chat input {
+  flex: 1;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.agent-chat button { padding: 6px 12px; font-size: 13px; }
+
+.agent-chat-history {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 180px; overflow-y: auto;
+  font-size: 12px;
+}
+.chat-bubble {
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--panel-2);
+  border-left: 2px solid var(--line);
+}
+.chat-bubble.user { border-left-color: var(--gold); }
+.chat-bubble.agent { border-left-color: var(--accent); }
+.chat-bubble.pending { opacity: 0.6; font-style: italic; }
+.chat-who {
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-right: 6px;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.chat-text { color: var(--text); white-space: pre-wrap; }
+
+/* Message-flow side column */
+.mc-flow {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  height: fit-content;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 80px);
+  overflow-y: auto;
+}
+.mc-flow h3 { margin: 0 0 4px 0; font-size: 13px; color: var(--text-dim); letter-spacing: 0.05em; }
+.message-flow {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px;
+}
+.message-flow .flow-item {
+  padding: 4px 6px;
+  border-left: 2px solid var(--line);
+  background: var(--panel-2);
+  border-radius: 4px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  color: var(--text-dim);
+}
+.message-flow .ts { color: var(--text); margin-right: 6px; }
+.message-flow .who { color: var(--accent); }
+.message-flow .kind { color: var(--gold); margin-left: 4px; }
+.message-flow .empty { color: var(--text-dim); font-style: italic; padding: 4px; }

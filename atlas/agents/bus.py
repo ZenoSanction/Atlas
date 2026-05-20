@@ -65,6 +65,12 @@ class AgentBus:
         # Deliver
         await self._queues[msg.recipient].put(msg)
         log.debug("BUS %s -> %s [%s]", msg.sender, msg.recipient, msg.kind)
+        # Mirror to the Mission Control message-flow ring buffer
+        try:
+            from atlas.agents.state import get_state
+            get_state().push_message_flow(msg.to_jsonable())
+        except Exception:
+            pass
         # Fan-out to dashboard
         for q in list(self._broadcast_subs):
             try:

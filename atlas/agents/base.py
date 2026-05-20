@@ -51,6 +51,12 @@ class BaseAgent(ABC):
         self._anthropic_client = None
         self._stop_event = asyncio.Event()
         self._safe_mode = False
+        # Live mission-control state initialised idle. Subclasses call
+        # self.set_task(...) when they begin a phase of work.
+        from atlas.agents.state import get_state as _get_state
+        _get_state().update_agent_status(self.name.value,
+                                          current_task="agent online — starting up",
+                                          state="working")
 
     # --- lifecycle ----------------------------------------------------------
 
@@ -195,6 +201,38 @@ class BaseAgent(ABC):
     def register_tool(self, spec: ToolSpec) -> None:
         self._tools[spec.name] = spec
 
+    # --- live mission-control hooks ----------------------------------------
+
+    def set_task(self, task: str, *, state: str = "working",
+                 next_tick_at: str | None = None,
+                 next_tick_kind: str | None = None) -> None:
+        """Declare what this agent is doing right now. Updates shared state
+        and broadcasts a 'task' event for the dashboard to render."""
+        from atlas.agents.state import get_state
+        get_state().update_agent_status(
+            self.name.value,
+            current_task=task,
+            state=state,
+            next_tick_at=next_tick_at,
+            next_tick_kind=next_tick_kind,
+        )
+        # Fire-and-forget broadcast; this is sync-callable from anywhere.
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self.bus.broadcast_event({
+                    "type": "agent_task",
+                    "sender": self.name.value,
+                    "task": task,
+                    "state": state,
+                    "next_tick_at": next_tick_at,
+                    "next_tick_kind": next_tick_kind,
+                    "sent_at": __import__("datetime").datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                }))
+        except RuntimeError:
+            # No running loop (e.g. unit tests); just persist to state.
+            pass
+
     # --- bus helpers --------------------------------------------------------
 
     async def send(self, recipient: AgentName, kind: AgentMessageKind,
@@ -219,11 +257,22 @@ class BaseAgent(ABC):
                      inputs: dict | None = None, outputs: dict | None = None,
                      rationale: str | None = None,
                      session_id: int | None = None) -> int:
-        return DecisionManager.log(
+        decision_id = DecisionManager.log(
             agent=self.name, decision_type=decision_type,
             inputs=inputs, outputs=outputs, rationale=rationale,
             session_id=session_id,
         )
+        # Mirror to live state so Mission Control panels show recent decisions
+        # without having to query the DB each refresh.
+        from atlas.agents.state import get_state
+        from datetime import datetime as _dt
+        get_state().push_agent_decision(self.name.value, {
+            "id": decision_id,
+            "decision_type": decision_type,
+            "rationale": rationale,
+            "at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+        })
+        return decision_id
 
     # --- prompts ------------------------------------------------------------
 

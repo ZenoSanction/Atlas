@@ -131,10 +131,15 @@ class Critic(BaseAgent):
         self._initial_done = False
         # _thresholds is reloaded from DB on each tick so Setup edits take
         # effect at the next standard loop without restart.
+        from atlas.agents.critic_tools import CRITIC_TOOLS
+        for spec in CRITIC_TOOLS:
+            self.register_tool(spec)
 
     async def run(self) -> None:
         self.log.info("Critic agent online (fast %ds, standard %ds)",
                        FAST_LOOP_S, STANDARD_LOOP_S)
+        self.set_task("watchdog online — first weather pull next",
+                      state="working")
         while not self.should_stop:
             now = asyncio.get_event_loop().time()
             # Force an initial standard tick on startup so the dashboard
@@ -155,17 +160,47 @@ class Critic(BaseAgent):
                 except Exception:
                     self.log.exception("Standard loop failed")
                 self._last_standard = asyncio.get_event_loop().time()
+            # Publish next-tick estimates so Mission Control can show countdowns
+            self._publish_next_ticks(now)
             await asyncio.sleep(5)
+
+    def _publish_next_ticks(self, now_monotonic: float) -> None:
+        """Compute when the next fast + standard loops will fire (in wall
+        UTC) and publish to shared state so the dashboard can render a
+        live countdown."""
+        from datetime import datetime, timedelta
+        next_fast_s = max(0.0, FAST_LOOP_S - (now_monotonic - self._last_fast))
+        next_std_s = max(0.0, STANDARD_LOOP_S - (now_monotonic - self._last_standard))
+        # Whichever fires sooner is what we surface as the "next tick"
+        if next_fast_s < next_std_s:
+            next_at = datetime.utcnow() + timedelta(seconds=next_fast_s)
+            kind = "fast_loop"
+        else:
+            next_at = datetime.utcnow() + timedelta(seconds=next_std_s)
+            kind = "standard_loop"
+        from atlas.agents.state import get_state
+        get_state().update_agent_status(
+            "critic",
+            next_tick_at=next_at.isoformat(timespec="seconds") + "Z",
+            next_tick_kind=kind,
+        )
 
     async def _fast_loop(self) -> None:
         """Fast loop: guiding RMS, focus HFR, camera temperature.
         Only runs when a session is actively imaging."""
         sess = SessionManager.latest()
         if sess is None:
+            self.set_task("fast loop: no active session — skipping",
+                          state="idle")
             return
         state = sess.state.value if hasattr(sess.state, "value") else sess.state
         if state not in ("nominal", "warning"):
+            self.set_task(
+                f"fast loop: session state '{state}' — skipping checks",
+                state="idle")
             return
+        self.set_task("fast loop: PHD2 guiding + NINA cooling check",
+                      state="working")
 
         from atlas.config import get_settings
         if get_settings().simulation_mode:
@@ -242,8 +277,12 @@ class Critic(BaseAgent):
 
     async def _standard_loop(self) -> None:
         """Standard loop: weather pull + per-metric assessment + push to Operator."""
+        self.set_task("standard loop: pulling Open-Meteo current + forecast",
+                      state="working")
         site = ConfigManager.get_site()
         if site is None:
+            self.set_task("standard loop: no site config yet — skipping",
+                          state="idle")
             self.log.debug("standard loop: no site config yet, skipping")
             return
 
@@ -253,6 +292,8 @@ class Critic(BaseAgent):
             snap = await client.current()
             forecast_rows = await client.forecast_hours(hours=FORECAST_HOURS)
         except Exception as e:
+            self.set_task(f"standard loop: Open-Meteo failed ({e})",
+                          state="idle")
             self.log.warning("Open-Meteo fetch failed: %s", e)
             return
 
@@ -332,6 +373,9 @@ class Critic(BaseAgent):
                 self._clear(f"weather_{c.metric}")
 
         self.log.info("standard loop: overall=%s (%s)", overall, assessment.summary)
+        self.set_task(
+            f"standard loop done — overall {overall}; next sweep in ~5 min",
+            state="waiting")
 
     async def _raise(self, severity: AlertSeverity, code: str, message: str,
                      session_id: int | None = None, data: dict | None = None,

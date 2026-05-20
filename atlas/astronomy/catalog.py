@@ -1,0 +1,218 @@
+"""Seasonal showcase catalog for the Planner.
+
+When no campaigns are loaded, the Planner falls back to this catalog so the
+dashboard isn't empty. Every entry includes:
+
+  name             canonical name (M42, NGC 5128, ...)
+  alt_names        common names ("Orion Nebula", "Centaurus A", ...)
+  ra_deg, dec_deg  J2000 position
+  magnitude        apparent V mag (typical)
+  object_type      galaxy | nebula | cluster | planetary_nebula | etc.
+  best_months      list of 1..12 the object is at its best in evening sky
+  notes            short scientific/aesthetic flavour
+
+Coverage targets ~50 of the most useful objects for a mid-northern site
+(~29 N) — heavy on bright Messier and key southern showpieces that culminate
+at reasonable altitudes from there. Easy to add more later.
+
+Selection priorities:
+  1. Visible from ~29 N (declination > -55 roughly)
+  2. Magnitude bright enough for amateur SCT/refractor at 8-10" aperture
+  3. Distributed across all 12 RA hours so something is always visible
+"""
+from __future__ import annotations
+
+
+CATALOG: list[dict] = [
+    # ---- Winter (Dec / Jan / Feb / Mar evenings) ----
+    {"name": "M42", "alt_names": ["Orion Nebula"],
+     "ra_deg": 83.82, "dec_deg": -5.39, "magnitude": 4.0,
+     "object_type": "emission_nebula", "best_months": [11, 12, 1, 2, 3],
+     "notes": "Iconic star-forming region; great in any filter."},
+    {"name": "M45", "alt_names": ["Pleiades", "Seven Sisters"],
+     "ra_deg": 56.75, "dec_deg": 24.12, "magnitude": 1.6,
+     "object_type": "open_cluster", "best_months": [10, 11, 12, 1, 2],
+     "notes": "Bright open cluster with reflection nebulosity."},
+    {"name": "M31", "alt_names": ["Andromeda Galaxy"],
+     "ra_deg": 10.68, "dec_deg": 41.27, "magnitude": 3.4,
+     "object_type": "galaxy", "best_months": [9, 10, 11, 12, 1],
+     "notes": "Nearest spiral galaxy; companions M32 & M110 in field."},
+    {"name": "M81", "alt_names": ["Bode's Galaxy"],
+     "ra_deg": 148.89, "dec_deg": 69.07, "magnitude": 6.9,
+     "object_type": "galaxy", "best_months": [1, 2, 3, 4, 5],
+     "notes": "Grand-design spiral, pairs with M82 in the same field."},
+    {"name": "M82", "alt_names": ["Cigar Galaxy"],
+     "ra_deg": 148.97, "dec_deg": 69.68, "magnitude": 8.4,
+     "object_type": "galaxy", "best_months": [1, 2, 3, 4, 5],
+     "notes": "Starburst galaxy; spectacular Halpha outflow."},
+    {"name": "M1", "alt_names": ["Crab Nebula"],
+     "ra_deg": 83.63, "dec_deg": 22.01, "magnitude": 8.4,
+     "object_type": "supernova_remnant", "best_months": [11, 12, 1, 2, 3],
+     "notes": "Supernova remnant from 1054 AD; pulsar at the heart."},
+    {"name": "M37", "alt_names": [],
+     "ra_deg": 88.07, "dec_deg": 32.55, "magnitude": 6.2,
+     "object_type": "open_cluster", "best_months": [12, 1, 2],
+     "notes": "Richest of the Auriga clusters."},
+    {"name": "NGC 2264", "alt_names": ["Christmas Tree Cluster"],
+     "ra_deg": 100.24, "dec_deg": 9.89, "magnitude": 3.9,
+     "object_type": "open_cluster", "best_months": [12, 1, 2, 3],
+     "notes": "Open cluster + nebula complex; Cone Nebula at the base."},
+    {"name": "IC 434", "alt_names": ["Horsehead Nebula"],
+     "ra_deg": 85.25, "dec_deg": -2.45, "magnitude": 7.3,
+     "object_type": "dark_nebula", "best_months": [12, 1, 2],
+     "notes": "Iconic silhouette; needs Halpha for contrast."},
+    {"name": "M35", "alt_names": [],
+     "ra_deg": 92.27, "dec_deg": 24.33, "magnitude": 5.1,
+     "object_type": "open_cluster", "best_months": [12, 1, 2, 3],
+     "notes": "Large open cluster with NGC 2158 nearby."},
+
+    # ---- Spring (Mar / Apr / May / Jun evenings) ----
+    {"name": "M65", "alt_names": ["Leo Triplet member"],
+     "ra_deg": 169.73, "dec_deg": 13.09, "magnitude": 9.3,
+     "object_type": "galaxy", "best_months": [3, 4, 5],
+     "notes": "Spiral galaxy in the Leo Triplet."},
+    {"name": "M66", "alt_names": ["Leo Triplet member"],
+     "ra_deg": 170.06, "dec_deg": 12.99, "magnitude": 8.9,
+     "object_type": "galaxy", "best_months": [3, 4, 5],
+     "notes": "Asymmetric spiral; Leo Triplet pair with M65 and NGC 3628."},
+    {"name": "M51", "alt_names": ["Whirlpool Galaxy"],
+     "ra_deg": 202.47, "dec_deg": 47.20, "magnitude": 8.4,
+     "object_type": "galaxy", "best_months": [3, 4, 5, 6, 7],
+     "notes": "Interacting grand-design spiral + NGC 5195 companion."},
+    {"name": "M101", "alt_names": ["Pinwheel Galaxy"],
+     "ra_deg": 210.80, "dec_deg": 54.35, "magnitude": 7.9,
+     "object_type": "galaxy", "best_months": [4, 5, 6, 7],
+     "notes": "Large face-on spiral with prominent HII regions."},
+    {"name": "M104", "alt_names": ["Sombrero Galaxy"],
+     "ra_deg": 189.998, "dec_deg": -11.62, "magnitude": 8.0,
+     "object_type": "galaxy", "best_months": [3, 4, 5, 6],
+     "notes": "Edge-on with prominent dust lane."},
+    {"name": "NGC 5128", "alt_names": ["Centaurus A"],
+     "ra_deg": 201.36, "dec_deg": -43.02, "magnitude": 6.8,
+     "object_type": "galaxy", "best_months": [3, 4, 5, 6],
+     "notes": "Peculiar elliptical with dramatic dust lane; AGN host."},
+    {"name": "Omega Centauri", "alt_names": ["NGC 5139"],
+     "ra_deg": 201.70, "dec_deg": -47.48, "magnitude": 3.7,
+     "object_type": "globular_cluster", "best_months": [3, 4, 5, 6],
+     "notes": "Largest, brightest globular in the sky; nearly culminates from 29N."},
+    {"name": "M3", "alt_names": [],
+     "ra_deg": 205.55, "dec_deg": 28.38, "magnitude": 6.2,
+     "object_type": "globular_cluster", "best_months": [4, 5, 6, 7],
+     "notes": "Bright globular in Canes Venatici."},
+    {"name": "M13", "alt_names": ["Hercules Cluster"],
+     "ra_deg": 250.42, "dec_deg": 36.46, "magnitude": 5.8,
+     "object_type": "globular_cluster", "best_months": [5, 6, 7, 8, 9],
+     "notes": "Showpiece northern globular."},
+
+    # ---- Summer (Jun / Jul / Aug / Sep evenings) ----
+    {"name": "M8", "alt_names": ["Lagoon Nebula"],
+     "ra_deg": 270.92, "dec_deg": -24.38, "magnitude": 6.0,
+     "object_type": "emission_nebula", "best_months": [6, 7, 8, 9],
+     "notes": "Large bright HII region in Sagittarius."},
+    {"name": "M17", "alt_names": ["Omega Nebula", "Swan Nebula"],
+     "ra_deg": 275.20, "dec_deg": -16.18, "magnitude": 6.0,
+     "object_type": "emission_nebula", "best_months": [6, 7, 8, 9],
+     "notes": "Bright nebula in Sagittarius; striking in Halpha."},
+    {"name": "M20", "alt_names": ["Trifid Nebula"],
+     "ra_deg": 270.65, "dec_deg": -23.03, "magnitude": 6.3,
+     "object_type": "emission_nebula", "best_months": [6, 7, 8, 9],
+     "notes": "Emission + reflection + dark nebula combo."},
+    {"name": "M16", "alt_names": ["Eagle Nebula", "Pillars of Creation"],
+     "ra_deg": 274.70, "dec_deg": -13.78, "magnitude": 6.0,
+     "object_type": "emission_nebula", "best_months": [6, 7, 8, 9],
+     "notes": "Open cluster + nebula; famous Pillars."},
+    {"name": "M22", "alt_names": [],
+     "ra_deg": 279.10, "dec_deg": -23.90, "magnitude": 5.1,
+     "object_type": "globular_cluster", "best_months": [6, 7, 8, 9],
+     "notes": "Bright low-southern globular."},
+    {"name": "M27", "alt_names": ["Dumbbell Nebula"],
+     "ra_deg": 299.90, "dec_deg": 22.72, "magnitude": 7.5,
+     "object_type": "planetary_nebula", "best_months": [7, 8, 9, 10],
+     "notes": "Bright planetary nebula in Vulpecula."},
+    {"name": "M57", "alt_names": ["Ring Nebula"],
+     "ra_deg": 283.40, "dec_deg": 33.03, "magnitude": 8.8,
+     "object_type": "planetary_nebula", "best_months": [6, 7, 8, 9, 10],
+     "notes": "Classic small bright planetary in Lyra."},
+    {"name": "NGC 7000", "alt_names": ["North America Nebula"],
+     "ra_deg": 314.75, "dec_deg": 44.33, "magnitude": 4.0,
+     "object_type": "emission_nebula", "best_months": [7, 8, 9, 10, 11],
+     "notes": "Large emission nebula; wide-field showpiece."},
+    {"name": "IC 5070", "alt_names": ["Pelican Nebula"],
+     "ra_deg": 312.67, "dec_deg": 44.36, "magnitude": 8.0,
+     "object_type": "emission_nebula", "best_months": [7, 8, 9, 10, 11],
+     "notes": "Pairs with NGC 7000 in wide field."},
+    {"name": "M11", "alt_names": ["Wild Duck Cluster"],
+     "ra_deg": 282.77, "dec_deg": -6.27, "magnitude": 5.8,
+     "object_type": "open_cluster", "best_months": [6, 7, 8, 9],
+     "notes": "Dense, distant open cluster."},
+    {"name": "Veil Nebula", "alt_names": ["NGC 6960", "Cygnus Loop"],
+     "ra_deg": 313.34, "dec_deg": 30.72, "magnitude": 7.0,
+     "object_type": "supernova_remnant", "best_months": [7, 8, 9, 10, 11],
+     "notes": "Massive SNR filaments; needs OIII for contrast."},
+
+    # ---- Fall (Sep / Oct / Nov / Dec evenings) ----
+    {"name": "M33", "alt_names": ["Triangulum Galaxy"],
+     "ra_deg": 23.46, "dec_deg": 30.66, "magnitude": 5.7,
+     "object_type": "galaxy", "best_months": [10, 11, 12, 1],
+     "notes": "Large face-on spiral in Local Group."},
+    {"name": "M2", "alt_names": [],
+     "ra_deg": 323.36, "dec_deg": -0.82, "magnitude": 6.5,
+     "object_type": "globular_cluster", "best_months": [8, 9, 10, 11],
+     "notes": "Bright globular in Aquarius."},
+    {"name": "M15", "alt_names": [],
+     "ra_deg": 322.50, "dec_deg": 12.17, "magnitude": 6.2,
+     "object_type": "globular_cluster", "best_months": [8, 9, 10, 11],
+     "notes": "Dense, compact globular in Pegasus."},
+    {"name": "NGC 253", "alt_names": ["Sculptor Galaxy"],
+     "ra_deg": 11.89, "dec_deg": -25.29, "magnitude": 7.1,
+     "object_type": "galaxy", "best_months": [10, 11, 12, 1],
+     "notes": "Bright edge-on spiral in Sculptor Group."},
+    {"name": "NGC 891", "alt_names": [],
+     "ra_deg": 35.64, "dec_deg": 42.35, "magnitude": 10.0,
+     "object_type": "galaxy", "best_months": [10, 11, 12, 1, 2],
+     "notes": "Beautiful edge-on with prominent dust lane."},
+    {"name": "Helix Nebula", "alt_names": ["NGC 7293"],
+     "ra_deg": 337.41, "dec_deg": -20.84, "magnitude": 7.6,
+     "object_type": "planetary_nebula", "best_months": [9, 10, 11],
+     "notes": "Nearest planetary; large and faint."},
+    {"name": "NGC 869", "alt_names": ["Double Cluster", "h Persei"],
+     "ra_deg": 34.74, "dec_deg": 57.13, "magnitude": 3.7,
+     "object_type": "open_cluster", "best_months": [10, 11, 12, 1, 2],
+     "notes": "Brilliant pair of open clusters."},
+    {"name": "M52", "alt_names": [],
+     "ra_deg": 351.20, "dec_deg": 61.59, "magnitude": 5.0,
+     "object_type": "open_cluster", "best_months": [9, 10, 11, 12, 1],
+     "notes": "Rich Cassiopeia open cluster."},
+
+    # ---- Bright photometry standards (good all year-ish for testing) ----
+    {"name": "Polaris", "alt_names": ["alpha UMi"],
+     "ra_deg": 37.95, "dec_deg": 89.26, "magnitude": 2.0,
+     "object_type": "star", "best_months": list(range(1, 13)),
+     "notes": "North Star; ~always above horizon for northern sites."},
+    {"name": "Vega", "alt_names": ["alpha Lyr"],
+     "ra_deg": 279.23, "dec_deg": 38.78, "magnitude": 0.03,
+     "object_type": "star", "best_months": [5, 6, 7, 8, 9, 10],
+     "notes": "Photometric A0V standard."},
+    {"name": "Arcturus", "alt_names": ["alpha Boo"],
+     "ra_deg": 213.92, "dec_deg": 19.18, "magnitude": -0.05,
+     "object_type": "star", "best_months": [4, 5, 6, 7, 8],
+     "notes": "Brightest northern-hemisphere star."},
+    {"name": "Betelgeuse", "alt_names": ["alpha Ori"],
+     "ra_deg": 88.79, "dec_deg": 7.41, "magnitude": 0.5,
+     "object_type": "variable_star", "best_months": [11, 12, 1, 2, 3],
+     "notes": "Famous variable red supergiant — AAVSO target."},
+]
+
+
+def best_now(month: int, *, limit: int | None = None) -> list[dict]:
+    """Return catalog entries whose best_months include the given month.
+    Sorted brightest-first."""
+    matches = [e for e in CATALOG if month in e.get("best_months", [])]
+    matches.sort(key=lambda e: e.get("magnitude", 99))
+    if limit is not None:
+        return matches[:limit]
+    return matches
+
+
+def all_entries() -> list[dict]:
+    return list(CATALOG)

@@ -29,39 +29,107 @@
 </header>
 
 <main>
-  <!-- TONIGHT -->
+  <!-- TONIGHT — MISSION CONTROL -->
   <section class="panel" id="tab-tonight">
     <div id="gonogo" class="gonogo neutral">
-      <div class="gonogo-label">STATUS</div>
+      <div class="gonogo-label">VERDICT</div>
       <div class="gonogo-text" id="gonogo-text">Loading…</div>
+      <div class="gonogo-meta" id="gonogo-meta"></div>
     </div>
 
-    <div class="grid">
-      <div class="card">
-        <h3>Session</h3>
-        <div id="session-info" class="kv">Loading…</div>
-      </div>
-      <div class="card">
-        <h3>Hardware</h3>
-        <div id="hardware-info" class="kv">Loading…</div>
-      </div>
-      <div class="card">
-        <h3>Agents</h3>
-        <div id="agents-info" class="kv">Loading…</div>
-      </div>
-      <div class="card">
-        <h3>Disk</h3>
-        <div id="disk-info" class="kv">Loading…</div>
-      </div>
-      <div class="card">
-        <h3>Active Alerts</h3>
-        <div id="alerts-info">No alerts.</div>
-      </div>
-    </div>
+    <div class="mc-grid">
+      <div class="mc-lanes">
+        <div class="agent-lane" data-agent="planner">
+          <header><span class="agent-name">PLANNER</span><span class="agent-state" data-field="state">…</span></header>
+          <div class="agent-task" data-field="current_task">Loading…</div>
+          <div class="agent-meta">
+            <span data-field="next_tick" class="next-tick">—</span>
+            <span data-field="last_decision" class="last-decision"></span>
+          </div>
+          <details class="agent-decisions"><summary>recent decisions</summary>
+            <ul data-field="recent_decisions"></ul>
+          </details>
+          <form class="agent-chat" data-agent="planner">
+            <input type="text" placeholder="Ask the Planner…" autocomplete="off">
+            <button class="btn-primary" type="submit">Send</button>
+          </form>
+          <div class="agent-chat-history" data-agent="planner"></div>
+        </div>
 
-    <div class="card events-card">
-      <h3>Agent Activity</h3>
-      <div id="events" class="events"></div>
+        <div class="agent-lane" data-agent="critic">
+          <header><span class="agent-name">CRITIC</span><span class="agent-state" data-field="state">…</span></header>
+          <div class="agent-task" data-field="current_task">Loading…</div>
+          <div class="agent-meta">
+            <span data-field="next_tick" class="next-tick">—</span>
+            <span data-field="last_decision" class="last-decision"></span>
+          </div>
+          <details class="agent-decisions"><summary>recent decisions</summary>
+            <ul data-field="recent_decisions"></ul>
+          </details>
+          <form class="agent-chat" data-agent="critic">
+            <input type="text" placeholder="Ask the Critic…" autocomplete="off">
+            <button class="btn-primary" type="submit">Send</button>
+          </form>
+          <div class="agent-chat-history" data-agent="critic"></div>
+        </div>
+
+        <div class="agent-lane" data-agent="operator">
+          <header><span class="agent-name">OPERATOR</span><span class="agent-state" data-field="state">…</span></header>
+          <div class="agent-task" data-field="current_task">Loading…</div>
+          <div class="agent-meta">
+            <span data-field="next_tick" class="next-tick">—</span>
+            <span data-field="last_decision" class="last-decision"></span>
+          </div>
+          <details class="agent-decisions"><summary>recent decisions</summary>
+            <ul data-field="recent_decisions"></ul>
+          </details>
+          <form class="agent-chat" data-agent="operator">
+            <input type="text" placeholder="Ask the Operator…" autocomplete="off">
+            <button class="btn-primary" type="submit">Send</button>
+          </form>
+          <div class="agent-chat-history" data-agent="operator"></div>
+        </div>
+
+        <div class="agent-lane" data-agent="archivist">
+          <header><span class="agent-name">ARCHIVIST</span><span class="agent-state" data-field="state">…</span></header>
+          <div class="agent-task" data-field="current_task">Loading…</div>
+          <div class="agent-meta">
+            <span data-field="next_tick" class="next-tick">—</span>
+            <span data-field="last_decision" class="last-decision"></span>
+          </div>
+          <details class="agent-decisions"><summary>recent decisions</summary>
+            <ul data-field="recent_decisions"></ul>
+          </details>
+          <form class="agent-chat" data-agent="archivist">
+            <input type="text" placeholder="Ask the Archivist…" autocomplete="off">
+            <button class="btn-primary" type="submit">Send</button>
+          </form>
+          <div class="agent-chat-history" data-agent="archivist"></div>
+        </div>
+
+        <div class="agent-lane" data-agent="oracle">
+          <header><span class="agent-name">ORACLE</span><span class="agent-state" data-field="state">…</span></header>
+          <div class="agent-task" data-field="current_task">Loading…</div>
+          <div class="agent-meta">
+            <span data-field="next_tick" class="next-tick">—</span>
+            <span data-field="last_decision" class="last-decision"></span>
+          </div>
+          <details class="agent-decisions"><summary>recent decisions</summary>
+            <ul data-field="recent_decisions"></ul>
+          </details>
+          <form class="agent-chat" data-agent="oracle">
+            <input type="text" placeholder="Ask the Oracle…" autocomplete="off">
+            <button class="btn-primary" type="submit">Send</button>
+          </form>
+          <div class="agent-chat-history" data-agent="oracle"></div>
+        </div>
+      </div>
+
+      <aside class="mc-flow">
+        <h3>Message flow</h3>
+        <p class="hint">Live inter-agent messages on the bus + broadcast events. Newest on top.</p>
+        <div id="message-flow" class="message-flow"></div>
+      </aside>
     </div>
   </section>
 

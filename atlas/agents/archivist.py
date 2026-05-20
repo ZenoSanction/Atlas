@@ -43,9 +43,13 @@ class Archivist(BaseAgent):
     def __init__(self) -> None:
         super().__init__()
         self._last_heartbeat = 0.0
+        from atlas.agents.archivist_tools import ARCHIVIST_TOOLS
+        for spec in ARCHIVIST_TOOLS:
+            self.register_tool(spec)
 
     async def run(self) -> None:
         self.log.info("Archivist agent online — awaits POST_SESSION triggers")
+        self.set_task("standing by for session end", state="idle")
         while not self.should_stop:
             msg = await self.recv_with_timeout(timeout_s=30.0)
             if msg is None:
@@ -56,7 +60,10 @@ class Archivist(BaseAgent):
                     self._last_heartbeat = now
                 continue
             if msg.kind == AgentMessageKind.POST_SESSION:
+                self.set_task(f"processing session {msg.session_id}",
+                              state="working")
                 await self._process_session(msg)
+                self.set_task("session archived — standing by", state="idle")
             else:
                 self.log.debug("Archivist ignoring kind: %s", msg.kind)
 

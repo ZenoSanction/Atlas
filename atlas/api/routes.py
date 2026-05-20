@@ -466,8 +466,12 @@ async def weather_current() -> dict:
 
 
 @api_router.get("/weather/forecast")
-async def weather_forecast(hours: int = 12) -> dict:
-    """Hourly forecast from Open-Meteo. Default 12 hours = 'tonight'."""
+async def weather_forecast(hours: int = 24, nighttime_only: bool = True) -> dict:
+    """Hourly forecast from Open-Meteo.
+
+    Default 24 hours with nighttime_only=True so the dashboard sees only
+    the imaging-usable window (sun below -12°). Set nighttime_only=false
+    to get every hour back."""
     hours = max(1, min(48, int(hours)))
     site = ConfigManager.get_site()
     if site is None:
@@ -479,6 +483,30 @@ async def weather_forecast(hours: int = 12) -> dict:
         rows = await client.forecast_hours(hours=hours)
     except Exception as e:
         raise HTTPException(502, f"Open-Meteo request failed: {e}")
+
+    # Optional nighttime filter — keep only hours where the sun is below
+    # -12° at that time (nautical twilight + darker).
+    night_meta = None
+    if nighttime_only:
+        from atlas.astronomy import sun_altitude, night_window
+        nw = night_window(float(site.latitude), float(site.longitude),
+                            datetime.utcnow(), altitude_deg=-12.0)
+        if nw is not None:
+            dusk, dawn = nw
+            night_meta = {
+                "dusk_utc": dusk.isoformat(timespec="seconds") + "Z",
+                "dawn_utc": dawn.isoformat(timespec="seconds") + "Z",
+                "hours": round((dawn - dusk).total_seconds() / 3600, 2),
+            }
+        kept: list[dict] = []
+        for r in rows:
+            try:
+                t = datetime.fromisoformat(r["time"])
+            except Exception:
+                continue
+            if sun_altitude(float(site.latitude), float(site.longitude), t) < -12.0:
+                kept.append(r)
+        rows = kept
     out_rows = []
     for r in rows:
         dm = r["temperature_c"] - r["dew_point_c"]
@@ -496,6 +524,8 @@ async def weather_forecast(hours: int = 12) -> dict:
         })
     return {
         "hours": hours,
+        "nighttime_only": nighttime_only,
+        "night": night_meta,
         "site_lat": float(site.latitude),
         "site_lon": float(site.longitude),
         "observatory_name": site.observatory_name,
@@ -589,3 +619,78 @@ async def agents_activity() -> dict:
         "archivist": st.get_archivist_last(),
         "oracle": st.get_oracle_last(),
     }
+
+
+# ============================================================================
+# Mission Control — per-agent live state + chat
+# ============================================================================
+
+_AGENT_NAMES = {
+    "planner": AgentName.PLANNER,
+    "critic": AgentName.CRITIC,
+    "operator": AgentName.OPERATOR,
+    "archivist": AgentName.ARCHIVIST,
+    "oracle": AgentName.ORACLE,
+}
+
+
+@api_router.get("/mission-control")
+async def mission_control() -> dict:
+    """Snapshot for the Mission Control dashboard view: per-agent live
+    status, the latest verdict, and the recent message-flow buffer."""
+    from atlas.agents.state import get_state
+    st = get_state()
+    coord_status = get_coordinator().status()
+    settings = get_settings()
+    site = ConfigManager.get_site()
+    agents = {}
+    for name, status in st.get_all_agent_status().items():
+        d = status.to_jsonable()
+        c = coord_status.get(name, {})
+        d["running"] = c.get("running", False)
+        d["safe_mode"] = c.get("safe_mode", False)
+        agents[name] = d
+    verdict = st.get_verdict()
+    return {
+        "now_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "simulation_mode": settings.simulation_mode,
+        "observatory_name": (site.observatory_name if site else None),
+        "verdict": verdict.to_jsonable() if verdict else None,
+        "agents": agents,
+        "message_flow": st.get_message_flow(limit=40),
+    }
+
+
+@api_router.get("/agents/{agent_name}/state")
+async def agent_state(agent_name: str) -> dict:
+    """Live state for one agent — what it's doing, recent decisions, etc."""
+    if agent_name not in _AGENT_NAMES:
+        raise HTTPException(404, f"Unknown agent: {agent_name}")
+    from atlas.agents.state import get_state
+    st = get_state()
+    status = st.get_agent_status(agent_name)
+    coord_status = get_coordinator().status().get(agent_name, {})
+    if status is None:
+        return {"agent": agent_name, "running": coord_status.get("running"),
+                "safe_mode": coord_status.get("safe_mode")}
+    out = status.to_jsonable()
+    out["running"] = coord_status.get("running", False)
+    out["safe_mode"] = coord_status.get("safe_mode", False)
+    return out
+
+
+@api_router.post("/agents/{agent_name}/chat", response_model=ChatResponse)
+async def agent_chat(agent_name: str, req: ChatRequest) -> ChatResponse:
+    """Talk to a specific agent directly. Each agent has its own system
+    prompt and tools, so the conversation is genuinely with that
+    specialised role — not a router."""
+    if agent_name not in _AGENT_NAMES:
+        raise HTTPException(404, f"Unknown agent: {agent_name}")
+    if not get_vault().is_unlocked:
+        return ChatResponse(
+            reply="The credential vault is locked. Open Setup to unlock it.",
+            safe_mode=True,
+        )
+    agent = get_coordinator().get(_AGENT_NAMES[agent_name])
+    reply = await agent.think(req.message)
+    return ChatResponse(reply=reply, safe_mode=agent.safe_mode)

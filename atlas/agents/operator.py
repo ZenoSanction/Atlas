@@ -40,6 +40,8 @@ class Operator(BaseAgent):
 
     async def run(self) -> None:
         self.log.info("Operator agent online — final authority")
+        self.set_task("standing by — final-authority watch on agent bus",
+                      state="idle")
         while not self.should_stop:
             msg = await self.recv_with_timeout(timeout_s=5.0)
             if msg is None:
@@ -47,9 +49,14 @@ class Operator(BaseAgent):
                 await self._periodic_check()
                 continue
             try:
+                kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
+                sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
+                self.set_task(f"processing {kind} from {sender}", state="working")
                 await self._handle(msg)
+                self.set_task("standing by — last action handled", state="idle")
             except Exception:
                 self.log.exception("Operator failed handling message: %s", msg.kind)
+                self.set_task("error handling last message — see log", state="idle")
 
     async def _handle(self, msg) -> None:
         if msg.kind == AgentMessageKind.ALERT:
