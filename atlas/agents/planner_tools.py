@@ -84,6 +84,27 @@ async def _seasonal_showcase(p: dict) -> dict:
     return {"month": month, "count": len(entries), "entries": entries}
 
 
+async def _cancel_session(p: dict) -> dict:
+    """Look up the Planner agent at call time so this tool can live in the
+    module-level PLANNER_TOOLS list (matching the other tools' pattern)
+    without needing the instance at import time."""
+    reason = (p.get("reason") or "").strip()
+    if not reason:
+        return {"error": "reason is required for the audit trail."}
+    try:
+        from atlas.agents.coordinator import get_coordinator
+        from atlas.db.models import AgentName
+        planner = get_coordinator().get(AgentName.PLANNER)
+    except Exception as e:
+        return {"error": f"Planner agent not available: {e}"}
+    try:
+        await planner._cancel_session(reason=reason)
+    except Exception as e:
+        return {"error": f"Cancellation failed: {e}"}
+    return {"ok": True, "cancelled": True, "reason": reason,
+            "message": "Session cancelled. The current review is now terminal-cancelled."}
+
+
 PLANNER_TOOLS: list[ToolSpec] = [
     ToolSpec("get_tonight_plan",
              "Get the Planner's current tonight plan: visible targets, "
@@ -122,4 +143,19 @@ PLANNER_TOOLS: list[ToolSpec] = [
                   "limit": {"type": "integer", "minimum": 1, "maximum": 50},
               }},
              _seasonal_showcase),
+    ToolSpec("cancel_session",
+             "End the current session-planning workflow. Use when no viable "
+             "plan is possible: operator said 'don't bother tonight', a "
+             "re-plan with constraints would leave zero targets, or "
+             "conditions are obviously hopeless before the Critic has run. "
+             "Cancellation marks the live SessionReview terminal-cancelled "
+             "and broadcasts; the dashboard shows it as the red end-state. "
+             "Reason is mandatory for the audit trail.",
+             {"type": "object",
+              "properties": {
+                  "reason": {"type": "string",
+                              "description": "One-line audit reason."},
+              },
+              "required": ["reason"]},
+             _cancel_session),
 ]

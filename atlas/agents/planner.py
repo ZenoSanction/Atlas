@@ -189,7 +189,11 @@ class Planner(BaseAgent):
                                           "constraints": constraints},
                                 outputs={"phase": "replan"},
                                 rationale=reason)
-            # Store constraints so _rebuild_plan can use them
+            # Store constraints so _rebuild_plan can use them. If the rebuild
+            # ends up producing zero targets (e.g., avoid_moon dropped them
+            # all), _rebuild_plan will cancel via _cancel_session itself.
+            # That terminal cancellation will overwrite this 'replan' phase
+            # in the live review.
             self._active_constraints = list(constraints)
             try:
                 await self._rebuild_plan(reason=f"replan:{','.join(constraints) or 'operator'}")
@@ -199,13 +203,73 @@ class Planner(BaseAgent):
             self.log.warning("Unknown decision %r on session %s",
                               decision, review.review_id)
 
+    async def _cancel_session(self, *, reason: str,
+                                from_review: dict | None = None) -> None:
+        """Terminate the current workflow with a cancellation. Used when:
+          - no site config (can't plan anything)
+          - zero visible targets (catalog fallback also empty)
+          - an Operator-requested replan still yields zero targets
+          - explicit operator cancel via the cancel_session tool
+
+        Marks the current SessionReview terminal-cancelled, broadcasts,
+        and logs a decision. Does NOT relay to Critic — this is a
+        Planner-side early-exit per the operator's workflow:
+        "the planner either ends planning for the session, or if
+        possible he re-plans"."""
+        from atlas.agents.session_workflow import (
+            SessionReview, new_review_id, PHASE_PLAN_BUILT, PHASE_CANCELLED,
+        )
+        from datetime import datetime as _dt
+
+        if from_review is not None:
+            review = SessionReview.from_jsonable(from_review)
+        else:
+            # Fresh review for the cancellation so the dashboard shows the
+            # terminal phase + audit trail rather than nothing.
+            review = SessionReview(
+                review_id=new_review_id(),
+                plan={"visible_targets": [], "active_campaigns": 0,
+                       "fallback_to_catalog": False,
+                       "built_at": _dt.utcnow().isoformat(timespec="seconds") + "Z"},
+                started_at=_dt.utcnow().isoformat(timespec="seconds") + "Z",
+                phase=PHASE_PLAN_BUILT,
+            )
+            review.advance(PHASE_PLAN_BUILT, "planner",
+                            note="cancellation initiated by Planner")
+        review.operator_decision = "cancel"
+        review.operator_reason = reason
+        review.advance(PHASE_CANCELLED, "planner",
+                        note=f"session cancelled by Planner: {reason[:60]}")
+        get_state().set_session_review(review.to_jsonable())
+        self.log_decision("session_cancelled_by_planner",
+                            inputs={"review_id": review.review_id,
+                                      "reason": reason},
+                            outputs={"phase": "cancelled"},
+                            rationale=reason)
+        try:
+            await self.bus.broadcast_event({
+                "type": "session_cancelled",
+                "sender": "planner",
+                "kind": "cancelled",
+                "review_id": review.review_id,
+                "reason": reason,
+                "sent_at": review.final_at,
+            })
+        except Exception:
+            pass
+        self.set_task(f"session {review.review_id} CANCELLED: {reason[:60]}",
+                      state="idle")
+        self.log.info("Session cancelled by Planner: %s", reason)
+
     async def _rebuild_plan(self, *, reason: str) -> None:
         self.set_task(f"rebuilding plan ({reason})", state="working")
         site = ConfigManager.get_site()
         if site is None:
-            self.set_task("rebuild_plan: no site config — skipping",
-                          state="idle")
-            self.log.debug("rebuild_plan: no site config; skipping")
+            # Site config missing — can't plan anything. End the session
+            # rather than silently doing nothing.
+            self.log.warning("rebuild_plan: no site config; cancelling session")
+            await self._cancel_session(
+                reason="No observatory site configured. Open Setup → Site to fix.")
             return
 
         lat = float(site.latitude)
@@ -369,6 +433,23 @@ class Planner(BaseAgent):
                        f"{len(campaigns)} active campaign(s)")
         self.set_task(summary + "; next sweep in ~30 min", state="waiting")
         self.log.info(summary)
+
+        # If the plan ended up empty — no active campaigns produced
+        # visible targets, the seasonal catalog also returned nothing —
+        # there's no point in relaying to the Critic. End the session
+        # here per the operator's workflow ("the planner either ends
+        # planning for the session, or if possible he re-plans").
+        if not full:
+            constraint_note = ""
+            if applied_constraints:
+                constraint_note = (f" after applying {', '.join(applied_constraints)}"
+                                     if applied_constraints else "")
+            empty_reason = (f"No visible targets for tonight{constraint_note}. "
+                              f"Active campaigns: {len(campaigns)}, "
+                              f"skipped below horizon: {skipped_below_horizon}, "
+                              f"skipped no coords: {skipped_no_coords}.")
+            await self._cancel_session(reason=empty_reason)
+            return
 
         # Kick off the session-planning workflow:
         # Planner → Critic with phase=plan_built and the full plan blob.
