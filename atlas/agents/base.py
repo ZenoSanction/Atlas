@@ -51,6 +51,12 @@ class BaseAgent(ABC):
         self._anthropic_client = None
         self._stop_event = asyncio.Event()
         self._safe_mode = False
+        # Every agent gets the same memory tools (remember/recall/forget/pin)
+        # so the operator can teach any of them facts that persist across
+        # restarts. Registered here so subclasses don't need to repeat it.
+        from atlas.agents.memory_tools import make_memory_tools
+        for spec in make_memory_tools(self):
+            self.register_tool(spec)
         # Live mission-control state initialised idle. Subclasses call
         # self.set_task(...) when they begin a phase of work.
         from atlas.agents.state import get_state as _get_state
@@ -120,8 +126,19 @@ class BaseAgent(ABC):
 
     async def think(self, user_message: str, *,
                     extra_context: dict | None = None,
-                    max_tool_iters: int = 8) -> str:
+                    max_tool_iters: int = 8,
+                    persist_history: bool = True) -> str:
         """Send a message to Claude. Returns the final text response.
+
+        Persistent memory:
+          - Pinned ``AgentMemory`` rows for this agent (plus shared) are
+            appended to the system prompt as a "Persistent facts" block.
+          - The most recent N chat turns from ``AgentChatTurn`` are
+            prepended to the messages list, so multi-message conversations
+            survive server restarts and warm-room device switches.
+          - The new user message + final assistant reply are persisted
+            after the call, unless ``persist_history=False`` (used by
+            internal callers that don't want to pollute the log).
 
         Handles the tool-use loop: if Claude asks to call a tool, dispatch
         to the handler, send back the result, and loop until Claude returns
@@ -134,7 +151,33 @@ class BaseAgent(ABC):
             self.set_safe_mode(True)
             return "[safe-autonomous: Claude API unavailable]"
 
-        messages = [{"role": "user", "content": user_message}]
+        from atlas.db.managers import ChatHistoryManager, MemoryManager
+        agent_name = self.name.value
+
+        # --- Load pinned memories into the system prompt ----------------
+        pinned = MemoryManager.list_for(agent_name, pinned_only=True, limit=50)
+        if pinned:
+            facts_lines = []
+            for m in pinned:
+                tag = " [shared]" if m.agent == "shared" else ""
+                facts_lines.append(f"- (#{m.id}){tag} {m.content}")
+            system_prompt = (
+                self._system_prompt
+                + "\n\n## Persistent facts you remember\n"
+                + "These are pinned to your memory and shown to you on every chat.\n"
+                + "If one becomes wrong, call `forget(id)` or unpin it with `pin_memory(id, pinned=false)`.\n\n"
+                + "\n".join(facts_lines)
+            )
+        else:
+            system_prompt = self._system_prompt
+
+        # --- Load recent chat history -----------------------------------
+        recent_turns = ChatHistoryManager.recent(agent_name, limit=10)
+        messages: list[dict] = []
+        for turn in recent_turns:
+            messages.append({"role": turn.role, "content": turn.content})
+        messages.append({"role": "user", "content": user_message})
+
         tool_defs = [
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in self._tools.values()
@@ -147,7 +190,7 @@ class BaseAgent(ABC):
             create_kwargs: dict[str, Any] = {
                 "model": self._settings.claude_model,
                 "max_tokens": self._settings.claude_max_tokens,
-                "system": self._system_prompt,
+                "system": system_prompt,
                 "messages": messages,
             }
             if tool_defs:
@@ -181,7 +224,14 @@ class BaseAgent(ABC):
             # final text
             text_parts = [b.text for b in resp.content
                           if getattr(b, "type", None) == "text"]
-            return "\n".join(text_parts).strip()
+            reply = "\n".join(text_parts).strip()
+            if persist_history:
+                try:
+                    ChatHistoryManager.append(agent_name, "user", user_message)
+                    ChatHistoryManager.append(agent_name, "assistant", reply)
+                except Exception as e:
+                    self.log.warning("Failed to persist chat turn: %s", e)
+            return reply
 
         return "[max tool iterations reached]"
 

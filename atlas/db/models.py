@@ -240,6 +240,44 @@ class WeatherThresholds(Base):
                                                   onupdate=datetime.utcnow)
 
 
+class AgentMemory(Base):
+    """Persistent memory facts the agents remember across restarts.
+
+    Each row belongs to one agent (or the special bucket 'shared', which
+    every agent can read). 'pinned' rows are auto-injected into the
+    agent's system prompt on every chat call so the model never has to
+    look them up. Non-pinned rows are stored and become accessible via
+    the agent's recall() tool — they don't bloat every system prompt,
+    but they're never lost."""
+    __tablename__ = "agent_memories"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # "planner" | "critic" | "operator" | "archivist" | "oracle" | "shared"
+    agent: Mapped[str] = mapped_column(String(16), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    tags: Mapped[Optional[list]] = mapped_column(JSON)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), default="chat")  # chat|api|bootstrap
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                   index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                   onupdate=datetime.utcnow)
+
+
+class AgentChatTurn(Base):
+    """One side of a chat conversation with an agent. Loaded oldest-first
+    into the model's message history so chats remain continuous across
+    messages and across server restarts."""
+    __tablename__ = "agent_chat_turns"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    agent: Mapped[str] = mapped_column(String(16), index=True)
+    role: Mapped[str] = mapped_column(String(16))   # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                   index=True)
+
+
 # ============================================================================
 # Astronomy
 # ============================================================================

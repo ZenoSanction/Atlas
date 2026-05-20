@@ -659,6 +659,7 @@ async def mission_control() -> dict:
     """Snapshot for the Mission Control dashboard view: per-agent live
     status, the latest verdict, and the recent message-flow buffer."""
     from atlas.agents.state import get_state
+    from atlas.db.managers import MemoryManager
     st = get_state()
     coord_status = get_coordinator().status()
     settings = get_settings()
@@ -669,6 +670,7 @@ async def mission_control() -> dict:
         c = coord_status.get(name, {})
         d["running"] = c.get("running", False)
         d["safe_mode"] = c.get("safe_mode", False)
+        d["memory_count"] = MemoryManager.count_for(name, include_shared=True)
         agents[name] = d
     verdict = st.get_verdict()
     return {
@@ -714,3 +716,102 @@ async def agent_chat(agent_name: str, req: ChatRequest) -> ChatResponse:
     agent = get_coordinator().get(_AGENT_NAMES[agent_name])
     reply = await agent.think(req.message)
     return ChatResponse(reply=reply, safe_mode=agent.safe_mode)
+
+
+# ============================================================================
+# Per-agent memory + chat history (persistent across restarts)
+# ============================================================================
+
+_VALID_MEMORY_AGENTS = set(_AGENT_NAMES.keys()) | {"shared"}
+
+
+@api_router.get("/agents/{agent_name}/memory")
+async def list_memory(agent_name: str, include_shared: bool = True,
+                       pinned_only: bool = False, limit: int = 200) -> dict:
+    if agent_name not in _VALID_MEMORY_AGENTS:
+        raise HTTPException(404, f"Unknown agent: {agent_name}")
+    from atlas.db.managers import MemoryManager
+    rows = MemoryManager.list_for(agent_name,
+                                   include_shared=include_shared,
+                                   pinned_only=pinned_only,
+                                   limit=limit)
+    return {
+        "agent": agent_name,
+        "count": len(rows),
+        "memories": [
+            {"id": r.id, "agent": r.agent, "content": r.content,
+              "pinned": bool(r.pinned), "tags": r.tags or [],
+              "source": r.source,
+              "created_at": r.created_at.isoformat(),
+              "updated_at": r.updated_at.isoformat()}
+            for r in rows
+        ],
+    }
+
+
+@api_router.post("/agents/{agent_name}/memory")
+async def add_memory(agent_name: str, body: dict) -> dict:
+    """Add a memory directly via the dashboard (no chat needed). Pass
+    agent_name='shared' to write to the shared bucket every agent sees."""
+    if agent_name not in _VALID_MEMORY_AGENTS:
+        raise HTTPException(404, f"Unknown agent: {agent_name}")
+    content = (body.get("content") or "").strip()
+    if not content:
+        raise HTTPException(400, "content is required")
+    pinned = bool(body.get("pinned", False))
+    tags = body.get("tags") or []
+    if not isinstance(tags, list):
+        raise HTTPException(400, "tags must be a list of strings")
+    from atlas.db.managers import MemoryManager
+    mid = MemoryManager.add(agent_name, content, tags=tags,
+                              pinned=pinned, source="api")
+    return {"id": mid, "agent": agent_name, "pinned": pinned}
+
+
+@api_router.delete("/agents/{agent_name}/memory/{memory_id}")
+async def delete_memory(agent_name: str, memory_id: int) -> dict:
+    from atlas.db.managers import MemoryManager
+    m = MemoryManager.get(memory_id)
+    if m is None or m.agent != agent_name:
+        raise HTTPException(404, "memory not found for this agent")
+    MemoryManager.delete(memory_id)
+    return {"ok": True}
+
+
+@api_router.patch("/agents/{agent_name}/memory/{memory_id}")
+async def update_memory(agent_name: str, memory_id: int, body: dict) -> dict:
+    from atlas.db.managers import MemoryManager
+    m = MemoryManager.get(memory_id)
+    if m is None or m.agent != agent_name:
+        raise HTTPException(404, "memory not found for this agent")
+    MemoryManager.update(memory_id,
+                          content=body.get("content"),
+                          pinned=body.get("pinned"),
+                          tags=body.get("tags"))
+    return {"ok": True}
+
+
+@api_router.get("/agents/{agent_name}/chat-history")
+async def chat_history(agent_name: str, limit: int = 20) -> dict:
+    if agent_name not in _AGENT_NAMES:
+        raise HTTPException(404, f"Unknown agent: {agent_name}")
+    from atlas.db.managers import ChatHistoryManager
+    rows = ChatHistoryManager.recent(agent_name, limit=max(1, min(200, limit)))
+    return {
+        "agent": agent_name,
+        "count": len(rows),
+        "turns": [
+            {"id": r.id, "role": r.role, "content": r.content,
+              "created_at": r.created_at.isoformat()}
+            for r in rows
+        ],
+    }
+
+
+@api_router.delete("/agents/{agent_name}/chat-history")
+async def clear_chat_history(agent_name: str) -> dict:
+    if agent_name not in _AGENT_NAMES:
+        raise HTTPException(404, f"Unknown agent: {agent_name}")
+    from atlas.db.managers import ChatHistoryManager
+    n = ChatHistoryManager.clear(agent_name)
+    return {"cleared": n}

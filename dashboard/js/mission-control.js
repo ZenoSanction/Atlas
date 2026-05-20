@@ -71,6 +71,9 @@ export async function refreshMissionControl(api) {
         ? items.map(d => `<li><span class="ts">${fmtClock(d.at)}</span> ${esc(d.decision_type)}${d.rationale ? ' — <span class="rationale">' + esc(d.rationale) + "</span>" : ""}</li>`).join("")
         : '<li class="empty">no decisions yet</li>';
     }
+    // Memory count (live from /api/mission-control)
+    const memCount = lane.querySelector('[data-field="memory_count"]');
+    if (memCount) memCount.textContent = status.memory_count ?? 0;
   }
 
   // Message flow
@@ -151,6 +154,86 @@ function wireChatForms(api) {
       renderChatHistory(history, _historyByAgent[agent]);
     });
   });
+
+  // Memory: lazy-load on first expand, add via form, delete inline
+  document.querySelectorAll(".agent-lane").forEach((lane) => {
+    const agent = lane.dataset.agent;
+    const details = lane.querySelector(".agent-memories");
+    if (!details || details.dataset.bound) return;
+    details.dataset.bound = "1";
+    details.addEventListener("toggle", () => {
+      if (details.open) loadMemories(api, agent, lane);
+    });
+    const form = lane.querySelector(".memory-add");
+    if (form) {
+      form.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const input = form.querySelector("input[type=text]");
+        const pinned = form.querySelector('input[name=pinned]').checked;
+        const content = (input.value || "").trim();
+        if (!content) return;
+        try {
+          await api(`/agents/${agent}/memory`, {
+            method: "POST",
+            body: JSON.stringify({ content, pinned }),
+          });
+          input.value = "";
+          form.querySelector('input[name=pinned]').checked = false;
+          await loadMemories(api, agent, lane);
+        } catch (e) {
+          alert("Failed to add memory: " + e.message);
+        }
+      });
+    }
+    // Delegate clicks on delete buttons inside the list
+    const list = lane.querySelector(".memory-list");
+    if (list) {
+      list.addEventListener("click", async (ev) => {
+        const btn = ev.target.closest("button[data-action]");
+        if (!btn) return;
+        const id = btn.dataset.id;
+        const action = btn.dataset.action;
+        if (action === "delete") {
+          if (!confirm("Forget this memory?")) return;
+          await api(`/agents/${agent}/memory/${id}`, { method: "DELETE" });
+        } else if (action === "pin" || action === "unpin") {
+          await api(`/agents/${agent}/memory/${id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ pinned: action === "pin" }),
+          });
+        }
+        await loadMemories(api, agent, lane);
+      });
+    }
+  });
+}
+
+async function loadMemories(api, agent, lane) {
+  const list = lane.querySelector(".memory-list");
+  if (!list) return;
+  try {
+    const r = await api(`/agents/${agent}/memory?limit=50`);
+    if (!r.memories.length) {
+      list.innerHTML = `<em class="muted">no memories yet — type below to teach this agent something</em>`;
+      return;
+    }
+    list.innerHTML = r.memories.map(m => `
+      <div class="memory-item ${m.pinned ? "pinned" : ""} ${m.agent === "shared" ? "shared" : ""}">
+        <div class="memory-meta">
+          <span class="ts">${fmtClock(m.created_at)}</span>
+          ${m.agent === "shared" ? '<span class="badge shared">shared</span>' : ""}
+          ${m.pinned ? '<span class="badge pinned">📌 pinned</span>' : ""}
+        </div>
+        <div class="memory-content">${esc(m.content)}</div>
+        <div class="memory-actions">
+          <button class="btn-link" data-action="${m.pinned ? "unpin" : "pin"}" data-id="${m.id}">${m.pinned ? "unpin" : "pin"}</button>
+          <button class="btn-link" data-action="delete" data-id="${m.id}">forget</button>
+        </div>
+      </div>
+    `).join("");
+  } catch (e) {
+    list.innerHTML = `<em class="muted">error: ${esc(e.message)}</em>`;
+  }
 }
 
 function renderChatHistory(container, history) {

@@ -12,14 +12,14 @@ from typing import Optional
 from sqlalchemy import desc, select
 
 from atlas.db.models import (
-    AgentMessage, AgentMessageKind, AgentName, Alert, AlertSeverity,
-    Campaign, CampaignStatus, CampaignTarget, CalibrationMaster,
-    Credential, Decision, EquipmentProfile, Frame, FrameQuality,
-    KnowledgeThread, Measurement, MeasurementKind, NotificationConfig,
-    ReferenceFrame, RetentionPolicy, Session as SessionRow, SessionState,
-    SiteConfig, StackProduct, StorageEvent, Submission,
-    SubmissionDestination, SubmissionStatus, Target, WeatherThresholds,
-    WorkflowKind,
+    AgentChatTurn, AgentMemory, AgentMessage, AgentMessageKind, AgentName,
+    Alert, AlertSeverity, Campaign, CampaignStatus, CampaignTarget,
+    CalibrationMaster, Credential, Decision, EquipmentProfile, Frame,
+    FrameQuality, KnowledgeThread, Measurement, MeasurementKind,
+    NotificationConfig, ReferenceFrame, RetentionPolicy,
+    Session as SessionRow, SessionState, SiteConfig, StackProduct,
+    StorageEvent, Submission, SubmissionDestination, SubmissionStatus,
+    Target, WeatherThresholds, WorkflowKind,
 )
 from atlas.db.session import get_session
 from atlas.logging_setup import get_logger
@@ -459,3 +459,145 @@ class StorageEventManager:
             if obj:
                 s.expunge(obj)
             return obj
+
+
+# ---- Agent memory ----------------------------------------------------------
+
+# Memory rows under this special agent name are visible to every agent.
+SHARED_AGENT = "shared"
+
+
+class MemoryManager:
+    """Persistent per-agent memory store.
+
+    Conventions:
+      - ``agent`` is the lowercase agent name ('planner', ..., 'oracle') or
+        the literal ``SHARED_AGENT`` for memories every agent should see.
+      - ``pinned=True`` means the memory is auto-injected into the agent's
+        system prompt on every chat. Use sparingly (token budget).
+      - Non-pinned memories are not in the prompt by default; the agent's
+        ``recall`` tool surfaces them on demand.
+    """
+
+    @staticmethod
+    def add(agent: str, content: str, *,
+            tags: list | None = None, pinned: bool = False,
+            source: str = "chat") -> int:
+        with get_session() as s:
+            m = AgentMemory(agent=agent, content=content.strip(),
+                              tags=tags or [], pinned=bool(pinned),
+                              source=source)
+            s.add(m)
+            s.flush()
+            return m.id
+
+    @staticmethod
+    def get(memory_id: int) -> Optional[AgentMemory]:
+        with get_session() as s:
+            m = s.get(AgentMemory, memory_id)
+            if m:
+                s.expunge(m)
+            return m
+
+    @staticmethod
+    def list_for(agent: str, *, include_shared: bool = True,
+                 pinned_only: bool = False, limit: int = 200) -> list[AgentMemory]:
+        with get_session() as s:
+            q = s.query(AgentMemory)
+            if include_shared:
+                q = q.filter(AgentMemory.agent.in_([agent, SHARED_AGENT]))
+            else:
+                q = q.filter(AgentMemory.agent == agent)
+            if pinned_only:
+                q = q.filter(AgentMemory.pinned.is_(True))
+            rows = q.order_by(desc(AgentMemory.pinned),
+                                desc(AgentMemory.created_at)).limit(limit).all()
+            for r in rows:
+                s.expunge(r)
+            return rows
+
+    @staticmethod
+    def search(agent: str, query: str, *, limit: int = 30) -> list[AgentMemory]:
+        """Simple LIKE search over content + tags JSON. Good enough for the
+        kinds of recall amateurs do; can swap to FTS or embeddings later."""
+        pattern = f"%{query.strip()}%"
+        with get_session() as s:
+            rows = (s.query(AgentMemory)
+                      .filter(AgentMemory.agent.in_([agent, SHARED_AGENT]))
+                      .filter(AgentMemory.content.ilike(pattern))
+                      .order_by(desc(AgentMemory.pinned),
+                                desc(AgentMemory.created_at))
+                      .limit(limit).all())
+            for r in rows:
+                s.expunge(r)
+            return rows
+
+    @staticmethod
+    def update(memory_id: int, *, content: str | None = None,
+               pinned: bool | None = None, tags: list | None = None) -> None:
+        with get_session() as s:
+            m = s.get(AgentMemory, memory_id)
+            if not m:
+                return
+            if content is not None:
+                m.content = content
+            if pinned is not None:
+                m.pinned = bool(pinned)
+            if tags is not None:
+                m.tags = tags
+
+    @staticmethod
+    def delete(memory_id: int) -> bool:
+        with get_session() as s:
+            m = s.get(AgentMemory, memory_id)
+            if not m:
+                return False
+            s.delete(m)
+            return True
+
+    @staticmethod
+    def count_for(agent: str, include_shared: bool = True) -> int:
+        with get_session() as s:
+            q = s.query(AgentMemory)
+            if include_shared:
+                q = q.filter(AgentMemory.agent.in_([agent, SHARED_AGENT]))
+            else:
+                q = q.filter(AgentMemory.agent == agent)
+            return q.count()
+
+
+class ChatHistoryManager:
+    """Persisted user/assistant chat turns per agent. Loaded into the
+    Claude messages list on every chat so conversation continuity
+    survives server restarts and the warm-room operator switching
+    devices mid-conversation."""
+
+    @staticmethod
+    def append(agent: str, role: str, content: str) -> int:
+        if role not in ("user", "assistant"):
+            raise ValueError(f"role must be 'user' or 'assistant', got {role!r}")
+        with get_session() as s:
+            t = AgentChatTurn(agent=agent, role=role, content=content)
+            s.add(t)
+            s.flush()
+            return t.id
+
+    @staticmethod
+    def recent(agent: str, limit: int = 10) -> list[AgentChatTurn]:
+        """Return up to `limit` most recent turns *oldest-first* (so the
+        result is directly usable as Claude's `messages` history)."""
+        with get_session() as s:
+            rows = (s.query(AgentChatTurn)
+                      .filter(AgentChatTurn.agent == agent)
+                      .order_by(desc(AgentChatTurn.created_at))
+                      .limit(limit).all())
+            for r in rows:
+                s.expunge(r)
+        return list(reversed(rows))
+
+    @staticmethod
+    def clear(agent: str) -> int:
+        """Delete all chat turns for one agent. Returns count removed."""
+        with get_session() as s:
+            n = s.query(AgentChatTurn).filter(AgentChatTurn.agent == agent).delete()
+            return n

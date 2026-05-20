@@ -523,3 +523,43 @@ footer .muted { color: var(--text-dim); }
 .message-flow .who { color: var(--accent); }
 .message-flow .kind { color: var(--gold); margin-left: 4px; }
 .message-flow .empty { color: var(--text-dim); font-style: italic; padding: 4px; }
+
+/* Agent memory panel inside each lane */
+.agent-memories { font-size: 12px; }
+.agent-memories > summary { color: var(--text-dim); cursor: pointer; padding: 4px 0; }
+.mem-count {
+  display: inline-block; min-width: 18px; text-align: center;
+  background: var(--panel-2); border-radius: 9px; padding: 0 6px;
+  margin-left: 4px; color: var(--gold); font-weight: 600;
+}
+.memory-list { max-height: 220px; overflow-y: auto; }
+.memory-item {
+  padding: 6px 8px; margin-bottom: 4px;
+  background: var(--panel-2); border-left: 2px solid var(--line);
+  border-radius: 4px;
+}
+.memory-item.pinned { border-left-color: var(--gold); }
+.memory-item.shared { border-left-color: #38bdf8; }
+.memory-meta { display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--text-dim); }
+.memory-meta .ts { font-family: "Cascadia Code", Consolas, monospace; }
+.memory-meta .badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px;
+  border: 1px solid var(--line); text-transform: uppercase; letter-spacing: 0.04em;
+}
+.memory-meta .badge.pinned { color: var(--gold); border-color: var(--gold); }
+.memory-meta .badge.shared { color: #38bdf8; border-color: #38bdf8; }
+.memory-content { color: var(--text); margin: 3px 0; white-space: pre-wrap; }
+.memory-actions { display: flex; gap: 8px; }
+.btn-link {
+  background: none; border: none; padding: 0;
+  color: var(--accent); cursor: pointer; font-size: 11px;
+  text-decoration: underline; font-family: inherit;
+}
+.btn-link:hover { color: var(--text); }
+.memory-add { display: flex; gap: 4px; margin-top: 6px; align-items: center; }
+.memory-add input[type=text] {
+  flex: 1; background: var(--bg); border: 1px solid var(--line);
+  color: var(--text); padding: 4px 8px; border-radius: 4px; font-size: 12px;
+}
+.memory-add .mem-pinned { font-size: 11px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 4px; }
+.memory-add button { padding: 4px 10px; font-size: 12px; }
