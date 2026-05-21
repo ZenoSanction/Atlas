@@ -72,6 +72,59 @@ async def _calibration_freshness(_p: dict) -> dict:
     }
 
 
+async def _register_frame(p: dict) -> dict:
+    file_path = (p.get("file_path") or "").strip()
+    if not file_path:
+        return {"error": "file_path is required (absolute path to a FITS file)."}
+    from atlas.capture.ingest import register_frame as _reg
+    try:
+        fid = _reg(file_path, frame_type=p.get("frame_type"))
+    except FileNotFoundError:
+        return {"error": f"File not found: {file_path}"}
+    except Exception as e:
+        return {"error": f"Failed: {type(e).__name__}: {e}"}
+    return {"ok": True, "frame_id": fid, "file_path": file_path,
+            "message": f"Registered frame #{fid}."}
+
+
+async def _register_calibration_master(p: dict) -> dict:
+    file_path = (p.get("file_path") or "").strip()
+    kind = (p.get("kind") or "").lower().strip()
+    if not file_path:
+        return {"error": "file_path is required."}
+    if kind not in ("bias", "dark", "flat"):
+        return {"error": "kind must be one of: bias, dark, flat."}
+    from atlas.capture.ingest import register_calibration_master as _reg
+    try:
+        mid = _reg(file_path, kind, n_frames=p.get("n_frames"))
+    except FileNotFoundError:
+        return {"error": f"File not found: {file_path}"}
+    except Exception as e:
+        return {"error": f"Failed: {type(e).__name__}: {e}"}
+    return {"ok": True, "master_id": mid, "kind": kind, "file_path": file_path,
+            "message": f"Registered {kind} master #{mid}. The pre-flight "
+                          "Calibration Library gate will pick this up on the "
+                          "next 2-minute cycle."}
+
+
+async def _ingest_directory(p: dict) -> dict:
+    directory = (p.get("directory") or "").strip()
+    if not directory:
+        return {"error": "directory is required (path to scan)."}
+    recursive = bool(p.get("recursive", True))
+    from atlas.capture.ingest import ingest_directory as _ing
+    try:
+        ids = _ing(directory, recursive=recursive)
+    except NotADirectoryError:
+        return {"error": f"Not a directory: {directory}"}
+    except Exception as e:
+        return {"error": f"Failed: {type(e).__name__}: {e}"}
+    return {"ok": True, "count": len(ids), "frame_ids": ids[:50],
+            "truncated": len(ids) > 50,
+            "message": f"Ingested {len(ids)} new frame(s) from {directory}. "
+                          "Use count_recent_frames to verify totals."}
+
+
 ARCHIVIST_TOOLS: list[ToolSpec] = [
     ToolSpec("get_last_archive_activity",
              "Return the Archivist's most recent post-session activity "
@@ -100,4 +153,51 @@ ARCHIVIST_TOOLS: list[ToolSpec] = [
              "whether the library is fresh.",
              {"type": "object", "properties": {}},
              _calibration_freshness),
+    ToolSpec("register_frame",
+             "Register a single FITS file in the frames table. Reads "
+             "metadata from the FITS header (DATE-OBS, EXPTIME, FILTER, "
+             "CCD-TEMP, GAIN, OFFSET, IMAGETYP) so the operator only "
+             "needs to give the path. Use frame_type to override the "
+             "header's IMAGETYP if needed (light / dark / bias / flat).",
+             {"type": "object",
+              "properties": {
+                  "file_path": {"type": "string",
+                                  "description": "Absolute path to a *.fit / *.fits file."},
+                  "frame_type": {"type": "string",
+                                   "enum": ["light", "dark", "bias", "flat"],
+                                   "description": "Optional override for the FITS IMAGETYP."},
+              },
+              "required": ["file_path"]},
+             _register_frame),
+    ToolSpec("register_calibration_master",
+             "Register an existing master frame (bias / dark / flat) in "
+             "the calibration_masters table. The pre-flight Calibration "
+             "Library gate uses this table; registering a fresh master "
+             "flips the gate from yellow ('library empty') to green. "
+             "Use this for masters you've already built in NINA / PixInsight "
+             "/ Siril and want ATLAS to know about.",
+             {"type": "object",
+              "properties": {
+                  "file_path": {"type": "string",
+                                  "description": "Absolute path to the master FITS file."},
+                  "kind": {"type": "string", "enum": ["bias", "dark", "flat"]},
+                  "n_frames": {"type": "integer",
+                                 "description": "How many sub-frames went into the master."},
+              },
+              "required": ["file_path", "kind"]},
+             _register_calibration_master),
+    ToolSpec("ingest_directory",
+             "Scan a directory for FITS files and register every one it "
+             "finds in the frames table. Already-known files (same path) "
+             "are skipped. Use for bulk-importing an existing capture "
+             "library — e.g. point at NINA's image-save folder.",
+             {"type": "object",
+              "properties": {
+                  "directory": {"type": "string",
+                                  "description": "Absolute path to scan."},
+                  "recursive": {"type": "boolean",
+                                  "description": "Descend into subdirectories (default true)."},
+              },
+              "required": ["directory"]},
+             _ingest_directory),
 ]

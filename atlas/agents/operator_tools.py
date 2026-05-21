@@ -250,6 +250,119 @@ SYSTEM_STATUS_TOOL = ToolSpec(
 
 # ---- public API -------------------------------------------------------------
 
+async def _capture_test_frame(p: dict) -> dict:
+    """Trigger a one-off NINA capture (bias / dark / light) and register
+    the resulting FITS file in ATLAS's frames table.
+
+    Useful for bench testing: with the camera connected but the scope
+    capped, you can take a bias (0s) or dark (any exposure) and verify
+    the full capture-and-ingest pipeline end-to-end."""
+    exposure_s = float(p.get("exposure_s", 0.0))
+    if exposure_s < 0 or exposure_s > 3600:
+        return {"error": "exposure_s must be 0..3600"}
+    frame_type = (p.get("frame_type") or "dark").lower().strip()
+    if frame_type not in ("bias", "dark", "light"):
+        return {"error": "frame_type must be bias / dark / light"}
+    gain = p.get("gain")
+    filter_name = p.get("filter_name")
+    wait_s = float(p.get("wait_seconds_after", 5.0))
+
+    from atlas.config import get_settings
+    settings = get_settings()
+    if settings.simulation_mode:
+        return {"error": "Simulation mode is on — capture wouldn't produce a real "
+                          "file. Turn off ATLAS_SIMULATION_MODE first."}
+
+    from atlas.db.managers import ConfigManager
+    equip = ConfigManager.get_equipment()
+    if equip is None:
+        return {"error": "Equipment profile not configured. Open Setup → Equipment."}
+
+    try:
+        from atlas.hardware.nina import NinaClient
+        async with NinaClient(host=equip.nina_host, port=equip.nina_port,
+                                timeout=10.0) as nina:
+            result = await nina.camera_capture(
+                exposure_s=exposure_s, gain=gain, filter_name=filter_name,
+            )
+    except Exception as e:
+        return {"error": f"NINA capture call failed: {type(e).__name__}: {e}"}
+
+    # NINA's Advanced API returns response data; the exact shape varies by
+    # plugin version. Surface what we got so the operator can debug.
+    out = {
+        "ok": True,
+        "exposure_s": exposure_s,
+        "frame_type": frame_type,
+        "filter_name": filter_name,
+        "gain": gain,
+        "nina_response": result,
+        "wait_seconds_after": wait_s,
+    }
+
+    # Optional auto-ingest: if NINA tells us the file path in its response,
+    # register it. Otherwise the operator must follow up with register_frame.
+    saved_path = None
+    if isinstance(result, dict):
+        for key in ("file_path", "filename", "path", "ImagePath"):
+            if key in result and result[key]:
+                saved_path = result[key]
+                break
+
+    if saved_path:
+        try:
+            import asyncio
+            await asyncio.sleep(wait_s)   # let NINA finish writing
+            from atlas.capture.ingest import register_frame
+            fid = register_frame(saved_path, frame_type=frame_type)
+            out["frame_id"] = fid
+            out["saved_path"] = saved_path
+            out["message"] = (f"Captured {exposure_s}s {frame_type}, "
+                                f"registered as frame #{fid}.")
+        except Exception as e:
+            out["ingest_warning"] = (f"Capture OK but auto-ingest failed: {e}. "
+                                       "Use register_frame with the saved path.")
+    else:
+        out["message"] = ("Capture triggered. NINA didn't return a file path "
+                            "in its response — follow up with register_frame once "
+                            "the file lands on disk.")
+    return out
+
+
+CAPTURE_TOOL = ToolSpec(
+    name="capture_test_frame",
+    description=(
+        "Take a single bench-test frame via NINA and register it in ATLAS. "
+        "Designed for hardware-on-bench verification: with the scope "
+        "capped you can still take bias (0s) or dark frames and verify "
+        "the full capture → ingest → DB chain works. Returns the frame "
+        "id on success. Use frame_type='bias' for 0s readouts, "
+        "frame_type='dark' for any closed-shutter exposure, "
+        "frame_type='light' if pointed at something real. Refuses to "
+        "run in simulation mode."),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "exposure_s": {"type": "number", "minimum": 0, "maximum": 3600,
+                              "description": "Exposure time in seconds. 0 = bias."},
+            "frame_type": {"type": "string",
+                              "enum": ["bias", "dark", "light"],
+                              "description": "What kind of frame. Defaults to dark."},
+            "gain": {"type": "integer",
+                       "description": "Camera gain. Optional; uses NINA default if omitted."},
+            "filter_name": {"type": "string",
+                               "description": "Filter to use. Omit for current filter."},
+            "wait_seconds_after": {"type": "number",
+                                       "description": "Seconds to wait after capture "
+                                                       "for NINA to finish writing the "
+                                                       "file (default 5)."},
+        },
+        "required": ["exposure_s"],
+    },
+    handler=_capture_test_frame,
+)
+
+
 def all_operator_tools() -> list[ToolSpec]:
     """Return the full set of tools the Operator should register."""
-    return [*WEATHER_TOOLS, SYSTEM_STATUS_TOOL]
+    return [*WEATHER_TOOLS, SYSTEM_STATUS_TOOL, CAPTURE_TOOL]
