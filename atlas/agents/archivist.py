@@ -50,22 +50,45 @@ class Archivist(BaseAgent):
     async def run(self) -> None:
         self.log.info("Archivist agent online — awaits POST_SESSION triggers")
         self.set_task("standing by for session end", state="idle")
+        # Separate heartbeat task so the main loop can block-on-recv
+        # without sleeping in 30s slices.
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(),
+                                               name="archivist-heartbeat")
+        try:
+            while not self.should_stop:
+                try:
+                    msg = await self.recv()
+                except (asyncio.CancelledError, RuntimeError):
+                    break
+                if msg.kind == AgentMessageKind.POST_SESSION:
+                    self.set_task(f"processing session {msg.session_id}",
+                                  state="working")
+                    await self._process_session(msg)
+                    self.set_task("session archived — standing by",
+                                  state="idle")
+                else:
+                    await self.handle_relayed_message(msg)
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _heartbeat_loop(self) -> None:
+        """Idle heartbeat that scans the capture folder for new FITS.
+        Sleeps the full IDLE_HEARTBEAT_S between iterations — no
+        polling. The watch-folder ingest is a Phase-2 stopgap until
+        NINA's writeup-completion events get wired through Operator,
+        at which point this loop can disappear entirely."""
+        # Initial offset so we don't race the startup banner
+        await asyncio.sleep(5)
         while not self.should_stop:
-            msg = await self.recv_with_timeout(timeout_s=30.0)
-            if msg is None:
-                # Idle pulse, infrequent
-                now = asyncio.get_event_loop().time()
-                if now - self._last_heartbeat >= IDLE_HEARTBEAT_S:
-                    await self._idle_heartbeat()
-                    self._last_heartbeat = now
-                continue
-            if msg.kind == AgentMessageKind.POST_SESSION:
-                self.set_task(f"processing session {msg.session_id}",
-                              state="working")
-                await self._process_session(msg)
-                self.set_task("session archived — standing by", state="idle")
-            else:
-                await self.handle_relayed_message(msg)
+            try:
+                await self._idle_heartbeat()
+            except Exception:
+                self.log.exception("archivist heartbeat failed")
+            await asyncio.sleep(IDLE_HEARTBEAT_S)
 
     async def _idle_heartbeat(self) -> None:
         """Emit a benign 'still here' tick + scan the configured capture

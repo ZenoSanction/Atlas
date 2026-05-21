@@ -744,23 +744,36 @@ async def atlas_chat(req: ChatRequest) -> ChatResponse:
 # ============================================================================
 
 @api_router.get("/weather/current")
-async def weather_current() -> dict:
-    """Live current-conditions snapshot from Open-Meteo at the configured site."""
+async def weather_current(force_refresh: bool = False) -> dict:
+    """Current-conditions snapshot at the configured site.
+
+    Reads through the process-wide WeatherCache — same single
+    underlying snapshot every agent sees. Set ``force_refresh=true``
+    in the query string to bypass the TTL (rare; the cache refreshes
+    itself when stale)."""
     site = ConfigManager.get_site()
     if site is None:
         raise HTTPException(409, "Site coordinates not configured. Open Setup.")
-    from atlas.weather.openmeteo import OpenMeteoClient
+    from atlas.weather.cache import get_weather_cache
     try:
-        client = OpenMeteoClient(latitude=float(site.latitude),
-                                  longitude=float(site.longitude))
-        snap = await client.current()
+        state = await get_weather_cache().get(
+            lat=float(site.latitude), lon=float(site.longitude),
+            force_refresh=force_refresh,
+        )
     except Exception as e:
-        raise HTTPException(502, f"Open-Meteo request failed: {e}")
+        raise HTTPException(502, f"Weather cache failure: {e}")
+    snap = state.snapshot
+    if snap is None:
+        raise HTTPException(503, "No weather data available yet — cache is "
+                                  "empty and refresh failed.")
     from atlas.units import (
         c_to_f, c_delta_to_f, ms_to_mph, mm_to_in, hpa_to_inhg,
     )
     return {
         "observed_at": snap.observed_at,
+        "cache_age_seconds": state.age_seconds,
+        "cache_fresh": state.fresh,
+        "cache_refreshed_this_call": state.refreshed_this_call,
         "temperature_f": round(c_to_f(snap.temperature_c), 1),
         "humidity_pct": round(snap.humidity_pct, 0),
         "dew_point_f": round(c_to_f(snap.dew_point_c), 1),
@@ -797,13 +810,28 @@ async def weather_forecast(hours: int = 48, nighttime_only: bool = True) -> dict
     site = ConfigManager.get_site()
     if site is None:
         raise HTTPException(409, "Site coordinates not configured. Open Setup.")
-    from atlas.weather.openmeteo import OpenMeteoClient
+    # Read forecast through the cache. Cache keeps a 12-hour forecast
+    # by default; if the caller asks for more we fall back to a direct
+    # client call (rare).
+    from atlas.weather.cache import get_weather_cache
     try:
-        client = OpenMeteoClient(latitude=float(site.latitude),
-                                  longitude=float(site.longitude))
-        rows = await client.forecast_hours(hours=hours)
+        state = await get_weather_cache().get(
+            lat=float(site.latitude), lon=float(site.longitude),
+            forecast_hours=max(12, hours),
+        )
+        rows = list(state.forecast_hours or [])[:hours]
     except Exception as e:
-        raise HTTPException(502, f"Open-Meteo request failed: {e}")
+        raise HTTPException(502, f"Weather cache failure: {e}")
+    if not rows:
+        # Cache might be empty on cold boot before first refresh — try
+        # a direct one-off pull so the page isn't blank on first visit.
+        from atlas.weather.openmeteo import OpenMeteoClient
+        try:
+            client = OpenMeteoClient(latitude=float(site.latitude),
+                                       longitude=float(site.longitude))
+            rows = await client.forecast_hours(hours=hours)
+        except Exception as e:
+            raise HTTPException(502, f"Open-Meteo request failed: {e}")
 
     # Astronomical dark window filter: pin to the *coming night* exactly.
     night_meta = None

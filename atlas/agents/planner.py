@@ -72,57 +72,82 @@ class Planner(BaseAgent):
         self.log.info("Planner agent online")
         self.set_task("planner online — building first nightly plan",
                       state="working")
-        while not self.should_stop:
-            # Force an initial rebuild on startup so the Plan tab has data
-            if not self._initial_done:
-                self._initial_done = True
-                try:
-                    await self._rebuild_plan(reason="startup")
-                except Exception:
-                    self.log.exception("Initial plan rebuild failed")
-                self._last_rebuild = asyncio.get_event_loop().time()
 
-            # Drain bus
-            msg = await self.recv_with_timeout(timeout_s=10.0)
-            if msg is None:
-                # Idle — maybe time for a periodic rebuild
-                now = asyncio.get_event_loop().time()
-                if now - self._last_rebuild >= PLAN_REBUILD_INTERVAL_S:
+        # Force an initial rebuild on startup so the Plan tab has data
+        try:
+            await self._rebuild_plan(reason="startup")
+        except Exception:
+            self.log.exception("Initial plan rebuild failed")
+        self._initial_done = True
+        self._last_rebuild = asyncio.get_event_loop().time()
+
+        # Background periodic-rebuild task: long sleep cadence, not the
+        # main mechanism. Most rebuilds are now triggered by inbound
+        # messages (Operator decisions, manual revision requests). This
+        # task just catches "still active, nothing has happened, but
+        # we should re-check visibility windows" cases.
+        periodic_task = asyncio.create_task(self._periodic_rebuild_loop(),
+                                              name="planner-periodic")
+
+        try:
+            while not self.should_stop:
+                # Block on the bus — wake instantly when a message arrives,
+                # do nothing in between.
+                try:
+                    msg = await self.recv()
+                except (asyncio.CancelledError, RuntimeError):
+                    break
+
+                if (msg.kind == AgentMessageKind.STATUS
+                    and (msg.payload or {}).get("phase") == "operator_decision"
+                    and (msg.payload or {}).get("review")):
+                    # Final phase of the session pipeline — Operator's
+                    # verdict comes back. Finalise, re-plan, or cancel.
+                    await self._handle_session_decision(msg.payload["review"])
+                elif msg.kind == AgentMessageKind.REVISION_REQUEST:
+                    await self._handle_revision(msg)
+                elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
+                    # Oracle (or another agent) proposes a target. Log + rebuild.
+                    self.set_task(
+                        f"received candidate target — {(msg.payload or {}).get('summary', '')[:60]}",
+                        state="working")
+                    self.log_decision("candidate_received",
+                                        inputs={"sender": str(msg.sender),
+                                                  "payload": msg.payload},
+                                        rationale="Phase-1 stub: log + rebuild plan",
+                                        session_id=msg.session_id)
                     try:
-                        await self._rebuild_plan(reason="periodic")
+                        await self._rebuild_plan(reason="candidate_target")
                     except Exception:
-                        self.log.exception("Periodic plan rebuild failed")
-                    self._last_rebuild = now
+                        self.log.exception("Plan rebuild on candidate failed")
                 else:
-                    # Idle wait — update next-tick estimate for dashboard
-                    self._publish_next_tick(now)
-                continue
+                    await self.handle_relayed_message(msg)
+        finally:
+            periodic_task.cancel()
+            try:
+                await periodic_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-            if (msg.kind == AgentMessageKind.STATUS
-                and (msg.payload or {}).get("phase") == "operator_decision"
-                and (msg.payload or {}).get("review")):
-                # Final phase of the session pipeline — Operator's verdict
-                # comes back to us. Finalise, re-plan, or cancel.
-                await self._handle_session_decision(msg.payload["review"])
-                continue
-            if msg.kind == AgentMessageKind.REVISION_REQUEST:
-                await self._handle_revision(msg)
-            elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
-                # Oracle (or another agent) proposes a target. Log + rebuild.
-                self.set_task(
-                    f"received candidate target — {(msg.payload or {}).get('summary', '')[:60]}",
-                    state="working")
-                self.log_decision("candidate_received",
-                                    inputs={"sender": str(msg.sender),
-                                              "payload": msg.payload},
-                                    rationale="Phase-1 stub: log + rebuild plan",
-                                    session_id=msg.session_id)
+    async def _periodic_rebuild_loop(self) -> None:
+        """Sleep-and-check-cache periodic rebuild. Wakes once an hour
+        (was 30 minutes of polling) and only actually rebuilds if the
+        last rebuild is older than PLAN_REBUILD_INTERVAL_S — most
+        nights this loop fires zero or one rebuild because messages
+        from the Operator pipeline drove the rebuilds already."""
+        # Initial sleep so the startup rebuild from run() has time to land
+        await asyncio.sleep(60)
+        while not self.should_stop:
+            now = asyncio.get_event_loop().time()
+            if now - self._last_rebuild >= PLAN_REBUILD_INTERVAL_S:
                 try:
-                    await self._rebuild_plan(reason="candidate_target")
+                    await self._rebuild_plan(reason="periodic")
                 except Exception:
-                    self.log.exception("Plan rebuild on candidate failed")
-            else:
-                await self.handle_relayed_message(msg)
+                    self.log.exception("Periodic plan rebuild failed")
+                self._last_rebuild = asyncio.get_event_loop().time()
+            self._publish_next_tick(asyncio.get_event_loop().time())
+            # Sleep until just past the next theoretical rebuild boundary.
+            await asyncio.sleep(max(60.0, PLAN_REBUILD_INTERVAL_S / 2))
 
     def _publish_next_tick(self, now_monotonic: float) -> None:
         from datetime import datetime, timedelta
@@ -296,6 +321,20 @@ class Planner(BaseAgent):
         lon = float(site.longitude)
         horizon_alt = float(site.horizon_alt_min)
         now = datetime.utcnow()
+
+        # Planner is the ONE consumer that pulls fresh weather. Every
+        # other agent reads from the cache without triggering a network
+        # call. force_refresh=True here ensures the rebuild gets a
+        # current snapshot regardless of when the last pull happened —
+        # this is "we're about to commit hardware to ~8 hours of work,
+        # let's see the actual sky."
+        try:
+            from atlas.weather.cache import get_weather_cache
+            await get_weather_cache().get(lat=lat, lon=lon,
+                                              force_refresh=True)
+        except Exception as e:
+            self.log.warning("rebuild_plan: weather force-refresh failed "
+                              "(%s) — proceeding with whatever's cached", e)
 
         # Compute tonight's dark window so the plan is meaningfully
         # bounded — no point listing a target that's only up at noon.

@@ -49,50 +49,66 @@ class Oracle(BaseAgent):
     async def run(self) -> None:
         self.log.info("Oracle agent online — research + transient pipeline")
         self.set_task("oracle online — initial database scan", state="working")
-        while not self.should_stop:
-            if not self._initial_done:
-                self._initial_done = True
-                try:
-                    await self._idle_research(reason="startup")
-                except Exception:
-                    self.log.exception("Initial idle pass failed")
-                self._last_idle = asyncio.get_event_loop().time()
+        # Initial research pass once at boot
+        try:
+            await self._idle_research(reason="startup")
+        except Exception:
+            self.log.exception("Initial idle pass failed")
+        self._initial_done = True
+        self._last_idle = asyncio.get_event_loop().time()
 
-            msg = await self.recv_with_timeout(timeout_s=60.0)
-            if msg is None:
-                # Periodic background pass
-                now = asyncio.get_event_loop().time()
-                if now - self._last_idle >= IDLE_PASS_INTERVAL_S:
-                    try:
-                        await self._idle_research(reason="periodic")
-                    except Exception:
-                        self.log.exception("Idle research pass failed")
-                    self._last_idle = now
+        # Background periodic research task — wakes infrequently to
+        # scan for state transitions (knowledge threads, revisit
+        # candidates). The main loop blocks on the bus, no polling.
+        periodic_task = asyncio.create_task(self._periodic_research_loop(),
+                                              name="oracle-periodic")
+        try:
+            while not self.should_stop:
+                try:
+                    msg = await self.recv()
+                except (asyncio.CancelledError, RuntimeError):
+                    break
+                if msg.kind == AgentMessageKind.NEW_DATA:
+                    self.set_task(
+                        f"new data received — session {msg.payload.get('session_id')}",
+                        state="working")
+                    await self._handle_new_data(msg)
+                    self.set_task("research pass complete — standing by",
+                                  state="idle")
+                elif (msg.kind == AgentMessageKind.STATUS
+                      and (msg.payload or {}).get("phase") == "oracle_query"
+                      and (msg.payload or {}).get("review")):
+                    # Session pipeline phase 4 — review the plan for revisits +
+                    # extended integrations, then return to the Operator.
+                    await self._review_for_revisits(msg.payload["review"])
                 else:
-                    from datetime import datetime, timedelta
-                    nxt = datetime.utcnow() + timedelta(
-                        seconds=max(0, IDLE_PASS_INTERVAL_S - (now - self._last_idle)))
-                    get_state().update_agent_status(
-                        "oracle",
-                        next_tick_at=nxt.isoformat(timespec="seconds") + "Z",
-                        next_tick_kind="research_scan",
-                    )
-                continue
-            if msg.kind == AgentMessageKind.NEW_DATA:
-                self.set_task(
-                    f"new data received — session {msg.payload.get('session_id')}",
-                    state="working")
-                await self._handle_new_data(msg)
-                self.set_task("research pass complete — standing by",
-                              state="idle")
-            elif (msg.kind == AgentMessageKind.STATUS
-                  and (msg.payload or {}).get("phase") == "oracle_query"
-                  and (msg.payload or {}).get("review")):
-                # Session pipeline phase 4 — review the plan for revisits +
-                # extended integrations, then return to the Operator.
-                await self._review_for_revisits(msg.payload["review"])
-            else:
-                await self.handle_relayed_message(msg)
+                    await self.handle_relayed_message(msg)
+        finally:
+            periodic_task.cancel()
+            try:
+                await periodic_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    async def _periodic_research_loop(self) -> None:
+        """Sleep-and-research idle scan. Sleeps the full interval
+        between passes — no polling. Most nights this only fires once
+        or twice between active operations."""
+        await asyncio.sleep(IDLE_PASS_INTERVAL_S)
+        while not self.should_stop:
+            try:
+                await self._idle_research(reason="periodic")
+            except Exception:
+                self.log.exception("Idle research pass failed")
+            self._last_idle = asyncio.get_event_loop().time()
+            from datetime import datetime, timedelta
+            nxt = datetime.utcnow() + timedelta(seconds=IDLE_PASS_INTERVAL_S)
+            get_state().update_agent_status(
+                "oracle",
+                next_tick_at=nxt.isoformat(timespec="seconds") + "Z",
+                next_tick_kind="research_scan",
+            )
+            await asyncio.sleep(IDLE_PASS_INTERVAL_S)
 
     async def _handle_new_data(self, msg) -> None:
         session_id = msg.payload.get("session_id")

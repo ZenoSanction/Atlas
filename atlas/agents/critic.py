@@ -28,7 +28,12 @@ from atlas.weather.openmeteo import OpenMeteoClient, WeatherSnapshot
 
 
 FAST_LOOP_S = 90
-STANDARD_LOOP_S = 300
+# Bumped from 5 min to 15 min. The Critic no longer drives weather
+# pulls — it reads from WeatherCache, which refreshes on a 15 min TTL.
+# The standard loop's job is now just "re-assess against the cached
+# snapshot if the cache rotated, otherwise idle". Network round-trips
+# drop from ~12/hr to ~4/hr per agent.
+STANDARD_LOOP_S = 900
 FORECAST_HOURS = 12
 # Sun-altitude cutoff for "astronomical night". Reports + per-hour
 # severity entries only cover hours where the sun is below this. -18°
@@ -188,54 +193,76 @@ class Critic(BaseAgent):
         except Exception as e:
             self.log.warning("PHD2 event stream not started: %s", e)
             self._phd2_stream = None
-        # Background task: drain the bus queue so relays to the Critic
-        # (e.g., Planner asking for a fresh weather review) actually get
-        # picked up. Until now Critic never read from its queue.
-        drain_task = asyncio.create_task(self._drain_bus(), name="critic-bus-drain")
+        # Initial standard tick so the dashboard has data immediately.
         try:
-            while not self.should_stop:
-                now = asyncio.get_event_loop().time()
-                # Force an initial standard tick on startup so the dashboard
-                # has data without waiting 5 minutes.
-                if not self._initial_done:
-                    self._initial_done = True
-                    try:
-                        await self._standard_loop()
-                    except Exception:
-                        self.log.exception("Initial standard loop failed")
-                    self._last_standard = asyncio.get_event_loop().time()
-                if now - self._last_fast >= FAST_LOOP_S:
-                    await self._fast_loop()
-                    self._last_fast = now
-                if now - self._last_standard >= STANDARD_LOOP_S:
-                    try:
-                        await self._standard_loop()
-                    except Exception:
-                        self.log.exception("Standard loop failed")
-                    self._last_standard = asyncio.get_event_loop().time()
-                # Publish next-tick estimates so Mission Control can show countdowns
-                self._publish_next_ticks(now)
-                await asyncio.sleep(5)
+            await self._standard_loop()
+        except Exception:
+            self.log.exception("Initial standard loop failed")
+        self._initial_done = True
+        self._last_standard = asyncio.get_event_loop().time()
+
+        # Sibling tasks: periodic timer (fast + standard ticks) and bus
+        # drain (events). Both block on real conditions — no polling.
+        periodic_task = asyncio.create_task(self._periodic_loop(),
+                                               name="critic-periodic")
+        try:
+            # Event loop = bus drain. Block until a message arrives.
+            await self._drain_bus()
         finally:
-            drain_task.cancel()
+            periodic_task.cancel()
             try:
                 from atlas.hardware.phd2_events import stop_event_stream
                 await stop_event_stream()
             except Exception:
                 pass
             try:
-                await drain_task
+                await periodic_task
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def _drain_bus(self) -> None:
-        """Drain the Critic's bus queue. On inbound relays, react to the
-        ones we recognise; otherwise fall back to the BaseAgent default
-        (log + broadcast a 'received' event)."""
+    async def _periodic_loop(self) -> None:
+        """Fast (PHD2 buffer scan) + standard (cache freshness +
+        re-assessment) ticks. Sleeps the *minimum* of the two cadences
+        between iterations and checks elapsed time — no busy-loop, no
+        5-second polling, no work done unless something is actually
+        due. Standard loop is now keyed to the WeatherCache TTL, so on
+        a steady night it fires roughly every 15 min."""
+        # Initial brief offset so the startup standard_loop has time
+        # to settle into shared state before fast_loop reads from it.
+        await asyncio.sleep(15)
         while not self.should_stop:
-            msg = await self.recv_with_timeout(timeout_s=5.0)
-            if msg is None:
-                continue
+            now = asyncio.get_event_loop().time()
+            try:
+                if now - self._last_fast >= FAST_LOOP_S:
+                    await self._fast_loop()
+                    self._last_fast = asyncio.get_event_loop().time()
+            except Exception:
+                self.log.exception("fast loop failed")
+            try:
+                if now - self._last_standard >= STANDARD_LOOP_S:
+                    await self._standard_loop()
+                    self._last_standard = asyncio.get_event_loop().time()
+            except Exception:
+                self.log.exception("standard loop failed")
+            self._publish_next_ticks(asyncio.get_event_loop().time())
+            # Sleep until the next tick is due. Pick the smaller of
+            # the two upcoming deadlines, with a 5s floor so we don't
+            # tight-loop on a clock-jitter edge case.
+            now = asyncio.get_event_loop().time()
+            next_fast = self._last_fast + FAST_LOOP_S - now
+            next_std = self._last_standard + STANDARD_LOOP_S - now
+            await asyncio.sleep(max(5.0, min(next_fast, next_std)))
+
+    async def _drain_bus(self) -> None:
+        """Event-driven bus drain. Blocks on recv() until a message
+        arrives — no 5-second polling tick — so an inbound relay
+        (e.g. operator forcing a weather refresh) wakes the Critic
+        instantly."""
+        while not self.should_stop:
+            try:
+                msg = await self.recv()
+            except (asyncio.CancelledError, RuntimeError):
+                break
             try:
                 await self._handle_relay(msg)
             except Exception:
@@ -596,15 +623,32 @@ class Critic(BaseAgent):
             if nw is not None:
                 next_dark_iso = nw[0].isoformat(timespec="seconds") + "Z"
 
-        client = OpenMeteoClient(latitude=lat, longitude=lon)
+        # Read through WeatherCache rather than hitting Open-Meteo
+        # directly. The cache refreshes on its own 15-min TTL; the
+        # Critic just consumes whatever's there. Force-refresh is only
+        # used by the Planner before building a new session plan — for
+        # the Critic, "what does the cache currently say" is the right
+        # question at every tick.
+        from atlas.weather.cache import get_weather_cache
+        cache = get_weather_cache()
         try:
-            snap = await client.current()
-            forecast_rows = await client.forecast_hours(hours=FORECAST_HOURS)
+            state = await cache.get(lat=lat, lon=lon,
+                                       forecast_hours=FORECAST_HOURS)
         except Exception as e:
-            self.set_task(f"standard loop: Open-Meteo failed ({e})",
+            self.set_task(f"standard loop: weather cache failed ({e})",
                           state="idle")
-            self.log.warning("Open-Meteo fetch failed: %s", e)
+            self.log.warning("Weather cache get failed: %s", e)
             return
+        if state.snapshot is None:
+            self.set_task("standard loop: no weather data available yet",
+                          state="idle")
+            return
+        snap = state.snapshot
+        forecast_rows = state.forecast_hours or []
+        if state.refreshed_this_call:
+            self.log.debug("weather cache miss -> refreshed inside Critic")
+        else:
+            self.log.debug("weather cache hit (age=%ss)", state.age_seconds)
 
         # Pull live thresholds from DB so Setup-tab edits apply immediately
         t = SafetyThresholds.from_db()

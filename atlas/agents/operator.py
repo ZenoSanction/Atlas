@@ -50,11 +50,16 @@ class Operator(BaseAgent):
         preflight_task = asyncio.create_task(self._preflight_loop(),
                                                name="operator-preflight")
         try:
+            # Event-driven main loop: block until a real message arrives.
+            # No 5-second polling tick; nothing happens unless something
+            # actually changed. The pre-flight loop above still ticks
+            # periodically (much less often than before) to catch drift
+            # — but a normal night sees zero idle wake-ups here.
             while not self.should_stop:
-                msg = await self.recv_with_timeout(timeout_s=5.0)
-                if msg is None:
-                    await self._periodic_check()
-                    continue
+                try:
+                    msg = await self.recv()
+                except (asyncio.CancelledError, RuntimeError):
+                    break
                 try:
                     kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
                     sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
@@ -73,10 +78,19 @@ class Operator(BaseAgent):
                 pass
 
     async def _preflight_loop(self) -> None:
-        """Run the comprehensive session-readiness pre-flight every 2
-        minutes. Update shared state + broadcast the verdict on change."""
+        """Periodic pre-flight tick.
+
+        In the event-driven world this loop is a safety net, not the
+        main mechanism — the API endpoints that mutate gate inputs
+        (vault unlock, sim toggle, weather refresh) already call
+        _refresh_preflight_now() so the dashboard updates instantly.
+        This loop just catches the cases nothing else covers (calendar
+        time crossing into dark window, a Claude API outage healing
+        itself, etc.), so it runs much less often than the old
+        2-minute cadence — 5 minutes is plenty.
+        """
         from atlas.safety.preflight import run_session_preflight
-        INTERVAL_S = 120
+        INTERVAL_S = 300   # was 120; mostly drift detection now
         last_verdict: str | None = None
         # Fire an immediate first pass so the dashboard has data on load.
         await asyncio.sleep(2)
