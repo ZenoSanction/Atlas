@@ -1,10 +1,11 @@
 // Weather tab.
 //
 // Pulls four pieces of data on render:
-//   /api/weather/current      — live snapshot
-//   /api/weather/forecast?h=12 — next 12 hours (the "tonight" window)
-//   /api/critic/assessment    — per-metric pass/fail from the Critic agent
-//   /api/operator/verdict     — final GO / CAUTION / NO-GO from the Operator
+//   /api/weather/current                 — live snapshot
+//   /api/weather/forecast?nighttime_only — tonight's astronomical dark
+//                                          window only (sun < -18°)
+//   /api/critic/assessment               — per-metric pass/fail from Critic
+//   /api/operator/verdict                — GO / CAUTION / NO-GO from Operator
 //
 // Refreshes hourly on its own timer; the Refresh button forces an immediate
 // pull. The Critic also pushes new assessments over the WebSocket, but we
@@ -65,7 +66,7 @@ async function pullForecast(api) {
   const el = document.getElementById("weather-forecast");
   if (!el) return;
   try {
-    const f = await api("/weather/forecast?hours=24&nighttime_only=true");
+    const f = await api("/weather/forecast?nighttime_only=true");
     if (!f.hourly || f.hourly.length === 0) {
       // Astronomical-only filter returned nothing — either polar day or
       // the next dark window is outside our 24h forecast horizon. Show

@@ -575,13 +575,21 @@ async def weather_current() -> dict:
 
 
 @api_router.get("/weather/forecast")
-async def weather_forecast(hours: int = 24, nighttime_only: bool = True) -> dict:
+async def weather_forecast(hours: int = 48, nighttime_only: bool = True) -> dict:
     """Hourly forecast from Open-Meteo.
 
-    Default 24 hours with nighttime_only=True so the dashboard sees only
-    the *astronomical* dark window (sun below -18°) — i.e. when imaging
-    is actually possible. Set nighttime_only=false to get every hour
-    back, including daytime hours that don't matter for science."""
+    With ``nighttime_only=True`` (the default), returns *only the coming
+    night's* astronomical-dark hours (sun < -18°). Specifically:
+      - if we're currently inside astronomical dark, returns the
+        remaining hours up to dawn
+      - if we're in daytime / twilight, returns the upcoming
+        dusk → dawn window
+
+    No hours from tomorrow night or beyond — exactly one night.
+
+    Set ``nighttime_only=False`` to get every hour back, daytime
+    included (rarely useful — sky safety alerts already cover the
+    rare "is a storm rolling in at noon" case)."""
     hours = max(1, min(48, int(hours)))
     site = ConfigManager.get_site()
     if site is None:
@@ -594,16 +602,26 @@ async def weather_forecast(hours: int = 24, nighttime_only: bool = True) -> dict
     except Exception as e:
         raise HTTPException(502, f"Open-Meteo request failed: {e}")
 
-    # Astronomical dark window filter: keep only hours where the sun is
-    # below -18° (full astronomical night). -12° (nautical twilight) is
-    # too generous — there's enough sky brightness for naked-eye objects
-    # but it's not real dark-sky imaging time. The user's report should
-    # match what the telescope can actually see.
+    # Astronomical dark window filter: pin to the *coming night* exactly.
     night_meta = None
     if nighttime_only:
         from atlas.astronomy import sun_altitude, night_window
+        from datetime import timedelta as _td
         lat = float(site.latitude); lon = float(site.longitude)
-        nw = night_window(lat, lon, datetime.utcnow(), altitude_deg=-18.0)
+        now = datetime.utcnow()
+
+        # Compute the relevant dusk/dawn pair. If we're already in dark,
+        # find the dawn coming up next; otherwise find the next dusk
+        # then the dawn after it.
+        currently_dark = sun_altitude(lat, lon, now) < -18.0
+        if currently_dark:
+            # We're mid-night. Find dawn (next sun crossing of -18°
+            # ascending). Use night_window from 12h ago so the search
+            # still brackets the current dusk that already happened.
+            nw = night_window(lat, lon, now - _td(hours=12), altitude_deg=-18.0)
+        else:
+            nw = night_window(lat, lon, now, altitude_deg=-18.0)
+
         if nw is not None:
             dusk, dawn = nw
             night_meta = {
@@ -611,16 +629,25 @@ async def weather_forecast(hours: int = 24, nighttime_only: bool = True) -> dict
                 "dawn_utc": dawn.isoformat(timespec="seconds") + "Z",
                 "hours": round((dawn - dusk).total_seconds() / 3600, 2),
                 "twilight": "astronomical_-18",
+                "in_progress": currently_dark,
             }
-        kept: list[dict] = []
-        for r in rows:
-            try:
-                t = datetime.fromisoformat(r["time"])
-            except Exception:
-                continue
-            if sun_altitude(lat, lon, t) < -18.0:
-                kept.append(r)
-        rows = kept
+            # Keep ONLY rows that fall inside [max(now, dusk), dawn].
+            # That's "the rest of this night" if we're already dark,
+            # or "the upcoming night" otherwise.
+            window_start = max(now, dusk)
+            kept: list[dict] = []
+            for r in rows:
+                try:
+                    t = datetime.fromisoformat(r["time"])
+                except Exception:
+                    continue
+                if window_start <= t < dawn:
+                    kept.append(r)
+            rows = kept
+        else:
+            # Polar day or no dark window in 36h — return empty list,
+            # the dashboard handles this case gracefully.
+            rows = []
     from atlas.units import c_to_f, c_delta_to_f, ms_to_mph, mm_to_in
     out_rows = []
     for r in rows:
