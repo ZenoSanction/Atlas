@@ -399,6 +399,31 @@
     <div id="sessions-list" class="list">Loading…</div>
   </section>
 
+  <!-- Add-targets-to-campaign modal (Plan tab) -->
+  <div id="target-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <header class="modal-head">
+        <div>
+          <h3 id="target-modal-title">Add targets to campaign</h3>
+          <p class="hint" id="target-modal-sub">Search by name (M-numbers, NGC, common names, Bayer designations).</p>
+        </div>
+        <button id="target-modal-close" class="btn-secondary" type="button" title="Close">✕</button>
+      </header>
+      <div class="modal-body">
+        <div class="modal-search">
+          <input type="text" id="target-search-input" placeholder="e.g. M51, NGC 4565, Vega…" autocomplete="off">
+          <label class="checkbox"><input type="checkbox" id="target-search-simbad"> Fall back to SIMBAD if not in catalog</label>
+        </div>
+        <div id="target-search-status" class="hint"></div>
+        <div id="target-search-results" class="modal-results"></div>
+        <details class="modal-current" open>
+          <summary>Already in this campaign <span id="target-current-count" class="muted">0</span></summary>
+          <div id="target-current-list" class="modal-current-list"><em class="muted">none yet</em></div>
+        </details>
+      </div>
+    </div>
+  </div>
+
   <!-- ATLAS CHAT -->
   <section class="panel hidden" id="tab-atlas">
     <h2>ATLAS Chat</h2>
@@ -423,6 +448,18 @@
       <div class="form-actions">
         <button id="sim-save" class="btn-primary" type="button">Save</button>
         <span id="sim-status" class="form-status"></span>
+      </div>
+    </div>
+
+    <div class="card" id="bench-seed-card">
+      <h3>Bench-Test Campaign</h3>
+      <p class="hint">One-click seed of a deepsky campaign with four
+        bright, well-placed targets (Vega, Arcturus, M13, M5). Use this
+        to give the Planner something real to schedule on a fresh
+        install. Idempotent — safe to click repeatedly.</p>
+      <div class="form-actions">
+        <button id="bench-seed-btn" class="btn-primary" type="button">Seed Bench-Test Campaign</button>
+        <span id="bench-seed-status" class="form-status"></span>
       </div>
     </div>
 

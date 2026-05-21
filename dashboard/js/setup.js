@@ -14,12 +14,43 @@ function nudgeMissionControl() {
 export async function initSetup(api) {
   await refreshStatus(api);
   await renderSystemFlags(api);
+  await renderBenchSeed(api);
   await renderTlsPanel(api);
   await renderVaultForm(api);
   await renderSiteForm(api);
   await renderEquipmentForm(api);
   await renderThresholdsForm(api);
   wireCredentialForms(api);
+}
+
+async function renderBenchSeed(api) {
+  const btn = document.getElementById("bench-seed-btn");
+  const status = document.getElementById("bench-seed-status");
+  if (!btn || btn.dataset.bound) return;
+  btn.dataset.bound = "1";
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    status.textContent = "Seeding…";
+    status.className = "form-status";
+    try {
+      const r = await api("/setup/seed-bench-campaign", { method: "POST" });
+      const parts = [];
+      if (r.created_campaign) parts.push("campaign created");
+      if (r.added_targets?.length) parts.push(`added: ${r.added_targets.join(", ")}`);
+      if (r.already_linked_targets?.length)
+        parts.push(`already linked: ${r.already_linked_targets.join(", ")}`);
+      status.textContent = `${parts.join("; ")}. ` +
+                            `Total targets in campaign: ${r.total_targets}. ` +
+                            `Planner will pick it up on next rebuild.`;
+      status.className = "form-status ok";
+      nudgeMissionControl();
+    } catch (e) {
+      status.textContent = `Error: ${e.message || e}`;
+      status.className = "form-status err";
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // HTTPS / self-signed cert panel ---------------------------------------------

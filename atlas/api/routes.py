@@ -478,12 +478,28 @@ async def control_command(body: dict | None = None) -> dict:
 
 @api_router.get("/plan/campaigns")
 async def list_campaigns() -> list[dict]:
+    from atlas.db.models import CampaignTarget
+    from atlas.db.session import get_session
+    from sqlalchemy import func
     rows = CampaignManager.list_all()
+    # Pull target counts per campaign in one query so the dashboard
+    # can show "M51 deep — 3 targets" without N+1 round-trips.
+    counts: dict[int, int] = {}
+    try:
+        with get_session() as s:
+            for cid, n in (s.query(CampaignTarget.campaign_id,
+                                       func.count(CampaignTarget.id))
+                              .group_by(CampaignTarget.campaign_id).all()):
+                counts[cid] = int(n)
+    except Exception:
+        pass
     return [
-        {"id": r.id, "name": r.name, "workflow": r.workflow.value if hasattr(r.workflow, "value") else r.workflow,
+        {"id": r.id, "name": r.name,
+          "workflow": r.workflow.value if hasattr(r.workflow, "value") else r.workflow,
           "status": r.status.value if hasattr(r.status, "value") else r.status,
           "priority": r.priority, "progress": r.progress or {},
-          "scientific_context": r.scientific_context}
+          "scientific_context": r.scientific_context,
+          "target_count": counts.get(r.id, 0)}
         for r in rows
     ]
 
@@ -511,6 +527,120 @@ async def activate_campaign(campaign_id: int) -> dict:
 async def pause_campaign(campaign_id: int) -> dict:
     CampaignManager.set_status(campaign_id, CampaignStatus.PAUSED)
     return {"ok": True}
+
+
+# ----------------------------------------------------------------------------
+# Target search + add-to-campaign  (dashboard's per-campaign modal)
+# ----------------------------------------------------------------------------
+
+@api_router.get("/plan/targets/search")
+async def search_targets(q: str = "", fallback_simbad: bool = False,
+                          limit: int = 15) -> dict:
+    """Find targets by name. Searches the local seasonal catalog first.
+    If `fallback_simbad=true` and the catalog yields no hits, also
+    queries SIMBAD's TAP service for the long tail (NGC/IC/Sh2/Bayer
+    designations, comets by name, etc.).
+
+    Each match is enriched with current alt/az at the site for "is it
+    up right now?" feedback in the modal. Results from SIMBAD are
+    tagged `source: "simbad"` so the dashboard can show them
+    distinctly.
+    """
+    from atlas.astronomy.catalog import search as catalog_search
+    from atlas.astronomy.visibility import compute_alt_az
+    from datetime import datetime as _dt
+    site = ConfigManager.get_site()
+    lat = float(site.latitude) if site else 0.0
+    lon = float(site.longitude) if site else 0.0
+    horizon = float(site.horizon_alt_min) if site else 20.0
+    now = _dt.utcnow()
+
+    def enrich(entry: dict, source: str) -> dict:
+        ra, dec = entry.get("ra_deg"), entry.get("dec_deg")
+        out = dict(entry); out["source"] = source
+        if ra is not None and dec is not None and site is not None:
+            try:
+                alt, az = compute_alt_az(float(ra), float(dec), lat, lon, now)
+                out["alt_deg"] = round(alt, 1)
+                out["az_deg"] = round(az, 1)
+                out["above_horizon_now"] = bool(alt >= horizon)
+            except Exception:
+                out["alt_deg"] = None; out["az_deg"] = None
+                out["above_horizon_now"] = None
+        return out
+
+    catalog_hits = [enrich(e, "catalog") for e in catalog_search(q, limit=limit)]
+    if catalog_hits or not fallback_simbad or not q.strip():
+        return {"query": q, "results": catalog_hits,
+                  "site_configured": site is not None}
+
+    # Catalog miss → SIMBAD
+    from atlas.astronomy.simbad import resolve as simbad_resolve
+    sim = await simbad_resolve(q)
+    if sim is None:
+        return {"query": q, "results": [],
+                  "site_configured": site is not None,
+                  "simbad_tried": True, "simbad_found": False}
+    sim_entry = {
+        "name": sim.main_id, "alt_names": [q] if q != sim.main_id else [],
+        "ra_deg": sim.ra_deg, "dec_deg": sim.dec_deg,
+        "magnitude": sim.magnitude, "object_type": sim.object_type,
+        "best_months": [], "notes": "(resolved by SIMBAD)",
+    }
+    return {"query": q, "results": [enrich(sim_entry, "simbad")],
+              "site_configured": site is not None,
+              "simbad_tried": True, "simbad_found": True}
+
+
+@api_router.get("/plan/campaigns/{campaign_id}/targets")
+async def list_campaign_targets(campaign_id: int) -> list[dict]:
+    """Targets currently linked to a campaign — used by the modal to
+    show "already added" so the operator can't double-link by accident."""
+    from atlas.db.managers import TargetManager
+    rows = TargetManager.list_for_campaign(campaign_id)
+    return [{"id": t.id, "name": t.name, "object_type": t.object_type,
+              "ra_deg": t.ra_deg, "dec_deg": t.dec_deg,
+              "magnitude": t.magnitude} for t in rows]
+
+
+@api_router.post("/plan/campaigns/{campaign_id}/targets")
+async def add_target_to_campaign(campaign_id: int, body: dict) -> dict:
+    """Upsert a Target row + link it to a campaign. Body is the search
+    result dict (or any object with name + ra_deg + dec_deg). Idempotent:
+    duplicate calls return `{"ok": true, "already_linked": true}`."""
+    from atlas.db.managers import CampaignManager, TargetManager
+    name = (body.get("name") or body.get("main_id") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    ra = body.get("ra_deg"); dec = body.get("dec_deg")
+    if ra is None or dec is None:
+        raise HTTPException(400, "ra_deg and dec_deg are required")
+    # Confirm the campaign exists
+    existing_campaigns = {c.id: c for c in CampaignManager.list_all()}
+    if campaign_id not in existing_campaigns:
+        raise HTTPException(404, f"Campaign {campaign_id} not found")
+
+    aliases = body.get("alt_names") or body.get("aliases") or []
+    target_id = TargetManager.upsert(
+        name=name,
+        ra_deg=float(ra), dec_deg=float(dec),
+        object_type=body.get("object_type") or "unknown",
+        magnitude=(float(body["magnitude"])
+                     if body.get("magnitude") is not None else None),
+        aliases=list(aliases) if aliases else None,
+    )
+    created = TargetManager.link_to_campaign(campaign_id, target_id)
+    return {"ok": True, "target_id": target_id,
+              "campaign_id": campaign_id,
+              "linked_now": created, "already_linked": not created}
+
+
+@api_router.delete("/plan/campaigns/{campaign_id}/targets/{target_id}")
+async def remove_target_from_campaign(campaign_id: int,
+                                          target_id: int) -> dict:
+    from atlas.db.managers import TargetManager
+    removed = TargetManager.unlink_from_campaign(campaign_id, target_id)
+    return {"ok": True, "removed": removed}
 
 
 # ============================================================================
@@ -789,6 +919,27 @@ async def get_system_flags() -> dict:
                               ).lower() in ("1", "true", "yes", "on")),
         "updated_at": flags.updated_at.isoformat() if flags.updated_at else None,
     }
+
+
+@api_router.post("/setup/seed-bench-campaign")
+async def seed_bench_campaign_route() -> dict:
+    """Idempotently create the Bench-test campaign and pre-link 4
+    well-placed targets. Safe to call repeatedly — re-runs only add
+    targets that are missing, never duplicate links."""
+    from atlas.db.seed_bench import seed_bench_campaign
+    result = seed_bench_campaign()
+    # Nudge the Planner so the new campaign shows up immediately
+    # instead of waiting for its 30-min rebuild cycle.
+    try:
+        await get_bus().send(Message(
+            sender=AgentName.OPERATOR,
+            recipient=AgentName.PLANNER,
+            kind=AgentMessageKind.REVISION_REQUEST,
+            payload={"reason": "bench-test campaign seeded"},
+        ))
+    except Exception:
+        pass
+    return result
 
 
 @api_router.post("/setup/system-flags")

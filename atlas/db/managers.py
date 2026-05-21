@@ -329,6 +329,46 @@ class TargetManager:
                 s.expunge(obj)
             return obj
 
+    @staticmethod
+    def link_to_campaign(campaign_id: int, target_id: int) -> bool:
+        """Create a CampaignTarget row if not already linked. Returns
+        True if a new link was created, False if it already existed."""
+        from atlas.db.models import CampaignTarget
+        with get_session() as s:
+            existing = s.query(CampaignTarget).filter_by(
+                campaign_id=campaign_id, target_id=target_id,
+            ).first()
+            if existing is not None:
+                return False
+            s.add(CampaignTarget(campaign_id=campaign_id, target_id=target_id))
+            return True
+
+    @staticmethod
+    def unlink_from_campaign(campaign_id: int, target_id: int) -> bool:
+        from atlas.db.models import CampaignTarget
+        with get_session() as s:
+            existing = s.query(CampaignTarget).filter_by(
+                campaign_id=campaign_id, target_id=target_id,
+            ).first()
+            if existing is None:
+                return False
+            s.delete(existing)
+            return True
+
+    @staticmethod
+    def list_for_campaign(campaign_id: int) -> list[Target]:
+        """Return Target rows linked to a given campaign."""
+        from atlas.db.models import CampaignTarget
+        with get_session() as s:
+            rows = (s.query(Target)
+                      .join(CampaignTarget, CampaignTarget.target_id == Target.id)
+                      .filter(CampaignTarget.campaign_id == campaign_id)
+                      .order_by(Target.name)
+                      .all())
+            for r in rows:
+                s.expunge(r)
+            return rows
+
 
 class CampaignManager:
     @staticmethod

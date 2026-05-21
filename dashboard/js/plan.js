@@ -1,6 +1,9 @@
 // Plan tab — tonight's targets + campaigns list.
 
+import { openTargetModal, initTargetModal } from "/static/js/target-modal.js";
+
 export async function renderPlan(api) {
+  initTargetModal();   // idempotent — binds close/escape/search wiring once
   await renderTonightTargets(api);
   await renderCampaigns(api);
 }
@@ -137,7 +140,9 @@ async function renderCampaigns(api) {
     });
   }
 
-  // Activate / pause are wired on window for onclick="..." in the rows.
+  // Activate / pause / add-targets are wired on window for onclick="..."
+  // in the rows. Add-targets opens the modal; closing the modal nudges
+  // a Plan re-render so the row's target count stays current.
   window.activateCampaign = async (id) => {
     await api(`/plan/campaigns/${id}/activate`, { method: "POST" });
     renderPlan(api);
@@ -146,6 +151,9 @@ async function renderCampaigns(api) {
     await api(`/plan/campaigns/${id}/pause`, { method: "POST" });
     renderPlan(api);
   };
+  window.addTargetsToCampaign = (id, name) => {
+    openTargetModal(api, { id, name }, () => renderPlan(api));
+  };
 
   try {
     const rows = await api("/plan/campaigns");
@@ -153,23 +161,31 @@ async function renderCampaigns(api) {
       container.innerHTML = `<div class="empty">No campaigns yet. Click "+ New Campaign" to start one.</div>`;
       return;
     }
-    container.innerHTML = rows.map(r => `
+    container.innerHTML = rows.map(r => {
+      const safeName = esc(r.name).replace(/'/g, "&apos;");
+      const tc = r.target_count ?? 0;
+      const tcTag = tc === 0
+        ? `<span class="pill warn">no targets yet</span>`
+        : `<span class="pill">${tc} target${tc === 1 ? "" : "s"}</span>`;
+      return `
       <div class="item">
         <div class="item-row">
           <div>
             <span class="pill">${r.workflow}</span>
             <span class="pill ${r.status === "active" ? "ok" : ""}">${r.status}</span>
+            ${tcTag}
             <strong>${esc(r.name)}</strong>
           </div>
           <div>Priority ${r.priority}</div>
         </div>
         ${r.scientific_context ? `<div class="hint" style="margin-top:6px">${esc(r.scientific_context)}</div>` : ""}
         <div class="actions">
+          <button class="btn-primary" onclick="window.addTargetsToCampaign(${r.id}, '${safeName}')">+ Targets</button>
           ${r.status !== "active" ? `<button onclick="window.activateCampaign(${r.id})">Activate</button>` : ""}
           ${r.status === "active" ? `<button onclick="window.pauseCampaign(${r.id})">Pause</button>` : ""}
         </div>
       </div>
-    `).join("");
+    `;}).join("");
   } catch (e) {
     container.innerHTML = `<div class="empty">Error: ${e.message}</div>`;
   }

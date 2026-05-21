@@ -60,6 +60,11 @@ def main(argv: list[str] | None = None) -> int:
               "time you start the server. Run this after the host's IP "
               "changes if the warm-room URL stops matching the cert.",
     )
+    sub.add_parser(
+        "seed-bench",
+        help="Create the Bench-test campaign with Vega/Arcturus/M13/M5 "
+              "pre-linked. Idempotent — safe to re-run.",
+    )
     sub.add_parser("version", help="Print the ATLAS version")
 
     args = parser.parse_args(argv)
@@ -72,6 +77,23 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "init-db":
         from atlas.db.seed import initialise_database
         initialise_database()
+        return 0
+
+    if cmd == "seed-bench":
+        # Init the DB first so the seeder has tables to write into. Safe
+        # if already initialised — initialise_database() is idempotent.
+        from atlas.db.seed import initialise_database
+        from atlas.db.seed_bench import seed_bench_campaign
+        initialise_database()
+        result = seed_bench_campaign()
+        print(f"Bench campaign: id={result['campaign_id']} "
+              f"name='{result['campaign_name']}'")
+        if result.get("added_targets"):
+            print(f"  Added: {', '.join(result['added_targets'])}")
+        if result.get("already_linked_targets"):
+            print(f"  Already linked: "
+                  f"{', '.join(result['already_linked_targets'])}")
+        print(f"  Total targets in campaign: {result['total_targets']}")
         return 0
 
     if cmd == "regen-cert":

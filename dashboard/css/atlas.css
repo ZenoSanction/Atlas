@@ -1053,3 +1053,95 @@ footer .muted { color: var(--text-dim); }
   margin: 6px 0;
 }
 
+/* ============================================================================
+   Target search modal (Plan tab → "+ Targets")
+   ============================================================================ */
+
+.modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.65);
+  z-index: 100;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 60px 20px 20px;
+  overflow-y: auto;
+}
+.modal-overlay.hidden { display: none; }
+.modal-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  width: 100%; max-width: 720px;
+  max-height: calc(100vh - 100px);
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+}
+.modal-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.modal-head h3 { margin: 0; font-size: 16px; }
+#target-modal-close { padding: 4px 10px; font-size: 14px; line-height: 1; }
+.modal-body {
+  padding: 14px 18px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.modal-search { display: flex; flex-direction: column; gap: 6px; }
+.modal-search input[type=text] {
+  width: 100%;
+  background: var(--bg); border: 1px solid var(--line);
+  color: var(--text); padding: 8px 12px; border-radius: 4px; font-size: 14px;
+}
+.modal-search .checkbox {
+  font-size: 12px; color: var(--text-dim);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.modal-results {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.result-row {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.result-row:last-child { border-bottom: none; }
+.result-row:hover { background: rgba(255,255,255,0.02); }
+.result-main { flex: 1; min-width: 0; }
+.result-meta {
+  font-size: 12px; color: var(--text-dim); margin-top: 2px;
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.result-meta .small { font-size: 11px; }
+.result-actions button {
+  padding: 4px 12px; font-size: 12px;
+}
+.result-actions button.ok { background: #10b981; }
+.result-actions button.muted { background: var(--line); color: var(--text-dim); }
+.pill.simbad { background: #4338ca; color: white; }
+.modal-current {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.modal-current > summary {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-dim); cursor: pointer;
+}
+.modal-current-list {
+  margin-top: 6px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.current-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 4px 8px; font-size: 13px;
+  background: rgba(0,0,0,0.15); border-radius: 3px;
+}
+.remove-target { font-size: 11px; color: #f87171; }
+

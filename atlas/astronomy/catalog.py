@@ -446,3 +446,42 @@ def best_now(month: int, *, limit: int | None = None) -> list[dict]:
 
 def all_entries() -> list[dict]:
     return list(CATALOG)
+
+
+def search(query: str, *, limit: int = 20) -> list[dict]:
+    """Case-insensitive substring match against name + alt_names + object_type.
+
+    Returns the catalog entries (full dicts including ra/dec/magnitude/
+    notes) that match. Ranked: exact-name matches first, then prefix
+    matches on name/aliases, then substring matches anywhere.
+
+    Empty query returns the full catalog (capped by `limit`) ordered
+    by magnitude — useful for an empty modal letting the operator
+    browse rather than search."""
+    q = (query or "").strip().lower()
+    if not q:
+        out = sorted(CATALOG, key=lambda e: e.get("magnitude", 99))
+        return out[:limit]
+
+    exact: list[dict] = []
+    prefix: list[dict] = []
+    contains: list[dict] = []
+    for e in CATALOG:
+        name = (e.get("name") or "").lower()
+        aliases = [(a or "").lower() for a in (e.get("alt_names") or [])]
+        otype = (e.get("object_type") or "").lower().replace("_", " ")
+        if name == q or q in aliases:
+            exact.append(e)
+            continue
+        if name.startswith(q) or any(a.startswith(q) for a in aliases):
+            prefix.append(e)
+            continue
+        if (q in name or any(q in a for a in aliases)
+              or q in otype):
+            contains.append(e)
+    # Within each tier, brightest first
+    exact.sort(key=lambda e: e.get("magnitude", 99))
+    prefix.sort(key=lambda e: e.get("magnitude", 99))
+    contains.sort(key=lambda e: e.get("magnitude", 99))
+    merged = exact + prefix + contains
+    return merged[:limit]
