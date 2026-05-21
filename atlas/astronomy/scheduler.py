@@ -86,6 +86,12 @@ class ScheduleResult:
     scheduled_total_min: float = 0.0
     dark_window_min: float = 0.0
     fit_strategy: str = "depth"
+    # Effective window the scheduler actually used (max(dusk, now), dawn).
+    # For pre-dusk rebuilds these equal (dusk, dawn); for mid-night
+    # rebuilds the start is "now" so the UI can label "remaining
+    # window: 1:14 AM → 5:01 AM" honestly.
+    effective_start_utc: Optional[datetime] = None
+    effective_end_utc: Optional[datetime] = None
 
 
 def compute_visibility_window(target: dict, lat: float, lon: float,
@@ -143,8 +149,17 @@ def schedule_targets(
     min_dwell_minutes: float = 60.0,
     preferred_dwell_fn: Callable[[dict], float] | None = None,
     fit_strategy: str = "depth",
+    now_utc: datetime | None = None,
 ) -> ScheduleResult:
-    """Time-aware greedy scheduler. See module docstring."""
+    """Time-aware greedy scheduler. See module docstring.
+
+    ``now_utc`` is the wall-clock cursor start. When the rebuild fires
+    mid-night (e.g. 1 AM after a storm cleared, with dusk at 22:00 the
+    previous day), the cursor MUST start at now — not at the original
+    dusk that's already in the past. Defaults to datetime.utcnow().
+    Slot the cursor at max(now, dusk) so daytime rebuilds (planning
+    for the upcoming night) still start at dusk."""
+    now_utc = now_utc or datetime.utcnow()
     if preferred_dwell_fn is None:
         def preferred_dwell_fn(t: dict) -> float:
             # If the Planner already padded a workflow plan, use that.
@@ -154,26 +169,39 @@ def schedule_targets(
                 float(min_dwell_minutes),
             )
 
-    dark_window_min = (dawn - dusk).total_seconds() / 60.0
-    result = ScheduleResult(dark_window_min=round(dark_window_min, 1),
-                              fit_strategy=fit_strategy)
+    effective_start = max(dusk, now_utc)
+    dark_window_min = (dawn - effective_start).total_seconds() / 60.0
+    if dark_window_min < 0:
+        # Whole window is in the past — only happens if a stale "tonight"
+        # plan request comes in after dawn. Return an empty schedule
+        # with a clear flag so the caller can decide what to do.
+        dark_window_min = 0.0
+    result = ScheduleResult(
+        dark_window_min=round(dark_window_min, 1),
+        fit_strategy=fit_strategy,
+        effective_start_utc=effective_start,
+        effective_end_utc=dawn,
+    )
 
-    # Compute visibility for each candidate; drop never-up targets
+    # Compute visibility for each candidate; drop never-up targets.
+    # Visibility is computed against (effective_start, dawn) so a mid-
+    # night rebuild correctly drops targets that have already set.
     enriched: list[tuple[VisibilityWindow, dict]] = []
     for t in candidates:
         if t.get("ra_deg") is None or t.get("dec_deg") is None:
             result.skipped.append({"target": t,
                                      "reason": "no coords"})
             continue
-        vw = compute_visibility_window(t, lat, lon, horizon_alt, dusk, dawn)
+        vw = compute_visibility_window(t, lat, lon, horizon_alt,
+                                         effective_start, dawn)
         if vw is None or vw.length_minutes < min_dwell_minutes:
             result.skipped.append({
                 "target": t,
                 "reason": (
-                    "never above horizon during dark window"
+                    "never above horizon in remaining window"
                     if vw is None
                     else f"visible only {vw.length_minutes:.0f} min "
-                          f"(< {min_dwell_minutes:.0f} min minimum)"
+                          f"in remaining window (< {min_dwell_minutes:.0f} min min)"
                 ),
             })
             continue
@@ -183,8 +211,10 @@ def schedule_targets(
     enriched.sort(key=lambda pair: (pair[0].visible_from,
                                        -int(pair[1].get("priority", 0))))
 
-    # Greedy walk through the dark window
-    cursor = dusk
+    # Greedy walk through the dark window. Start the cursor at the
+    # later of (dusk, now) so a mid-night rebuild covers only the
+    # remaining hours, not the already-elapsed first half of the night.
+    cursor = max(dusk, now_utc)
     placed_count = 0
     used_ids: set[int] = set()
 

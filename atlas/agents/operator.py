@@ -25,6 +25,19 @@ from atlas.db.models import (
 )
 
 
+# How long the verdict must stay GO/CAUTION after a NO-GO before we trust
+# the clear and start the recovery sequence. Prevents flapping when wind
+# oscillates around the critical threshold.
+VERDICT_CLEAR_HYSTERESIS_S = 10 * 60   # 10 minutes
+
+# How much astronomical-dark time we need to consider a restart worthwhile.
+# Adds the (configurable) safe-startup overhead — 15 min in sim, closer to
+# 20 min on real hardware where camera cooldown dominates — to the
+# minimum useful imaging window.
+MIN_USEFUL_IMAGING_MIN = 30.0
+SAFE_STARTUP_OVERHEAD_MIN = 15.0
+
+
 class Operator(BaseAgent):
     name = AgentName.OPERATOR
 
@@ -32,6 +45,16 @@ class Operator(BaseAgent):
         super().__init__()
         self._current_session_id: int | None = None
         self._auto_fix_attempts: dict[str, int] = {}  # code -> attempts
+        # Verdict watcher state. The watcher fires shutdown on NO-GO,
+        # startup-and-replan on the return to GO/CAUTION (after the
+        # hysteresis window).
+        self._verdict_block_at: datetime | None = None    # when NO-GO first hit
+        self._verdict_clear_at: datetime | None = None    # when NO-GO ended
+        self._verdict_last: str | None = None
+        self._shutdown_in_progress = False
+        self._startup_in_progress = False
+        # Background tasks owned by the Operator
+        self._verdict_watcher_task: asyncio.Task | None = None
         # Register chat-time tools (weather, system status). Without these,
         # the dashboard's ATLAS-tab chat could only answer from training
         # knowledge — the Operator literally had no way to fetch live state.
@@ -42,6 +65,15 @@ class Operator(BaseAgent):
         self.log.info("Operator agent online — final authority")
         self.set_task("standing by — final-authority watch on agent bus",
                       state="idle")
+        # Verdict-transition watcher. Runs every 30 seconds; reads the
+        # current OperatorVerdict from shared state and decides whether
+        # to fire safe-shutdown (NO-GO) or safe-startup + replan (GO/
+        # CAUTION after the hysteresis). This is the loop that turns
+        # the verdict into real hardware action.
+        self._verdict_watcher_task = asyncio.create_task(
+            self._verdict_watcher_loop(),
+            name="operator-verdict-watcher",
+        )
         # Background task: run the comprehensive pre-flight every 2 min and
         # publish the aggregated verdict (weather + hardware + calibration
         # + plan + disk + vault + API + dark window) to shared state. The
@@ -72,9 +104,297 @@ class Operator(BaseAgent):
                                   state="idle")
         finally:
             preflight_task.cancel()
+            if self._verdict_watcher_task is not None:
+                self._verdict_watcher_task.cancel()
             try:
                 await preflight_task
             except (asyncio.CancelledError, Exception):
+                pass
+            if self._verdict_watcher_task is not None:
+                try:
+                    await self._verdict_watcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    # ---- Verdict watcher: convert verdict transitions into actions -----
+
+    async def _verdict_watcher_loop(self) -> None:
+        """Watch OperatorVerdict transitions, fire protection + recovery.
+
+        Three transitions matter:
+
+          GO/CAUTION → NO-GO
+            Fire SafeShutdownSequence in a background task. Mark the
+            block timestamp. Plan is left alone.
+
+          NO-GO → GO/CAUTION
+            Mark the clear timestamp. Don't act yet — we wait the full
+            hysteresis window to confirm the clear is real (wind
+            oscillating around threshold shouldn't restart/stop
+            repeatedly).
+
+          NO-GO → GO/CAUTION sustained for VERDICT_CLEAR_HYSTERESIS_S
+            Fire the worthwhile-restart check + SafeStartupSequence +
+            REVISION_REQUEST so the Planner rebuilds for the remaining
+            dark window.
+        """
+        await asyncio.sleep(2)
+        while not self.should_stop:
+            try:
+                await self._tick_verdict_watcher()
+            except Exception:
+                self.log.exception("verdict watcher tick failed")
+            await asyncio.sleep(30)
+
+    async def _tick_verdict_watcher(self) -> None:
+        # Manual override pauses all autonomous recovery
+        if get_state().is_manual():
+            return
+        v = get_state().get_verdict()
+        if v is None:
+            return
+        prev = self._verdict_last
+        self._verdict_last = v.verdict
+
+        # Transition into NO-GO
+        if v.verdict == VERDICT_NOGO and prev not in (VERDICT_NOGO, None):
+            self._verdict_block_at = datetime.utcnow()
+            self._verdict_clear_at = None
+            self.log.warning(
+                "Verdict %s → NO-GO; firing SafeShutdownSequence (reason: %s)",
+                prev, v.reason,
+            )
+            if not self._shutdown_in_progress:
+                asyncio.create_task(
+                    self._run_shutdown(reason=v.reason or "no-go verdict"),
+                    name="operator-shutdown",
+                )
+
+        # Transition out of NO-GO — start counting toward hysteresis
+        if v.verdict != VERDICT_NOGO and prev == VERDICT_NOGO:
+            self._verdict_clear_at = datetime.utcnow()
+            self.log.info(
+                "Verdict NO-GO → %s; clear timer started (%.0fs hysteresis).",
+                v.verdict, VERDICT_CLEAR_HYSTERESIS_S,
+            )
+
+        # Sustained clear → maybe recover
+        if (v.verdict != VERDICT_NOGO and self._verdict_clear_at is not None):
+            elapsed = (datetime.utcnow() - self._verdict_clear_at).total_seconds()
+            if elapsed >= VERDICT_CLEAR_HYSTERESIS_S:
+                # Hysteresis satisfied — consider recovery once.
+                self._verdict_clear_at = None
+                self._verdict_block_at = None
+                if not self._startup_in_progress:
+                    asyncio.create_task(
+                        self._maybe_recover(verdict_reason=v.reason or ""),
+                        name="operator-recovery",
+                    )
+
+    async def _run_shutdown(self, *, reason: str) -> None:
+        """Run SafeShutdownSequence end-to-end. Captures progress events
+        + the terminal summary into the operator lane / bus broadcasts."""
+        from atlas.config import is_simulation_mode
+        from atlas.db.managers import ConfigManager
+        from atlas.safety.protection import SafeShutdownSequence
+        self._shutdown_in_progress = True
+        try:
+            sim = is_simulation_mode()
+            equip = ConfigManager.get_equipment()
+            if sim or equip is None:
+                from atlas.simulation.fake_hardware import FakeNina, FakePhd2
+                nina, phd2 = FakeNina(), FakePhd2()
+            else:
+                from atlas.hardware.nina import NinaClient
+                from atlas.hardware.phd2 import Phd2Client
+                nina = NinaClient(host=equip.nina_host, port=equip.nina_port,
+                                    timeout=15.0)
+                phd2 = Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
+                                    timeout=10.0)
+            close_roof = bool(equip and getattr(equip, "roof_mode", "") == "nina")
+            seq = SafeShutdownSequence(
+                nina=nina, phd2=phd2, reason=reason,
+                close_roof=close_roof,
+                active_capture=getattr(self, "_current_capture", None),
+            )
+            async for ev in seq.run():
+                try:
+                    await self.bus.broadcast_event({
+                        "type": "protection",
+                        "sender": "operator",
+                        "direction": "shutdown",
+                        **ev,
+                        "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    })
+                except Exception:
+                    pass
+                self.set_task(f"shutdown: {ev.get('summary','')[:80]}",
+                              state="working")
+            final = seq.result or {"state": "unknown"}
+            self.log_decision(
+                "safe_shutdown_complete",
+                inputs={"reason": reason},
+                outputs=final,
+                rationale=final.get("summary", ""),
+                session_id=self._current_session_id,
+            )
+            if self._current_session_id is not None:
+                try:
+                    SessionManager.set_state(
+                        self._current_session_id, SessionState.STANDBY,
+                        reason=f"safe-shutdown: {reason}",
+                    )
+                except Exception:
+                    self.log.exception("Could not STANDBY active session")
+            self.set_task(
+                f"shutdown {final.get('state')} — awaiting clear",
+                state="waiting",
+            )
+        finally:
+            self._shutdown_in_progress = False
+            try:
+                await nina.close()
+            except Exception:
+                pass
+            try:
+                await phd2.close()
+            except Exception:
+                pass
+
+    async def _maybe_recover(self, *, verdict_reason: str) -> None:
+        """Decide whether to fire SafeStartupSequence + replan, or
+        log that the remaining window isn't worth restarting for."""
+        from atlas.db.managers import ConfigManager
+        site = ConfigManager.get_site()
+        if site is None:
+            self.log.info("Recovery skipped: no site configured.")
+            return
+        from atlas.astronomy.day_phase import (
+            current_phase, minutes_useful_remaining,
+        )
+        phase = current_phase(float(site.latitude), float(site.longitude))
+
+        # If we're outside astronomical dark, no restart needed —
+        # nothing was being imaged. The verdict clear matters but
+        # there's nothing to recover from.
+        if not phase.is_imaging_window:
+            self.log.info(
+                "Verdict cleared, but we're in %s (sun %.1f°). "
+                "No recovery needed; next dark window in ~%.0f min.",
+                phase.phase, phase.sun_altitude_deg,
+                phase.minutes_until_next_phase,
+            )
+            self.log_decision(
+                "recovery_not_needed_outside_dark",
+                inputs={"phase": phase.phase,
+                          "minutes_to_dark": phase.minutes_until_next_phase},
+                rationale="Verdict clear but not currently imaging.",
+            )
+            return
+
+        usable = minutes_useful_remaining(
+            phase, safe_startup_overhead_min=SAFE_STARTUP_OVERHEAD_MIN,
+        ) or 0.0
+        if usable < MIN_USEFUL_IMAGING_MIN:
+            self.log.warning(
+                "Verdict cleared with only %.0f usable min left "
+                "(< %.0f min minimum); skipping restart. "
+                "Plan stays READY; next dark window resumes normally.",
+                usable, MIN_USEFUL_IMAGING_MIN,
+            )
+            self.set_task(
+                f"verdict clear but only {usable:.0f} min usable — "
+                "not worth restarting tonight",
+                state="idle",
+            )
+            self.log_decision(
+                "recovery_skipped_insufficient_time",
+                inputs={"usable_minutes": usable,
+                          "minimum_useful_minutes": MIN_USEFUL_IMAGING_MIN},
+                rationale=("Restart overhead + minimum useful imaging "
+                             "exceeds remaining astronomical dark."),
+            )
+            return
+
+        # Worth restarting. Fire SafeStartupSequence then nudge the
+        # Planner to rebuild for the remaining window.
+        self.log.info(
+            "Verdict cleared with %.0f usable min remaining (≥ %.0f min). "
+            "Firing SafeStartupSequence + Planner replan.",
+            usable, MIN_USEFUL_IMAGING_MIN,
+        )
+        await self._run_startup(verdict_reason=verdict_reason)
+        # Replan for the remaining window. The Planner is clock-aware:
+        # _rebuild_plan(reason="conditions_cleared") will compute a
+        # plan that fits between now and dawn.
+        try:
+            await self.send(
+                AgentName.PLANNER,
+                AgentMessageKind.REVISION_REQUEST,
+                payload={"reason": "conditions_cleared_mid_night",
+                          "verdict_reason": verdict_reason,
+                          "usable_minutes_remaining": usable},
+            )
+        except Exception:
+            self.log.exception("Failed to send replan request to Planner")
+
+    async def _run_startup(self, *, verdict_reason: str) -> None:
+        """Run SafeStartupSequence and broadcast progress."""
+        from atlas.config import is_simulation_mode
+        from atlas.db.managers import ConfigManager
+        from atlas.safety.protection import SafeStartupSequence
+        self._startup_in_progress = True
+        try:
+            sim = is_simulation_mode()
+            equip = ConfigManager.get_equipment()
+            if sim or equip is None:
+                from atlas.simulation.fake_hardware import FakeNina, FakePhd2
+                nina, phd2 = FakeNina(), FakePhd2()
+                setpoint = -10.0
+            else:
+                from atlas.hardware.nina import NinaClient
+                from atlas.hardware.phd2 import Phd2Client
+                nina = NinaClient(host=equip.nina_host, port=equip.nina_port,
+                                    timeout=15.0)
+                phd2 = Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
+                                    timeout=10.0)
+                setpoint = getattr(equip, "cooling_setpoint_c", None)
+            seq = SafeStartupSequence(
+                nina=nina, phd2=phd2,
+                cooling_setpoint_c=setpoint, simulation=sim,
+            )
+            async for ev in seq.run():
+                try:
+                    await self.bus.broadcast_event({
+                        "type": "protection",
+                        "sender": "operator",
+                        "direction": "startup",
+                        **ev,
+                        "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    })
+                except Exception:
+                    pass
+                self.set_task(f"startup: {ev.get('summary','')[:80]}",
+                              state="working")
+            final = seq.result or {"state": "unknown"}
+            self.log_decision(
+                "safe_startup_complete",
+                inputs={"verdict_reason": verdict_reason},
+                outputs=final,
+                rationale=final.get("summary", ""),
+                session_id=self._current_session_id,
+            )
+            self.set_task(f"startup {final.get('state')} — ready to resume",
+                          state="idle")
+        finally:
+            self._startup_in_progress = False
+            try:
+                await nina.close()
+            except Exception:
+                pass
+            try:
+                await phd2.close()
+            except Exception:
                 pass
 
     async def _preflight_loop(self) -> None:
@@ -228,10 +548,12 @@ class Operator(BaseAgent):
                                 rationale="No storm / damage-risk indicators")
             return
 
-        # Execution block fires. Flip the verdict to NO-GO and broadcast.
-        # The plan itself stays READY — the operator can still review
-        # what was planned, and when weather clears, execution resumes
-        # against this same plan.
+        # Execution block fires. Flip the verdict to NO-GO. The
+        # _verdict_watcher_loop will detect this transition and
+        # autonomously fire SafeShutdownSequence + park the session.
+        # The plan itself stays READY — operator can still review
+        # what was planned, and when weather clears the watcher
+        # handles startup + replan against the same plan.
         reasons = []
         if hardware_fault:
             reasons.append("hardware critical")
@@ -244,24 +566,12 @@ class Operator(BaseAgent):
             sources=["execution_block", "critical_advisories"],
         )
         get_state().set_verdict(new)
-        self.log.warning("EXECUTION BLOCK: %s (plan stays READY)", reason)
-        self.set_task(f"execution blocked: {reason} (plan unchanged)",
-                      state="waiting")
+        self.log.warning("EXECUTION BLOCK: %s (plan stays READY; "
+                          "watcher will run shutdown sequence)", reason)
         self.log_decision("execution_block",
                             inputs={"advisories": advisories,
                                       "reason": reason},
                             rationale=reason)
-        # If a session is actively running, stop it. The plan survives;
-        # only the execution stops.
-        if self._current_session_id is not None:
-            try:
-                SessionManager.set_state(self._current_session_id,
-                                           SessionState.STANDBY,
-                                           reason=f"execution blocked: {reason}")
-                self.log.warning("Session #%d → STANDBY due to execution block",
-                                  self._current_session_id)
-            except Exception:
-                self.log.exception("Failed to STANDBY active session")
         await self.bus.broadcast_event({
             "type": "execution_block",
             "sender": "operator",

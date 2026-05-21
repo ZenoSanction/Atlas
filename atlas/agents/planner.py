@@ -20,7 +20,7 @@ Phase 2 TODOs (clearly marked in the body):
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from atlas.agents.base import BaseAgent
@@ -256,23 +256,57 @@ class Planner(BaseAgent):
             self.log.warning("rebuild_plan: weather force-refresh failed "
                               "(%s) — proceeding with whatever's cached", e)
 
-        # Compute tonight's dark window so the plan is meaningfully
-        # bounded — no point listing a target that's only up at noon.
-        self.set_task("rebuilding plan — computing dusk/dawn for tonight",
-                      state="working")
-        nw = night_window(lat, lon, now, altitude_deg=-12.0)
+        # Classify where we are in the 24-hour cycle. The Planner's
+        # behaviour is meaningfully different depending on whether
+        # we're calling _rebuild_plan in the middle of the day (plan
+        # for tonight), during evening twilight (final plan + pre-
+        # flight prep), in astronomical dark (mid-night replan after
+        # conditions cleared), or in morning twilight (start
+        # preparing tomorrow's plan once the day rolls over).
+        from atlas.astronomy.day_phase import (
+            current_phase, PHASE_ASTRO_DARK, PHASE_EVENING_TWILIGHT,
+            PHASE_MORNING_TWILIGHT, PHASE_DAY,
+        )
+        day_phase = current_phase(lat, lon, now)
+        self.set_task(
+            f"rebuilding plan — phase={day_phase.phase}, "
+            f"sun {day_phase.sun_altitude_deg:.1f}°",
+            state="working",
+        )
+
+        # Compute the relevant astronomical-dark window for THIS plan.
+        # day_phase already knows the next or current dark window;
+        # we use the wider -12° nautical window for visibility ranking
+        # because targets often need a few minutes of nautical-twilight
+        # shoulder for slew + plate-solve before astronomical dark
+        # itself.
+        nw = night_window(lat, lon,
+                            now - timedelta(hours=12)
+                                if day_phase.is_imaging_window else now,
+                            altitude_deg=-12.0)
         if nw is None:
             window = None
-            mid_night = now  # fall back to "right now" assessment
+            mid_night = now
         else:
             dusk, dawn = nw
-            window = {"dusk_utc": dusk.isoformat(timespec="seconds") + "Z",
-                       "dawn_utc": dawn.isoformat(timespec="seconds") + "Z",
-                       "hours": round((dawn - dusk).total_seconds() / 3600, 1)}
-            # Pick mid-night for visibility assessment so we rank targets
-            # by their best-case position during the imaging window, not
-            # their current daytime position.
-            mid_night = dusk + (dawn - dusk) / 2
+            # Effective window start: dusk for daytime rebuilds,
+            # now for mid-night rebuilds (the storm-cleared case).
+            effective_start = max(dusk, now)
+            window = {
+                "dusk_utc": dusk.isoformat(timespec="seconds") + "Z",
+                "dawn_utc": dawn.isoformat(timespec="seconds") + "Z",
+                "effective_start_utc": effective_start.isoformat(timespec="seconds") + "Z",
+                "hours": round((dawn - dusk).total_seconds() / 3600, 1),
+                "remaining_hours": round(
+                    max(0.0, (dawn - effective_start).total_seconds() / 3600), 1
+                ),
+                "day_phase": day_phase.phase,
+                "is_imaging_window_now": day_phase.is_imaging_window,
+            }
+            # Visibility ranking time: midpoint of the EFFECTIVE window,
+            # so a 1 AM replan ranks targets by where they are 1 AM-to-
+            # dawn-midpoint, not by where they were at 23:00 last night.
+            mid_night = effective_start + (dawn - effective_start) / 2
 
         # Pull active campaign targets
         campaigns = CampaignManager.list_active()
@@ -474,7 +508,10 @@ class Planner(BaseAgent):
             from atlas.astronomy.scheduler import schedule_targets
             dusk_dt = datetime.fromisoformat(window["dusk_utc"].rstrip("Z"))
             dawn_dt = datetime.fromisoformat(window["dawn_utc"].rstrip("Z"))
-            window_min = window["hours"] * 60.0
+            # window_min is the EFFECTIVE remaining-imaging time, not
+            # the full original night. A mid-night rebuild shows the
+            # smaller number — that's what the operator cares about.
+            window_min = window["remaining_hours"] * 60.0
             schedule_obj = schedule_targets(
                 full,
                 lat=lat, lon=lon, horizon_alt=horizon_alt,
@@ -482,6 +519,7 @@ class Planner(BaseAgent):
                 max_targets=MAX_TARGETS_PER_SESSION,
                 min_dwell_minutes=MIN_DWELL_MINUTES,
                 fit_strategy="depth",
+                now_utc=now,
             )
             for slot in schedule_obj.slots:
                 t = dict(slot.target)
@@ -525,6 +563,7 @@ class Planner(BaseAgent):
             "skipped_no_coords": skipped_no_coords,
             "horizon_alt_min_deg": horizon_alt,
             "window": window,
+            "day_phase": day_phase.to_jsonable(),
             "fallback_to_catalog": not visible and bool(from_catalog),
             "applied_constraints": applied_constraints,
         }
