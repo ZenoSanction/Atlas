@@ -10,6 +10,7 @@ from atlas.capture.ingest import (
 )
 from atlas.capture.stack import stack_master, find_matching_frames
 from atlas.capture.quality import grade_frame, grade_ungraded
+from atlas.capture.platesolve import plate_solve_frame, plate_solve_recent_lights
 
 __all__ = [
     "read_fits_header",
@@ -20,4 +21,6 @@ __all__ = [
     "find_matching_frames",
     "grade_frame",
     "grade_ungraded",
+    "plate_solve_frame",
+    "plate_solve_recent_lights",
 ]

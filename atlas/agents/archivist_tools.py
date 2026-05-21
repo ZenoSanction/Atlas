@@ -107,6 +107,20 @@ async def _register_calibration_master(p: dict) -> dict:
                           "next 2-minute cycle."}
 
 
+async def _plate_solve_recent(p: dict) -> dict:
+    limit = int(p.get("limit", 10))
+    from atlas.capture.platesolve import plate_solve_recent_lights
+    return await plate_solve_recent_lights(limit=limit)
+
+
+async def _plate_solve_one(p: dict) -> dict:
+    frame_id = p.get("frame_id")
+    if frame_id is None:
+        return {"error": "frame_id is required"}
+    from atlas.capture.platesolve import plate_solve_frame
+    return await plate_solve_frame(int(frame_id))
+
+
 async def _grade_recent(p: dict) -> dict:
     limit = int(p.get("limit", 50))
     from atlas.capture.quality import grade_ungraded
@@ -232,6 +246,24 @@ ARCHIVIST_TOOLS: list[ToolSpec] = [
               },
               "required": ["directory"]},
              _ingest_directory),
+    ToolSpec("plate_solve_frame",
+             "Plate-solve one frame via ASTAP. Writes the WCS solution "
+             "to frames.wcs_blob and sets plate_solved=True. ASTAP binary "
+             "must be installed and the path set in Setup → Equipment.",
+             {"type": "object",
+              "properties": {"frame_id": {"type": "integer"}},
+              "required": ["frame_id"]},
+             _plate_solve_one),
+    ToolSpec("plate_solve_recent_lights",
+             "Plate-solve up to N recent unplated light frames in one go. "
+             "Skips bias/dark/flat. Useful after a capture session: each "
+             "successfully-solved frame's centre RA/Dec is recorded for "
+             "downstream photometry/astrometry workflows.",
+             {"type": "object",
+              "properties": {
+                  "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+              }},
+             _plate_solve_recent),
     ToolSpec("grade_recent_frames",
              "Grade up to N ungraded frames (FWHM-based or star-count-"
              "based heuristic), writing A/B/C/D back to frames.quality. "
