@@ -1145,3 +1145,51 @@ footer .muted { color: var(--text-dim); }
 }
 .remove-target { font-size: 11px; color: #f87171; }
 
+/* ============================================================================
+   Session plan + advisories (replaces the old 6-stage pipeline UI)
+   ============================================================================ */
+
+.plan-summary {
+  display: flex; align-items: center; gap: 14px;
+  padding: 8px 0;
+}
+.plan-state {
+  padding: 4px 10px; border-radius: 4px;
+  font-weight: 700; letter-spacing: 0.05em; font-size: 12px;
+  text-transform: uppercase;
+  background: var(--line); color: var(--text);
+}
+.plan-state.ok   { background: #10b981; color: #0a0f0c; }
+.plan-state.warn { background: #f59e0b; color: #1f1100; }
+.plan-state.crit { background: #b91c1c; color: #fff; }
+.adv-counts { display: flex; gap: 6px; flex-wrap: wrap; }
+.hard-stop-reason {
+  background: rgba(127,29,29,0.18); color: #fca5a5;
+  border-left: 3px solid #b91c1c;
+  padding: 6px 10px; margin-top: 6px;
+  font-size: 13px; border-radius: 3px;
+}
+
+.advisory-group { margin-bottom: 10px; }
+.advisory-group h4 {
+  font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-dim);
+  margin: 4px 0;
+}
+.advisory {
+  font-size: 12px; padding: 5px 10px;
+  border-left: 3px solid var(--line);
+  background: rgba(0,0,0,0.18);
+  border-radius: 3px; margin-bottom: 3px;
+  display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap;
+}
+.advisory-info     { border-left-color: #38bdf8; }
+.advisory-warning  { border-left-color: #f59e0b; }
+.advisory-critical { border-left-color: #b91c1c;
+                      background: rgba(127,29,29,0.10); }
+.advisory .adv-kind {
+  font-weight: 600; text-transform: uppercase;
+  font-size: 10px; color: var(--text-dim);
+}
+.advisory .adv-sev { font-size: 10px; color: var(--text-dim); }
+

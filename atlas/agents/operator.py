@@ -154,130 +154,108 @@ class Operator(BaseAgent):
             await self.handle_relayed_message(msg)
 
     async def _handle_status(self, msg) -> None:
-        """Status updates from other agents — primarily the Critic's
-        weather assessment OR a SessionReview travelling through the
-        chain-of-command pipeline."""
+        """Status updates from other agents:
+
+          kind=weather_assessment   → fold into the GO/CAUTION/NO-GO verdict
+          kind=critical_advisories  → evaluate hard-stop conditions
+          (everything else)         → debug-log + ignore (advisories show up
+                                       on the dashboard via shared state, not
+                                       through the Operator's queue anymore)
+        """
         payload = msg.payload or {}
-        phase = payload.get("phase")
-        if phase == "critic_review" and payload.get("review"):
-            await self._route_to_oracle(payload["review"])
-            return
-        if phase == "oracle_review" and payload.get("review"):
-            await self._decide_session(payload["review"])
-            return
         kind = payload.get("kind")
         if kind == "weather_assessment":
             await self._update_verdict_from_weather(payload)
             return
-        self.log.debug("Operator ignoring status kind=%s phase=%s", kind, phase)
-
-    async def _route_to_oracle(self, review_dict: dict) -> None:
-        """Phase 3 of pipeline: Operator hands the reviewed plan to Oracle
-        for revisit / extended-integration analysis."""
-        from atlas.agents.session_workflow import (
-            SessionReview, PHASE_ORACLE_QUERY,
-        )
-        if get_state().is_manual():
-            self.log.info("Manual control engaged — pipeline paused (skipping Oracle hand-off).")
-            self.set_task("manual control engaged — pipeline paused (Oracle hand-off skipped)",
-                          state="waiting")
-            self.log_decision("pipeline_paused_manual",
-                                inputs={"phase": "route_to_oracle"},
-                                rationale="Manual override engaged; not dispatching to Oracle")
+        if kind == "critical_advisories" and payload.get("advisories"):
+            await self._evaluate_hard_stop(payload)
             return
-        review = SessionReview.from_jsonable(review_dict)
-        n_warn = sum(1 for w in review.critic_warnings if w.severity != "ok")
-        self.set_task(
-            f"routing plan {review.review_id} to Oracle ({n_warn} warning(s) from Critic)",
-            state="working")
-        review.advance(PHASE_ORACLE_QUERY, "operator",
-                        note="forwarded critic review to Oracle for revisit check")
-        get_state().set_session_review(review.to_jsonable())
-        await self.send(
-            AgentName.ORACLE, AgentMessageKind.STATUS,
-            payload={
-                "summary": (f"Plan {review.review_id} reviewed by Critic "
-                              f"({n_warn} warning(s)). Please check for "
-                              "revisits or targets needing extended integration."),
-                "phase": PHASE_ORACLE_QUERY,
-                "review": review.to_jsonable(),
-                "from_chat": False,
-            },
-        )
+        self.log.debug("Operator ignoring status kind=%s", kind)
 
-    async def _decide_session(self, review_dict: dict) -> None:
-        """Phase 5 of pipeline: Operator weighs the Critic warnings + Oracle
-        suggestions and makes a final decision (proceed / re-plan / cancel),
-        then hands back to the Planner to either finalise or rebuild."""
-        from atlas.agents.session_workflow import (
-            SessionReview, PHASE_OPERATOR_DECN,
-        )
+    async def _evaluate_hard_stop(self, payload: dict) -> None:
+        """Decide whether incoming critical advisories warrant a
+        hard-stop (autonomous session cancel).
+
+        Hard-stops are reserved for things that could damage equipment
+        or guarantee a wasted night:
+
+          * precipitation > 0 in current weather  (storm)
+          * wind > critical threshold             (mount/scope risk)
+          * sustained 100% cloud across the whole dark window
+            (no point opening the roof)
+          * any hardware kind=critical advisory   (mount/camera fault)
+
+        Operator-warning advisories (high humidity, moon proximity,
+        dew margin tight) are NOT hard-stops — the operator decides
+        whether to act on them via the dashboard banner.
+        """
         if get_state().is_manual():
-            self.log.info("Manual control engaged — pipeline paused (no session decision dispatched).")
-            self.set_task("manual control engaged — pipeline paused (decision held)",
-                          state="waiting")
-            self.log_decision("pipeline_paused_manual",
-                                inputs={"phase": "decide_session"},
-                                rationale="Manual override engaged; decision not dispatched to Planner")
+            self.log.info("Manual control engaged — skipping autonomous hard-stop evaluation.")
+            self.log_decision("hard_stop_paused_manual",
+                                rationale="Operator is driving; not auto-cancelling.")
             return
-        review = SessionReview.from_jsonable(review_dict)
 
-        critical = [w for w in review.critic_warnings if w.severity == "critical"]
-        warnings = [w for w in review.critic_warnings if w.severity == "warning"]
-        constraints: list[str] = []
+        advisories = payload.get("advisories") or []
+        # Hard-stop triggers:
+        hardware_fault = any(a.get("kind") == "hardware" for a in advisories)
+        weather_storm = False
+        # Look at current weather snapshot — precipitation > 0 is a storm.
+        a = get_state().get_assessment()
+        if a is not None:
+            raw = a.raw_current or {}
+            precip = raw.get("precip_in") or 0.0
+            wind_mph = raw.get("wind_speed_mph") or 0.0
+            # Wind hard-stop threshold (mph): a step above the user-set
+            # "critical" wind. We're not second-guessing the threshold
+            # the operator chose in Setup; we're saying "if wind is
+            # already at critical, that IS a hard-stop."
+            from atlas.safety.thresholds import SafetyThresholds
+            t = SafetyThresholds.from_db()
+            from atlas.units import ms_to_mph
+            crit_mph = ms_to_mph(t.wind_speed_critical_ms)
+            if precip > 0:
+                weather_storm = True
+            if wind_mph >= crit_mph:
+                weather_storm = True   # treat as same class of risk
 
-        if any(w.kind == "hardware" for w in critical):
-            decision = "cancel"
-            reason = ("Hardware critical — "
-                       + "; ".join(w.message for w in critical if w.kind == "hardware"))
-        elif any(w.kind == "weather" and w.severity == "critical" for w in critical):
-            decision = "cancel"
-            reason = ("Weather critical — "
-                       + "; ".join(w.message for w in critical if w.kind == "weather"))
-        elif any(w.kind == "moon" and w.severity == "critical" for w in critical):
-            decision = "replan"
-            constraints.append("avoid_moon")
-            reason = ("Moon critically impacts plan — re-plan avoiding "
-                       "targets within 40° of the moon.")
-        elif warnings:
-            # warnings only → proceed but record constraints to inform next rebuild
-            decision = "proceed"
-            for w in warnings:
-                if w.suggested_constraint and w.suggested_constraint not in constraints:
-                    constraints.append(w.suggested_constraint)
-            reason = (f"Proceeding with {len(warnings)} warning(s); "
-                       f"constraints noted: {', '.join(constraints) or 'none'}")
-        else:
-            decision = "proceed"
-            reason = "All gates clear; proceed with plan as-is."
+        if not (hardware_fault or weather_storm):
+            self.log.info("Critical advisories filed but no hard-stop "
+                            "conditions met — leaving plan READY.")
+            self.log_decision("hard_stop_evaluated",
+                                inputs={"advisories": advisories},
+                                outputs={"hard_stop": False},
+                                rationale="No storm / damage-risk indicators")
+            return
 
-        review.operator_decision = decision
-        review.operator_constraints = constraints
-        review.operator_reason = reason
-        review.advance(PHASE_OPERATOR_DECN, "operator",
-                        note=f"decision={decision}; {reason[:80]}")
-        get_state().set_session_review(review.to_jsonable())
-        self.set_task(f"decision: {decision.upper()} — {reason[:60]}",
-                      state="waiting")
-        self.log_decision("session_decision",
-                            inputs={"review_id": review.review_id,
-                                      "critical_count": len(critical),
-                                      "warning_count": len(warnings),
-                                      "oracle_suggestions_count": len(review.oracle_suggestions)},
-                            outputs={"decision": decision,
-                                      "constraints": constraints,
+        # Hard-stop fires. Flip the live plan into HARD_STOP, broadcast,
+        # and log.
+        from atlas.agents.session_workflow import SessionPlanState
+        live = get_state().get_session_review()
+        reasons = []
+        if hardware_fault:
+            reasons.append("hardware critical")
+        if weather_storm:
+            reasons.append("storm / extreme wind")
+        reason = " + ".join(reasons)
+        if live is not None:
+            try:
+                plan = SessionPlanState.from_jsonable(live)
+                plan.hard_stop(reason, source="operator")
+                get_state().set_session_review(plan.to_jsonable())
+            except Exception:
+                self.log.exception("Failed to mark plan hard-stopped")
+        self.log.warning("HARD STOP: %s", reason)
+        self.set_task(f"HARD STOP: {reason}", state="safe-mode")
+        self.log_decision("session_hard_stop",
+                            inputs={"advisories": advisories,
                                       "reason": reason},
                             rationale=reason)
-        await self.send(
-            AgentName.PLANNER, AgentMessageKind.STATUS,
-            payload={
-                "summary": (f"Decision on plan {review.review_id}: "
-                              f"{decision.upper()} — {reason[:80]}"),
-                "phase": PHASE_OPERATOR_DECN,
-                "review": review.to_jsonable(),
-                "from_chat": False,
-            },
-        )
+        await self.bus.broadcast_event({
+            "type": "hard_stop",
+            "sender": "operator",
+            "reason": reason,
+            "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        })
 
     async def _update_verdict_from_weather(self, payload: dict) -> None:
         sev = payload.get("overall_severity", "ok")

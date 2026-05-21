@@ -383,26 +383,19 @@ function gateIcon(status) {
   }
 }
 
-// Session Workflow pipeline — renders the deterministic Planner → Critic →
-// Operator → Oracle → Operator → Planner chain of command, showing the
-// current phase as "active", earlier phases as "done", later as "pending".
-const WORKFLOW_STAGES = [
-  { phase: "plan_built",        agent: "Planner",  label: "Build plan" },
-  { phase: "critic_review",     agent: "Critic",   label: "Critic review\n(weather + moon + hardware)" },
-  { phase: "oracle_query",      agent: "Operator", label: "Route to Oracle" },
-  { phase: "oracle_review",     agent: "Oracle",   label: "Revisit check" },
-  { phase: "operator_decision", agent: "Operator", label: "Decide" },
-  { phase: "session_finalized", agent: "Planner",  label: "Finalise / re-plan" },
-];
-
+// Session Plan + Advisories. The previous design rendered a 6-stage
+// gated pipeline (Planner → Critic → Operator → Oracle → Operator →
+// Planner). That was overengineered — the plan is now READY the
+// moment the Planner builds it. Critic + Oracle file advisories
+// asynchronously which we render inline.
 function renderWorkflow(review) {
   const stages = document.getElementById("workflow-stages");
   const idEl = document.getElementById("workflow-review-id");
   const body = document.getElementById("workflow-detail-body");
   if (!stages) return;
 
-  if (!review || !review.phase) {
-    stages.innerHTML = `<div class="empty">No session review yet — Planner triggers one on every rebuild.</div>`;
+  if (!review || !review.state) {
+    stages.innerHTML = `<div class="empty">No plan yet — Planner builds one on startup and every 30 min.</div>`;
     if (idEl) idEl.textContent = "";
     if (body) body.innerHTML = "";
     return;
@@ -413,65 +406,57 @@ function renderWorkflow(review) {
     idEl.textContent = `id ${review.review_id} · started ${startedClock}`;
   }
 
-  // Map historical phases to indices for "done" detection
-  const seen = new Set((review.phase_history || []).map(h => h.phase));
-  const currentIdx = WORKFLOW_STAGES.findIndex(s => s.phase === review.phase);
-  const terminal = ["session_finalized", "session_cancelled", "session_replan"]
-                      .includes(review.phase);
+  const counts = review.advisory_counts || { info: 0, warning: 0, critical: 0 };
+  const stateBadge = ({
+    ready:      `<span class="plan-state ok">PLAN READY</span>`,
+    building:   `<span class="plan-state warn">building…</span>`,
+    hard_stop:  `<span class="plan-state crit">HARD STOP</span>`,
+    replanned:  `<span class="plan-state">replanned</span>`,
+  })[review.state] || `<span class="plan-state">${esc(review.state)}</span>`;
 
-  stages.innerHTML = WORKFLOW_STAGES.map((s, i) => {
-    let cls = "stage";
-    if (terminal && s.phase === "session_finalized") {
-      // Terminal stage — map any of the three terminal phases to this slot
-      cls += " " + (review.phase === "session_finalized" ? "done"
-                    : review.phase === "session_cancelled" ? "cancelled"
-                    : "replan");
-    } else if (i < currentIdx) cls += " done";
-    else if (i === currentIdx) cls += " active";
-    else cls += " pending";
-    const h = (review.phase_history || []).find(x => x.phase === s.phase);
-    const ts = h ? fmtClock(h.at) : "";
-    return `<div class="${cls}">
-      <div class="stage-dot"></div>
-      <div class="stage-label"><span class="stage-agent">${s.agent}</span>${s.label.replace(/\n/g, "<br>")}</div>
-      <div class="stage-ts">${ts}</div>
-    </div>`;
-  }).join('<div class="stage-arrow">→</div>');
+  const reasonLine = (review.state === "hard_stop" && review.hard_stop_reason)
+    ? `<div class="hard-stop-reason">Hard stop: ${esc(review.hard_stop_reason)}</div>`
+    : "";
 
-  // Detail body — warnings, suggestions, decision
-  if (body) {
-    const warns = review.critic_warnings || [];
-    const sugs = review.oracle_suggestions || [];
-    const dec = review.operator_decision;
-    const constraints = review.operator_constraints || [];
-    const reason = review.operator_reason || "";
-    body.innerHTML = `
-      <div class="workflow-detail-section">
-        <h4>Critic warnings (${warns.length})</h4>
-        ${warns.length === 0 ? '<div class="empty">none yet</div>' :
-          warns.map(w => `<div class="warn-item warn-${w.severity}">
-            <span class="warn-kind">${esc(w.kind)}</span>
-            <span class="warn-sev">[${esc(w.severity)}]</span>
-            ${esc(w.message)}
-          </div>`).join("")}
+  // Compact summary strip — one line of state + advisory counts. No
+  // multi-stage pipeline UI; the plan is either ready, hard-stopped,
+  // or being rebuilt. Advisories show beneath as a list.
+  stages.innerHTML = `
+    <div class="plan-summary">
+      ${stateBadge}
+      <div class="adv-counts">
+        ${counts.critical ? `<span class="pill crit">${counts.critical} critical</span>` : ""}
+        ${counts.warning  ? `<span class="pill warn">${counts.warning} warning</span>` : ""}
+        ${counts.info     ? `<span class="pill">${counts.info} info</span>` : ""}
+        ${(!counts.critical && !counts.warning && !counts.info)
+            ? `<span class="muted">no advisories</span>` : ""}
       </div>
-      <div class="workflow-detail-section">
-        <h4>Oracle suggestions (${sugs.length})</h4>
-        ${sugs.length === 0 ? '<div class="empty">none yet</div>' :
-          sugs.map(s => `<div class="sug-item">
-            <strong>${esc(s.target_name)}</strong>
-            <span class="sug-bump">+${s.priority_bump}</span>
-            ${esc(s.reason)}
-          </div>`).join("")}
-      </div>
-      <div class="workflow-detail-section">
-        <h4>Operator decision</h4>
-        ${dec ? `<div class="decision decision-${dec}">
-          <strong>${dec.toUpperCase()}</strong>
-          ${constraints.length ? `<div class="constraints">constraints: ${constraints.map(esc).join(", ")}</div>` : ""}
-          <div class="reason">${esc(reason)}</div>
-        </div>` : '<div class="empty">pending</div>'}
-      </div>
-    `;
+    </div>
+    ${reasonLine}
+  `;
+
+  if (!body) return;
+  const advisories = review.advisories || [];
+  if (advisories.length === 0) {
+    body.innerHTML = `<div class="empty">no advisories filed against this plan</div>`;
+    return;
   }
+  // Group by source so the operator sees "Critic said:" / "Oracle said:"
+  const bySource = {};
+  for (const a of advisories) {
+    (bySource[a.source] = bySource[a.source] || []).push(a);
+  }
+  body.innerHTML = Object.entries(bySource).map(([source, items]) => `
+    <div class="advisory-group">
+      <h4>${esc(source)} <span class="muted">(${items.length})</span></h4>
+      ${items.map(a => `
+        <div class="advisory advisory-${a.severity}">
+          <span class="adv-kind">${esc(a.kind)}</span>
+          <span class="adv-sev">[${esc(a.severity)}]</span>
+          ${esc(a.message)}
+          ${a.target_name ? `<span class="muted">— ${esc(a.target_name)}</span>` : ""}
+        </div>
+      `).join("")}
+    </div>
+  `).join("");
 }

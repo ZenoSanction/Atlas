@@ -98,13 +98,7 @@ class Planner(BaseAgent):
                 except (asyncio.CancelledError, RuntimeError):
                     break
 
-                if (msg.kind == AgentMessageKind.STATUS
-                    and (msg.payload or {}).get("phase") == "operator_decision"
-                    and (msg.payload or {}).get("review")):
-                    # Final phase of the session pipeline — Operator's
-                    # verdict comes back. Finalise, re-plan, or cancel.
-                    await self._handle_session_decision(msg.payload["review"])
-                elif msg.kind == AgentMessageKind.REVISION_REQUEST:
+                if msg.kind == AgentMessageKind.REVISION_REQUEST:
                     await self._handle_revision(msg)
                 elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
                     # Oracle (or another agent) proposes a target. Log + rebuild.
@@ -166,87 +160,13 @@ class Planner(BaseAgent):
                             rationale="Rebuilt plan on revision request",
                             session_id=msg.session_id)
 
-    async def _handle_session_decision(self, review_dict: dict) -> None:
-        """Final phase of the session pipeline. Operator has decided:
-          proceed → mark plan finalised, broadcast
-          replan  → rebuild plan with the noted constraints
-          cancel  → mark cancelled, broadcast
-        """
-        from atlas.agents.session_workflow import (
-            SessionReview, PHASE_FINALISED, PHASE_CANCELLED, PHASE_REPLAN,
-        )
-        review = SessionReview.from_jsonable(review_dict)
-        decision = review.operator_decision or "proceed"
-        reason = review.operator_reason or ""
-        constraints = review.operator_constraints or []
-
-        self.set_task(f"received decision: {decision.upper()} — {reason[:60]}",
-                      state="working")
-
-        if decision == "proceed":
-            review.advance(PHASE_FINALISED, "planner",
-                            note="plan finalised; ready to execute")
-            get_state().set_session_review(review.to_jsonable())
-            self.log_decision("session_finalised",
-                                inputs={"review_id": review.review_id,
-                                          "constraints_noted": constraints},
-                                outputs={"phase": "finalised"},
-                                rationale=reason or "All checks passed")
-            await self.bus.broadcast_event({
-                "type": "session_finalised",
-                "sender": "planner",
-                "kind": "finalised",
-                "review_id": review.review_id,
-                "constraints": constraints,
-                "sent_at": review.final_at,
-            })
-            # Session pipeline complete — match the other agents' "idle"
-            # post-work state. Periodic rebuild in 30 min will move us back
-            # through working → workflow → idle again.
-            self.set_task(
-                f"session {review.review_id} finalised — next rebuild in 30 min",
-                state="idle")
-        elif decision == "cancel":
-            review.advance(PHASE_CANCELLED, "planner",
-                            note="session cancelled by Operator decision")
-            get_state().set_session_review(review.to_jsonable())
-            self.log_decision("session_cancelled",
-                                inputs={"review_id": review.review_id,
-                                          "reason": reason},
-                                outputs={"phase": "cancelled"},
-                                rationale=reason)
-            await self.bus.broadcast_event({
-                "type": "session_cancelled",
-                "sender": "planner",
-                "kind": "cancelled",
-                "review_id": review.review_id,
-                "reason": reason,
-                "sent_at": review.final_at,
-            })
-            self.set_task(f"session {review.review_id} CANCELLED — {reason[:60]}",
-                          state="idle")
-        elif decision == "replan":
-            review.advance(PHASE_REPLAN, "planner",
-                            note=f"re-planning with constraints: {','.join(constraints)}")
-            get_state().set_session_review(review.to_jsonable())
-            self.log_decision("session_replan",
-                                inputs={"review_id": review.review_id,
-                                          "constraints": constraints},
-                                outputs={"phase": "replan"},
-                                rationale=reason)
-            # Store constraints so _rebuild_plan can use them. If the rebuild
-            # ends up producing zero targets (e.g., avoid_moon dropped them
-            # all), _rebuild_plan will cancel via _cancel_session itself.
-            # That terminal cancellation will overwrite this 'replan' phase
-            # in the live review.
-            self._active_constraints = list(constraints)
-            try:
-                await self._rebuild_plan(reason=f"replan:{','.join(constraints) or 'operator'}")
-            finally:
-                self._active_constraints = []
-        else:
-            self.log.warning("Unknown decision %r on session %s",
-                              decision, review.review_id)
+    # _handle_session_decision was removed in the 2026-05-21 refactor.
+    # The plan is now published READY directly from _rebuild_plan; the
+    # Operator only intervenes for hard-stops (storm / equipment risk),
+    # at which point it flips the live plan's state to HARD_STOP
+    # directly via shared state. There's nothing for the Planner to
+    # finalise after the fact — the plan was already final when it was
+    # built.
 
     async def _cancel_session(self, *, reason: str,
                                 from_review: dict | None = None) -> None:
@@ -618,7 +538,7 @@ class Planner(BaseAgent):
             "considered": len(full_unshaped),
             "active_campaigns": len(campaigns),
             "fallback_to_catalog": plan["fallback_to_catalog"],
-            "scheduled_total_min": round(scheduled_total_min, 1),
+            "scheduled_total_min": round(sched_total_min, 1),
             "dark_window_min": (round(window_min, 1) if window_min else None),
             "overruns_dark_window": bool(overrun),
             "reason": reason,
@@ -659,41 +579,55 @@ class Planner(BaseAgent):
             await self._cancel_session(reason=empty_reason)
             return
 
-        # Kick off the session-planning workflow:
-        # Planner → Critic with phase=plan_built and the full plan blob.
-        # Critic will weather/moon/hardware-review it and forward to the
-        # Operator. The Operator routes through Oracle for revisit checks,
-        # then decides; the decision comes back to Planner which either
-        # finalises or re-plans with constraints.
+        # Plan is READY the moment it's built. No multi-stage gated
+        # approval pipeline — the operator wants the plan immediately,
+        # with checks running asynchronously as advisories.
         try:
             from atlas.agents.session_workflow import (
-                SessionReview, new_review_id, PHASE_PLAN_BUILT,
+                SessionPlanState, new_review_id, STATE_READY,
             )
-            top_names = [t["target_name"] for t in full[:5]]
-            review = SessionReview(
+            top_names = [t["target_name"] for t in scheduled[:5]]
+            review = SessionPlanState(
                 review_id=new_review_id(),
                 plan=plan,
                 started_at=plan["built_at"],
-                phase=PHASE_PLAN_BUILT,
+                state=STATE_READY,
             )
-            review.advance(PHASE_PLAN_BUILT, "planner",
-                            note=f"plan rebuilt ({reason}); {len(full)} target(s)")
-            # Persist as the live session review so the dashboard pipeline
-            # panel shows the workflow starting.
+            # Publish READY immediately so the dashboard's Plan tab can
+            # render. Critic + Oracle will append advisories afterward.
             get_state().set_session_review(review.to_jsonable())
+            # Fire-and-forget advisory requests in parallel. Critic
+            # checks weather + moon + hardware; Oracle checks for
+            # revisit candidates + extended-integration suggestions.
+            # Each agent appends its findings to the plan's advisories
+            # via its own handler — the Planner doesn't wait.
             await self.send(
                 AgentName.CRITIC, AgentMessageKind.STATUS,
                 payload={
-                    "summary": (f"Plan rebuilt ({reason}) — {len(full)} target(s). "
-                                  f"Top: {', '.join(top_names) if top_names else '(none visible)'}. "
-                                  "Please review weather + moon + hardware."),
-                    "phase": PHASE_PLAN_BUILT,
+                    "summary": (f"Plan rebuilt ({reason}) — {len(scheduled)} "
+                                  f"target(s). Top: "
+                                  f"{', '.join(top_names) if top_names else '(none)'}. "
+                                  "Advisory review please."),
+                    "kind": "plan_advisory_request",
+                    "review_id": review.review_id,
+                    "review": review.to_jsonable(),
+                    "from_chat": False,
+                },
+            )
+            await self.send(
+                AgentName.ORACLE, AgentMessageKind.STATUS,
+                payload={
+                    "summary": (f"Plan rebuilt ({reason}). "
+                                  "Advisory check for revisit + extended-integration "
+                                  "candidates."),
+                    "kind": "plan_advisory_request",
+                    "review_id": review.review_id,
                     "review": review.to_jsonable(),
                     "from_chat": False,
                 },
             )
         except Exception:
-            self.log.exception("Failed to relay plan to Critic")
+            self.log.exception("Failed to request advisory reviews")
 
     async def safe_mode_step(self) -> None:
         # Planner doesn't talk to Claude in this phase, so safe mode is a no-op.

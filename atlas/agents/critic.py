@@ -269,20 +269,19 @@ class Critic(BaseAgent):
                 self.log.exception("Critic relay handler failed")
 
     async def _handle_relay(self, msg) -> None:
-        """Inbound relay handler. Always surfaces the message to the
-        dashboard first, then dispatches by phase / kind:
+        """Inbound relay handler. Surfaces the message + dispatches:
 
-          phase=plan_built     → full session review (weather + moon +
-                                  hardware) → forward to Operator
-          kind=revision_request → on-demand standard loop
-          kind=status (no phase) → on-demand standard loop
+          kind=plan_advisory_request  → file weather/moon/hardware
+                                         advisories against the plan
+          kind=revision_request       → on-demand weather refresh
+          kind=status (no kind tag)   → on-demand weather refresh
         """
         await self.handle_relayed_message(msg)
         payload = msg.payload or {}
-        phase = payload.get("phase")
 
-        if phase == "plan_built" and payload.get("review"):
-            await self._review_session_plan(payload["review"])
+        if (payload.get("kind") == "plan_advisory_request"
+              and payload.get("review")):
+            await self._file_plan_advisories(payload["review"])
             return
 
         kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
@@ -293,62 +292,68 @@ class Critic(BaseAgent):
                 self.log.exception("On-demand standard loop failed")
             self._last_standard = asyncio.get_event_loop().time()
 
-    async def _review_session_plan(self, review_dict: dict) -> None:
-        """Step 2 of the session pipeline: review the plan for weather,
-        moon position vs. each visible target, and hardware readiness.
-        Append warnings to the SessionReview, advance to phase=critic_review,
-        and forward to the Operator."""
+    async def _file_plan_advisories(self, review_dict: dict) -> None:
+        """File weather + moon + hardware advisories against a plan.
+
+        Pure advisory: this method *appends* notes to the plan and
+        notifies the Operator of any criticals so the Operator can
+        evaluate hard-stop conditions (storm, equipment damage). It
+        does NOT gate the plan — the plan was already published
+        READY by the Planner. Operator decides whether to actually
+        cancel; everything else is informational.
+        """
         from atlas.agents.session_workflow import (
-            SessionReview, SessionWarning, PHASE_CRITIC_REVIEW,
+            SessionPlanState, Advisory,
         )
         from atlas.astronomy import (
             angular_separation, compute_alt_az, moon_position,
         )
         from datetime import datetime as _dt
 
-        review = SessionReview.from_jsonable(review_dict)
-        self.set_task(f"reviewing plan {review.review_id}: weather + moon + hardware",
-                      state="working")
+        review = SessionPlanState.from_jsonable(review_dict)
+        self.set_task(
+            f"filing advisories for plan {review.review_id}",
+            state="working",
+        )
 
-        # Make sure our weather assessment is fresh
-        try:
-            await self._standard_loop()
-        except Exception:
-            self.log.exception("Standard loop on review failed")
-        self._last_standard = asyncio.get_event_loop().time()
+        now_iso = _dt.utcnow().isoformat(timespec="seconds") + "Z"
+        criticals: list[Advisory] = []
 
-        # 1. Weather → pull from shared state (just-refreshed)
+        # 1. Weather — read from shared state (Critic's standard_loop
+        #    already keeps this fresh from WeatherCache).
         a = get_state().get_assessment()
         if a is not None:
             for c in a.checks:
                 if c.severity in ("warning", "critical"):
-                    review.critic_warnings.append(SessionWarning(
-                        kind="weather",
-                        severity=c.severity,
+                    adv = Advisory(
+                        kind="weather", severity=c.severity,
                         message=f"{c.metric.replace('_',' ')}: {c.note}",
+                        source="critic", at=now_iso,
                         suggested_constraint=("avoid_low_alt"
                                                 if c.metric == "dew_margin"
                                                 else None),
-                    ))
+                    )
+                    review.add_advisory(adv)
+                    if c.severity == "critical":
+                        criticals.append(adv)
 
         # 2. Moon — illumination + per-target separation
         site = ConfigManager.get_site()
         if site is not None:
-            now = _dt.utcnow()
             try:
-                moon_ra, moon_dec, illum = moon_position(now)
+                moon_ra, moon_dec, illum = moon_position(_dt.utcnow())
                 moon_alt, _ = compute_alt_az(moon_ra, moon_dec,
                                                float(site.latitude),
-                                               float(site.longitude), now)
+                                               float(site.longitude),
+                                               _dt.utcnow())
             except Exception as e:
                 self.log.warning("Moon position failed: %s", e)
                 moon_ra = moon_dec = illum = moon_alt = None
 
             if illum is not None and moon_alt is not None:
-                # Only flag moon impact when moon is up AND bright (>30% illum)
                 if moon_alt > 0 and illum > 0.30:
                     targets = review.plan.get("visible_targets") or []
-                    close_targets = []
+                    close = []
                     for t in targets:
                         if t.get("ra_deg") is None or t.get("dec_deg") is None:
                             continue
@@ -356,38 +361,25 @@ class Critic(BaseAgent):
                             float(t["ra_deg"]), float(t["dec_deg"]),
                             moon_ra, moon_dec,
                         )
-                        if sep < 40.0:   # within 40° of bright moon
-                            close_targets.append((t["target_name"], sep))
-                    if close_targets:
-                        names = ", ".join(f"{n} ({s:.0f}°)" for n, s in close_targets[:5])
-                        sev = "warning" if illum < 0.7 else "critical"
-                        review.critic_warnings.append(SessionWarning(
-                            kind="moon",
-                            severity=sev,
-                            message=(f"Moon {illum*100:.0f}% illuminated, alt {moon_alt:.0f}°. "
-                                       f"{len(close_targets)} target(s) within 40°: {names}"),
+                        if sep < 40.0:
+                            close.append((t["target_name"], sep))
+                    if close:
+                        names = ", ".join(f"{n} ({s:.0f}°)" for n, s in close[:5])
+                        # Moon proximity is always advisory — never a
+                        # hard-stop. Severity reflects how disruptive
+                        # it is for imaging, not equipment safety.
+                        sev = "warning" if illum < 0.7 else "warning"
+                        review.add_advisory(Advisory(
+                            kind="moon", severity=sev,
+                            message=(f"Moon {illum*100:.0f}% illum, "
+                                       f"alt {moon_alt:.0f}°. "
+                                       f"{len(close)} target(s) within 40°: {names}"),
+                            source="critic", at=now_iso,
                             suggested_constraint="avoid_moon",
                         ))
-                    else:
-                        review.critic_warnings.append(SessionWarning(
-                            kind="moon",
-                            severity="ok",
-                            message=(f"Moon {illum*100:.0f}% illum, alt {moon_alt:.0f}° — "
-                                       "no plan targets within 40°."),
-                        ))
-                else:
-                    if moon_alt <= 0:
-                        note = "below horizon"
-                    elif illum <= 0.30:
-                        note = "too faint to interfere"
-                    else:
-                        note = "no impact"
-                    review.critic_warnings.append(SessionWarning(
-                        kind="moon",
-                        severity="ok",
-                        message=(f"Moon {illum*100:.0f}% illum, alt {moon_alt:.0f}° — "
-                                  f"{note}."),
-                    ))
+                    # If moon is up + bright but no close targets, that's
+                    # a non-event; we skip the noisy "no impact" advisory
+                    # the old pipeline emitted.
 
         # 3. Hardware — reuse the cached snapshot from routes
         try:
@@ -397,38 +389,45 @@ class Critic(BaseAgent):
                         if not v.get("connected") and v.get("status") != "n/a"
                         and k != "guiding"]
             if offline:
-                review.critic_warnings.append(SessionWarning(
-                    kind="hardware",
-                    severity="critical",
+                adv = Advisory(
+                    kind="hardware", severity="critical",
                     message=f"Disconnected: {', '.join(offline)}",
-                ))
+                    source="critic", at=now_iso,
+                )
+                review.add_advisory(adv)
+                criticals.append(adv)
         except Exception:
             pass
 
-        # Advance phase and forward to Operator
-        sev_counts = {"ok": 0, "warning": 0, "critical": 0}
-        for w in review.critic_warnings:
-            sev_counts[w.severity] = sev_counts.get(w.severity, 0) + 1
-        review.advance(PHASE_CRITIC_REVIEW, "critic",
-                        note=(f"{sev_counts['critical']} critical, "
-                                f"{sev_counts['warning']} warning, "
-                                f"{sev_counts['ok']} ok"))
+        # Persist the augmented plan so the dashboard renders advisories
         get_state().set_session_review(review.to_jsonable())
 
-        await self.send(
-            AgentName.OPERATOR, AgentMessageKind.STATUS,
-            payload={
-                "summary": (f"Reviewed plan {review.review_id}: "
-                              f"{sev_counts['critical']} critical, "
-                              f"{sev_counts['warning']} warning, "
-                              f"{sev_counts['ok']} ok"),
-                "phase": PHASE_CRITIC_REVIEW,
-                "review": review.to_jsonable(),
-                "from_chat": False,
-            },
+        # Notify the Operator ONLY for critical advisories — those are
+        # the ones that might warrant a hard-stop. Warnings + info just
+        # surface on the dashboard.
+        if criticals:
+            await self.send(
+                AgentName.OPERATOR, AgentMessageKind.STATUS,
+                payload={
+                    "kind": "critical_advisories",
+                    "review_id": review.review_id,
+                    "advisory_count": len(criticals),
+                    "advisories": [{
+                        "kind": a.kind, "severity": a.severity,
+                        "message": a.message, "source": a.source,
+                    } for a in criticals],
+                    "summary": (f"{len(criticals)} critical "
+                                  f"advisor{'ies' if len(criticals) > 1 else 'y'} "
+                                  f"on plan {review.review_id}"),
+                },
+            )
+        counts = review.severity_counts()
+        self.set_task(
+            f"plan {review.review_id} reviewed: "
+            f"{counts['critical']} crit / {counts['warning']} warn / "
+            f"{counts['info']} info",
+            state="idle",
         )
-        self.set_task(f"plan {review.review_id} forwarded to Operator",
-                      state="idle")
 
     def _publish_next_ticks(self, now_monotonic: float) -> None:
         """Compute when the next fast + standard loops will fire (in wall
