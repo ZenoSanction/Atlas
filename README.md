@@ -8,7 +8,8 @@
 
 **MPC · AAVSO · NASA Exoplanet Watch · TNS**
 
-[![Phase](https://img.shields.io/badge/Phase%201-foundation%20complete-1F6FEB)](#status)
+[![Phase](https://img.shields.io/badge/Phase%202-software%20complete-4ADE80)](#status--phase-roadmap)
+[![Next](https://img.shields.io/badge/Phase%203-bench%20hardware-FBBF24)](#phase-roadmap)
 [![Python](https://img.shields.io/badge/python-3.11%2B-1F6FEB)](#)
 [![License](https://img.shields.io/badge/license-MIT-1F6FEB)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B-1F6FEB)](#)
@@ -420,26 +421,113 @@ C:\ATLAS\
 
 ---
 
-## Status
+## Status — Phase 2 complete
+<a id="phase-roadmap"></a>
 
-**Phase 1 — foundation complete and smoke-tested.**
+ATLAS is built in five phases. Each ends with a real-world milestone, not
+just a code commit. The current state:
 
-The server runs end-to-end, all five agents come online, every API endpoint responds,
-encryption round-trips, static dashboard assets serve, WebSocket event stream works,
-DB initialises with the full 20-table schema.
+| Phase | What it delivers | Status |
+|---|---|---|
+| **1 — Foundation** | Agent runtime, message bus, dashboard skeleton, DB schema, vault, weather, simulation mode. | ✅ done (tag [`pre-rebuild-v0.9`](https://github.com/ZenoSanction/Atlas/releases/tag/pre-rebuild-v0.9) preserves what came before the architectural rewrite) |
+| **2 — Software buildout** | Full session-decision pipeline, persistent per-agent memory + voice + chat, capture / ingest / stack / quality grading, ASTAP plate solving, MPC + AAVSO submission formatters, comprehensive pre-flight, dashboard Mission Control. All testable in simulation against `FakeNina` / `FakePhd2`. | ✅ **done — tag [`phase-2-complete`](https://github.com/ZenoSanction/Atlas/releases/tag/phase-2-complete)** |
+| **3 — Bench hardware (no sky)** | Real camera + mount + focuser + filter wheel powered up on a bench, not pointed at sky. ATLAS commands NINA to take real bias + dark frames, watch-folder ingests, master-stacks, and pre-flight reads real hardware state instead of sim. | ⏳ in progress — first bench test weekend of 2026-05-23 |
+| **4 — Outdoor first light** | GPS time sync, polar alignment, autofocus V-curve, first plate solve against real stars, first guided exposure under sky. The agents earn their authority on real photons. | 🔜 after Phase 3 |
+| **5 — Observatory install** | Permanent pier, dome or roll-off, power conditioning, network, automated start-up + safe-shutdown sequences. The system runs unattended through a full clear night. | 🔜 after Phase 4 |
+| **Ongoing** | Real scientific research: nightly campaigns, MPC astrometry submissions, AAVSO variable-star photometry, transient hunting, exoplanet transits. Fine-tuning, calibration library growth, knowledge-thread maturation. | the thing this is built for |
 
-Workflow pipelines (MPC ephemeris lookup, AAVSO photometric measurement, image
-subtraction, etc.) are scaffolded with explicit `# TODO Phase 2:` markers and clear
-contracts. The architecture is final; Phase 2 fills in the science pipelines one at
-a time.
+### Phase 2 — what works right now
 
-Roadmap (in priority order):
+Pulled in by [tag `phase-2-complete`](https://github.com/ZenoSanction/Atlas/releases/tag/phase-2-complete):
 
-1. Asteroid / comet astrometry pipeline (priority A)
-2. Variable star + exoplanet photometry pipelines (priority B)
-3. Transient detection pipeline (priority C1)
-4. Planetary lucky-imaging pipeline (priority C2)
-5. Deep-sky stacking pipeline
+**Decision pipeline.** Six-stage deterministic chain of command —
+Planner builds a plan → Critic reviews weather + moon + hardware →
+Operator routes to Oracle for revisit / extended-integration analysis →
+Oracle returns suggestions → Operator decides (proceed / re-plan with
+constraints / cancel) → Planner finalises or rebuilds. Every phase
+visible in the dashboard's Session Workflow panel; every decision
+logged for hindsight audit.
+
+**Operator pre-flight every 2 minutes.** Eight gates aggregated into
+a single GO / WAITING / CAUTION / NO-GO verdict: weather, hardware,
+calibration library, plan availability, disk space, vault state, API
+health, dark-window timing.
+
+**Five Claude agents, each with their own chat + tools + memory.**
+Planner, Critic, Operator, Archivist, Oracle. Each lane in Mission
+Control shows the agent's current task, next-tick countdown, recent
+decisions, sticky inbox/outbox of inter-agent relays, and a chat
+input (text + voice). Memory persists across restarts: pinned facts
+inject into the system prompt; the rest is recall-on-demand.
+
+**Capture pipeline ready for hardware.** FITS header reader,
+single-file + bulk-directory ingest, watch-folder auto-ingest that
+polls NINA's image folder every 10 minutes, pure-numpy median master
+stacker, FITS quality grading (FWHM-based or blob-count). Session
+lifecycle wired: `start_session` / `stop_session` operator commands
+create/end DB session rows; captured frames during an open session
+get `session_id` tagged.
+
+**Science groundwork.** ASTAP plate-solver wrapper writes WCS back
+to the frames table. MPC 80-column submission formatter built to the
+IAU spec. AAVSO Extended-format builder per AID. Submission engine
+with operator approval gate (QUEUED → APPROVED → SUBMITTED → ACK).
+
+**96-object seasonal catalog.** Messier deep-sky, NGC showpieces,
+variable-star photometry standards, doubles, bright stars for focus
+testing. Per-workflow per-filter exposure plans. Cadence weighting
+so stale campaigns bubble up.
+
+**Astronomy you can trust.** Sun + moon position (Meeus simplified),
+astronomical dusk/dawn binary search, per-target moon-separation
+flagging when the moon is up and >30 % illuminated, alt/az + airmass
+at mid-night for visibility ranking. Open-Meteo weather, nighttime-only
+forecast filter.
+
+**Operationally clean.** Imperial units (°F, mph, in, inHg, ft) +
+Eastern Time (auto EST/EDT). Setup-tab simulation-mode toggle.
+DB-editable weather thresholds. Argon2id-derived AES-256-GCM credential
+vault. `ATLAS_INSTALL_ROOT` env var drives every path so the entire
+install can live on a big data drive (5.5 TB recommended for capture
+growth room).
+
+### Phase 3 — what we're testing this weekend
+
+With real camera + mount + focuser + filter wheel on the bench
+(no telescope pointed at sky):
+
+1. **Real NINA capture orchestration** — Operator command runs a
+   calibration sequence; NINA executes; watch-folder ingest closes
+   the loop; quality grader auto-classifies; stacker builds masters.
+2. **Cooling setpoint management** — set camera temp, wait for stable,
+   capture darks across multiple temp/exposure combos.
+3. **Filter wheel + focuser commands** — automated transitions exercise.
+4. **Mount park / unpark** — commands fire; won't track real targets.
+5. **Critic fast-loop sensor reads** — real PHD2 + NINA telemetry
+   instead of heartbeat stubs.
+
+Tag `phase-3-bench` will land at the end of this milestone.
+
+### Phase 4 — first light
+
+GPS lock, polar alignment, autofocus V-curve against real stars,
+first plate solve, first PHD2 guided exposure. The night the
+observatory takes a first photon and ATLAS knows where it came from.
+
+### Phase 5 — observatory installation
+
+Permanent pier, dome or roll-off roof, environmental hardening, power
+conditioning + UPS-aware standby, network, fully automated start-up
+and safe-shutdown sequences. The system runs an unattended clear
+night dusk-to-dawn.
+
+### Ongoing
+
+Real science. Per-target campaigns building integration over years.
+Knowledge threads transitioning dormant → active → mature with measurable
+criteria. Operator-approved submissions to MPC / AAVSO / TNS / NASA
+Exoplanet Watch carrying the observer's name. Catalog cross-matching.
+Calibration library that earns its place.
 
 ---
 
