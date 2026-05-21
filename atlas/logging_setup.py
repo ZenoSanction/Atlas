@@ -24,6 +24,15 @@ def setup_logging(level: str = "INFO", log_dir: Path | None = None,
     if _CONFIGURED:
         return
 
+    # Reconfigure stdout/stderr to UTF-8 on Windows so non-ASCII characters
+    # in log messages (arrows, units like ≥, emoji, etc.) don't crash the
+    # console StreamHandler under cp1252. Available on Python 3.7+.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)  # let handlers filter
 

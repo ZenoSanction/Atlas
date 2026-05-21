@@ -424,6 +424,15 @@
       </div>
     </div>
 
+    <div class="card" id="tls-card">
+      <h3>HTTPS & Warm-Room Access</h3>
+      <p class="hint">A self-signed TLS certificate so the dashboard's
+        microphone works from warm-room laptops + phones. Chrome only
+        unlocks the mic on secure-context pages; this is how we get there
+        without a public CA.</p>
+      <div id="tls-panel-body" class="tls-panel-body">Loading…</div>
+    </div>
+
     <div class="card" id="vault-card">
       <h3>Master Password</h3>
       <p class="hint">ATLAS encrypts all credentials (API keys, submission tokens) with a key derived from this password.</p>

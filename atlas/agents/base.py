@@ -280,7 +280,7 @@ class BaseAgent(ABC):
         kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
         sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
         summary = (msg.payload or {}).get("summary", "")
-        self.log.info("relay %s ← %s: %s", kind, sender, summary)
+        self.log.info("relay %s <- %s: %s", kind, sender, summary)
         self.set_task(f"📬 {kind} from {sender}: {summary[:60]}", state="working")
         # Persist the relay in this agent's chat history. The lane's
         # chat panel will render it; future think() calls will recall it.

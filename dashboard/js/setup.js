@@ -3,11 +3,121 @@
 export async function initSetup(api) {
   await refreshStatus(api);
   await renderSystemFlags(api);
+  await renderTlsPanel(api);
   await renderVaultForm(api);
   await renderSiteForm(api);
   await renderEquipmentForm(api);
   await renderThresholdsForm(api);
   wireCredentialForms(api);
+}
+
+// HTTPS / self-signed cert panel ---------------------------------------------
+//
+// The warm-room laptop / phone needs HTTPS to access the microphone (Chrome
+// gates getUserMedia on raw http://lan-ip origins). This panel lets the
+// operator:
+//   - see the URL set their device should visit
+//   - read off the cert's SHA-256 fingerprint to verify it matches what
+//     the browser shows on the "this connection is not private" page
+//   - regenerate the cert after the observatory PC's IP changes
+async function renderTlsPanel(api) {
+  const box = document.getElementById("tls-panel-body");
+  if (!box) return;
+  try {
+    const t = await api("/setup/tls");
+    const onHttps = window.location.protocol === "https:";
+    const reachableUrls = (t.local_ips || [])
+      .filter((ip) => ip !== "0.0.0.0")
+      .map((ip) => `https://${ip}:${window.location.port || 5000}`);
+
+    if (!t.cert_present || !t.cert) {
+      box.innerHTML = `
+        <p class="hint">No TLS cert on disk yet. Click <b>Regenerate</b>
+        below, then restart ATLAS with HTTPS enabled
+        (<code>start_atlas.bat</code> does this by default).</p>
+        <button id="tls-regen" class="btn-primary" type="button">Generate cert</button>
+        <span id="tls-status" class="form-status"></span>`;
+    } else {
+      const c = t.cert;
+      const sanList = (c.subject_alt_names || []).join(", ");
+      const expiryClass = c.days_until_expiry < 30 ? "form-status err"
+                          : c.days_until_expiry < 90 ? "form-status warn"
+                          : "form-status ok";
+      const httpsStripe = onHttps
+        ? `<div class="form-status ok">HTTPS active — this page is served securely.</div>`
+        : `<div class="form-status warn">This page loaded over HTTP. The mic
+            won't work from LAN devices until you restart ATLAS with HTTPS
+            enabled (the bundled <code>start_atlas.bat</code> does this).</div>`;
+      box.innerHTML = `
+        ${httpsStripe}
+        <p class="hint">Reach the dashboard from a warm-room device:</p>
+        <ul class="tls-urls">
+          ${reachableUrls.map((u) => `<li><code>${u}</code></li>`).join("")}
+        </ul>
+        <p class="hint">First visit on each device will show
+          "Your connection is not private" — click <b>Advanced → Proceed</b>
+          once. To verify you're trusting the right certificate, compare
+          the SHA-256 fingerprint shown in that warning to:</p>
+        <div class="tls-fp"><code>${c.fingerprint_sha256}</code></div>
+        <dl class="tls-meta">
+          <dt>Covers</dt><dd>${esc(sanList)}</dd>
+          <dt>Valid from</dt><dd>${fmtDate(c.not_before)}</dd>
+          <dt>Valid until</dt>
+          <dd>${fmtDate(c.not_after)}
+              <span class="${expiryClass}">(${c.days_until_expiry} days)</span></dd>
+          <dt>Cert file</dt><dd><code>${esc(c.cert_path)}</code></dd>
+        </dl>
+        <button id="tls-regen" class="btn-secondary" type="button">Regenerate cert</button>
+        <span id="tls-status" class="form-status"></span>
+        <p class="hint" style="margin-top:8px">
+          Regenerate after the observatory PC's IP address changes so the
+          cert's SAN list catches up. New cert takes effect on the next
+          ATLAS restart, and each warm-room device will need to
+          re-Accept the new fingerprint once.</p>`;
+    }
+
+    const btn = document.getElementById("tls-regen");
+    const status = document.getElementById("tls-status");
+    if (btn) {
+      btn.onclick = async () => {
+        if (!confirm("Regenerate the self-signed TLS cert?\n\n" +
+                      "Every device that has accepted the current cert will " +
+                      "see the security warning again on next visit (and " +
+                      "will need to click Advanced → Proceed).\n\n" +
+                      "The new cert takes effect after ATLAS restarts.")) {
+          return;
+        }
+        try {
+          const r = await api("/setup/tls/regenerate", { method: "POST" });
+          status.textContent = "Regenerated. " + r.note;
+          status.className = "form-status ok";
+          await renderTlsPanel(api);
+        } catch (e) {
+          status.textContent = e.message;
+          status.className = "form-status err";
+        }
+      };
+    }
+  } catch (e) {
+    box.innerHTML = `<span class="form-status err">Error: ${e.message}</span>`;
+  }
+}
+
+function fmtDate(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("en-US", {
+      timeZone: "America/New_York", hour12: false,
+      year: "numeric", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit",
+    });
+  } catch { return iso; }
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/&/g, "&amp;")
+                       .replace(/</g, "&lt;")
+                       .replace(/>/g, "&gt;");
 }
 
 async function renderSystemFlags(api) {

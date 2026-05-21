@@ -719,6 +719,38 @@ async def save_system_flags(body: dict) -> dict:
     return {"ok": True, "simulation_mode_effective": is_simulation_mode()}
 
 
+@api_router.get("/setup/tls")
+async def get_tls_info() -> dict:
+    """Return info about the self-signed cert + whether the request that
+    delivered THIS page came in over HTTPS. The Setup-tab panel reads
+    this to tell the operator: 'yes the dashboard is reachable from your
+    warm-room device, here's the fingerprint to verify, here's when it
+    expires.'"""
+    from atlas.tls import load_cert_info, discover_local_ips
+    info = load_cert_info()
+    return {
+        "cert_present": info is not None,
+        "cert": info.to_jsonable() if info else None,
+        "local_ips": discover_local_ips(),
+        "tls_dir": str((__import__("atlas.tls", fromlist=["tls_dir"])).tls_dir()),
+        "hint": ("Restart ATLAS to pick up a regenerated cert. From a "
+                  "warm-room device, visit https://<observatory-ip>:5000, "
+                  "click Advanced → Proceed once, and you're set."),
+    }
+
+
+@api_router.post("/setup/tls/regenerate")
+async def regenerate_tls(body: dict | None = None) -> dict:
+    """Wipe + re-mint the self-signed cert. Operator clicks this in
+    Setup when the observatory PC's IP has changed (e.g. moved to a new
+    network) so the SAN list catches up. New cert takes effect on the
+    next server restart."""
+    from atlas.tls import generate_cert
+    info = generate_cert(force=True)
+    return {"ok": True, "cert": info.to_jsonable(),
+              "note": "Restart ATLAS to start serving the new cert."}
+
+
 @api_router.get("/setup/weather-thresholds")
 async def get_weather_thresholds() -> dict:
     """Return thresholds in imperial display units. Internally stored in SI."""

@@ -989,3 +989,67 @@ footer .muted { color: var(--text-dim); }
 .manual-action .ma-status.fail { color: #f87171; }
 .manual-action.fail { background: rgba(127,29,29,0.10); }
 
+/* ============================================================================
+   TLS / HTTPS setup panel
+   ============================================================================ */
+
+.tls-panel-body { font-size: 13px; }
+.tls-urls {
+  list-style: none;
+  padding-left: 0;
+  margin: 6px 0 10px;
+}
+.tls-urls li {
+  padding: 4px 0;
+  font-family: var(--font-mono, monospace);
+}
+.tls-urls code {
+  background: var(--bg);
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.tls-fp {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--gold);
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 8px 0;
+  word-break: break-all;
+  font-size: 11px;
+}
+.tls-fp code {
+  font-family: var(--font-mono, monospace);
+  color: var(--gold);
+}
+.tls-meta {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 4px 12px;
+  margin: 10px 0;
+  font-size: 12px;
+}
+.tls-meta dt {
+  color: var(--text-dim);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding-top: 2px;
+}
+.tls-meta dd { margin: 0; }
+.tls-meta code {
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.form-status.warn {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border-left: 3px solid #f59e0b;
+  padding: 6px 10px;
+  display: block;
+  margin: 6px 0;
+}
+
