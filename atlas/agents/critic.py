@@ -30,6 +30,10 @@ from atlas.weather.openmeteo import OpenMeteoClient, WeatherSnapshot
 FAST_LOOP_S = 90
 STANDARD_LOOP_S = 300
 FORECAST_HOURS = 12
+# Sun-altitude cutoff for "astronomical night". Reports + per-hour
+# severity entries only cover hours where the sun is below this. -18°
+# matches the IAU definition of astronomical twilight (full darkness).
+ASTRO_DARK_ALT_DEG = -18.0
 
 
 # Severity-rank helper -------------------------------------------------------
@@ -98,10 +102,24 @@ def _check_precip(snap: WeatherSnapshot) -> MetricCheck:
     return MetricCheck("precip", "ok", v_mm, 0.0, "dry")
 
 
-def _hourly_severity(rows: list[dict], t: SafetyThresholds) -> list[dict]:
-    """Light per-hour shading for the dashboard. Imperial display fields."""
+def _hourly_severity(rows: list[dict], t: SafetyThresholds,
+                       lat: float | None = None,
+                       lon: float | None = None) -> list[dict]:
+    """Light per-hour shading for the dashboard. Imperial display fields.
+
+    If ``lat`` and ``lon`` are supplied, hours during the day (sun above
+    ASTRO_DARK_ALT_DEG = -18°) are dropped entirely — the dashboard's
+    forecast table only shows the imaging-usable window."""
+    from atlas.astronomy import sun_altitude
     out = []
     for r in rows:
+        if lat is not None and lon is not None:
+            try:
+                t_iso = datetime.fromisoformat(r["time"])
+                if sun_altitude(lat, lon, t_iso) >= ASTRO_DARK_ALT_DEG:
+                    continue  # daytime hour — not relevant for imaging
+            except Exception:
+                pass
         dm_c = r["temperature_c"] - r["dew_point_c"]
         sev = "ok"
         if dm_c <= t.dew_margin_critical_c or r["cloud_cover_pct"] >= t.cloud_cover_critical_pct \
@@ -471,7 +489,16 @@ class Critic(BaseAgent):
         })
 
     async def _standard_loop(self) -> None:
-        """Standard loop: weather pull + per-metric assessment + push to Operator."""
+        """Standard loop: weather pull + per-metric assessment + push to Operator.
+
+        Behaviour is *darkness-aware*. Outside the astronomical dark window
+        (sun above -18°), we still pull weather so the dashboard's "now"
+        snapshot is current, but we DON'T raise warning-level alerts on
+        wind / cloud / dew margin / humidity — none of that matters when
+        the telescope is parked for the day. Critical-class breaches
+        (precip, extreme wind) still escalate because they're safety
+        issues regardless of session state.
+        """
         self.set_task("standard loop: pulling Open-Meteo current + forecast",
                       state="working")
         site = ConfigManager.get_site()
@@ -481,8 +508,19 @@ class Critic(BaseAgent):
             self.log.debug("standard loop: no site config yet, skipping")
             return
 
-        client = OpenMeteoClient(latitude=float(site.latitude),
-                                  longitude=float(site.longitude))
+        # Are we in the astronomical dark window right now?
+        from atlas.astronomy import sun_altitude, night_window
+        lat = float(site.latitude); lon = float(site.longitude)
+        now = datetime.utcnow()
+        sun_alt = sun_altitude(lat, lon, now)
+        is_dark = sun_alt < ASTRO_DARK_ALT_DEG
+        next_dark_iso: str | None = None
+        if not is_dark:
+            nw = night_window(lat, lon, now, altitude_deg=ASTRO_DARK_ALT_DEG)
+            if nw is not None:
+                next_dark_iso = nw[0].isoformat(timespec="seconds") + "Z"
+
+        client = OpenMeteoClient(latitude=lat, longitude=lon)
         try:
             snap = await client.current()
             forecast_rows = await client.forecast_hours(hours=FORECAST_HOURS)
@@ -506,11 +544,22 @@ class Critic(BaseAgent):
             overall = _max_sev(overall, c.severity)
 
         dm_c = snap.temperature_c - snap.dew_point_c
+        # During daytime, drop the severity to "ok" for the Operator's
+        # verdict (no NO-GO at 2 pm), but keep the per-metric checks so
+        # the dashboard's Critic Assessment card still shows what's
+        # currently breached for context.
+        effective_overall = overall
+        summary_text = _summary_from_checks(checks, overall)
+        if not is_dark and overall != "critical":
+            effective_overall = "ok"
+            summary_text = (f"daytime — sun {sun_alt:.1f}° above "
+                              f"astronomical dark; weather warnings suppressed "
+                              f"until {next_dark_iso or 'dusk'}")
         assessment = WeatherAssessment(
             observed_at=snap.observed_at,
             assessed_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            overall_severity=overall,
-            summary=_summary_from_checks(checks, overall),
+            overall_severity=effective_overall,
+            summary=summary_text,
             checks=checks,
             raw_current={
                 # Imperial (display) — what the dashboard + chat tools use
@@ -536,18 +585,25 @@ class Critic(BaseAgent):
                     "precip_mm": snap.precip_mm,
                 },
             },
-            hourly_severity=_hourly_severity(forecast_rows, t),
+            hourly_severity=_hourly_severity(
+                forecast_rows, t,
+                lat=float(site.latitude), lon=float(site.longitude),
+            ),
         )
 
         # 1) Park in shared state for the HTTP layer
         get_state().set_assessment(assessment)
 
         # 2) Tell the Operator (chain of command: Critic reports, Operator decides)
+        #    Send the *effective* severity so the Operator's verdict path
+        #    doesn't flip to CAUTION/NO-GO during daytime warnings.
         await self.send(
             AgentName.OPERATOR, AgentMessageKind.STATUS,
             payload={"kind": "weather_assessment",
-                      "overall_severity": overall,
+                      "overall_severity": effective_overall,
                       "summary": assessment.summary,
+                      "is_dark": is_dark,
+                      "next_dark_utc": next_dark_iso,
                       "checks": [{"metric": c.metric, "severity": c.severity,
                                     "value": c.value, "threshold": c.threshold,
                                     "note": c.note} for c in checks]},
@@ -559,12 +615,17 @@ class Critic(BaseAgent):
             "type": "assessment",
             "sender": "critic",
             "kind": "weather_assessment",
-            "severity": overall,
+            "severity": effective_overall,
             "summary": assessment.summary,
+            "is_dark": is_dark,
             "sent_at": assessment.assessed_at,
         })
 
-        # 4) Persist alerts for breaches so the Tonight tab Alerts card lights up
+        # 4) Persist alerts for breaches. During daytime (sun above -18°)
+        #    we suppress warning-level alerts — wind/cloud/dew don't
+        #    matter when the telescope is parked. Critical breaches
+        #    (precip / extreme wind) still escalate because those are
+        #    safety issues regardless of imaging state.
         sess = SessionManager.latest()
         session_id = sess.id if sess else None
         for c in checks:
@@ -573,18 +634,29 @@ class Critic(BaseAgent):
                                     c.note, session_id=session_id,
                                     data={"value": c.value,
                                             "threshold": c.threshold})
-            elif c.severity == "warning":
+            elif c.severity == "warning" and is_dark:
                 await self._raise(AlertSeverity.WARNING, f"weather_{c.metric}",
                                     c.note, session_id=session_id,
                                     data={"value": c.value,
                                             "threshold": c.threshold})
             else:
+                # ok severity, OR daytime warning — clear any prior raise.
                 self._clear(f"weather_{c.metric}")
 
-        self.log.info("standard loop: overall=%s (%s)", overall, assessment.summary)
-        self.set_task(
-            f"standard loop done — overall {overall}; next sweep in ~5 min",
-            state="waiting")
+        if is_dark:
+            self.log.info("standard loop: overall=%s (%s)",
+                            overall, assessment.summary)
+            self.set_task(
+                f"standard loop done — overall {overall}; next sweep in ~5 min",
+                state="waiting")
+        else:
+            dark_at = next_dark_iso or "?"
+            self.log.info("standard loop: daytime (sun alt %.1f°) — "
+                            "warnings suppressed, next dark at %s",
+                            sun_alt, dark_at)
+            self.set_task(
+                f"daytime: warnings suppressed; next dark window at {dark_at}",
+                state="waiting")
 
     async def _raise(self, severity: AlertSeverity, code: str, message: str,
                      session_id: int | None = None, data: dict | None = None,

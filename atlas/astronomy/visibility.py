@@ -233,14 +233,18 @@ def night_window(latitude_deg: float, longitude_deg: float,
                   search_hours: int = 36) -> tuple[datetime, datetime] | None:
     """Return (dusk_utc, dawn_utc) for the *next* night at the site.
 
-    altitude_deg:
-        -0.833  civil sunset / sunrise
-        -6      civil twilight
-        -12     nautical twilight (deepest blue, faint stars visible)
-        -18     astronomical twilight (full darkness)
+    altitude_deg (caller chooses the definition of "night"):
+        -0.833  civil sunset / sunrise   (sun just below horizon)
+        -6      civil twilight           (still bright)
+        -12     nautical twilight        (deep blue, faint stars visible)
+        -18     astronomical twilight    (full darkness — IAU spec)
 
-    Default -12° because that's when meaningful imaging becomes possible
-    while remaining inclusive of dusk/dawn shoulders for setup/teardown.
+    Default -12° (nautical) so callers that want the *imaging session*
+    boundary — including dusk/dawn shoulders used for setup, slew,
+    focus, polar align — get the inclusive window. Callers that want
+    the true astronomical-dark window (e.g. weather reports, when
+    imaging is actually possible) should pass altitude_deg=-18.0
+    explicitly.
 
     Returns None if no night occurs in the search window (polar day)."""
     from datetime import timedelta

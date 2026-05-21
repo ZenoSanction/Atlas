@@ -67,12 +67,30 @@ async function pullForecast(api) {
   try {
     const f = await api("/weather/forecast?hours=24&nighttime_only=true");
     if (!f.hourly || f.hourly.length === 0) {
-      el.innerHTML = `<div class="empty">No usable night hours in the next 24 hours (sun-up all the way through).</div>`;
+      // Astronomical-only filter returned nothing — either polar day or
+      // the next dark window is outside our 24h forecast horizon. Show
+      // the window itself if we have it so the operator knows when to
+      // come back.
+      if (f.night && f.night.dusk_utc) {
+        el.innerHTML = `<div class="empty">
+          Currently daytime. Astronomical dark window:
+          <b>${fmtEastern(f.night.dusk_utc)} &rarr; ${fmtEastern(f.night.dawn_utc)}</b>
+          (${f.night.hours} h).<br>
+          Weather report will populate once the sun drops below -18°.
+        </div>`;
+      } else {
+        el.innerHTML = `<div class="empty">
+          No astronomical-dark hours in the next 24 hours (polar day or
+          forecast horizon too short).
+        </div>`;
+      }
       return;
     }
     let nightHeader = "";
     if (f.night) {
-      nightHeader = `<div class="hint">Dark window: ${fmtEastern(f.night.dusk_utc)} → ${fmtEastern(f.night.dawn_utc)} (${f.night.hours} h)</div>`;
+      nightHeader = `<div class="hint">Astronomical dark (sun &lt; -18°):
+        ${fmtEastern(f.night.dusk_utc)} &rarr; ${fmtEastern(f.night.dawn_utc)}
+        (${f.night.hours} h)</div>`;
     }
     const head = `
       <table class="tbl">
