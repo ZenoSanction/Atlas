@@ -22,14 +22,27 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # ---- Settings (process-level) -----------------------------------------------
 
+# Default install root. Override with the ATLAS_INSTALL_ROOT env var to
+# put the whole install on a different drive (e.g. D:\ATLAS for a
+# big data drive). All sub-paths derive from this unless individually
+# overridden.
+_DEFAULT_INSTALL_ROOT = Path(r"C:\ATLAS")
+
+
 class Settings(BaseSettings):
-    """Process-level configuration. Read once at startup."""
+    """Process-level configuration. Read once at startup.
+
+    Single switch: set ATLAS_INSTALL_ROOT and every sub-path + the
+    database URL move with it. Individual sub-paths can still be
+    overridden via their own env vars (ATLAS_DATA_DIR, ATLAS_FRAMES_DIR,
+    ATLAS_DATABASE_URL, etc.) when you want e.g. the install on SSD but
+    captured frames on a big spinning drive."""
 
     model_config = SettingsConfigDict(
         env_prefix="ATLAS_",
@@ -38,17 +51,22 @@ class Settings(BaseSettings):
     )
 
     # Paths --------------------------------------------------------------------
-    install_root: Path = Field(default=Path(r"C:\ATLAS"))
-    data_dir: Path = Field(default=Path(r"C:\ATLAS\data"))
-    frames_dir: Path = Field(default=Path(r"C:\ATLAS\data\frames"))
-    references_dir: Path = Field(default=Path(r"C:\ATLAS\data\references"))
-    reports_dir: Path = Field(default=Path(r"C:\ATLAS\data\reports"))
-    logs_dir: Path = Field(default=Path(r"C:\ATLAS\data\logs"))
-    catalogs_dir: Path = Field(default=Path(r"C:\ATLAS\catalogs"))
-    dashboard_dir: Path = Field(default=Path(r"C:\ATLAS\dashboard"))
+    install_root: Path = Field(default=_DEFAULT_INSTALL_ROOT)
+    # The rest are optional — if unset, derived from install_root below.
+    data_dir: Path | None = Field(default=None)
+    frames_dir: Path | None = Field(default=None)
+    references_dir: Path | None = Field(default=None)
+    reports_dir: Path | None = Field(default=None)
+    logs_dir: Path | None = Field(default=None)
+    catalogs_dir: Path | None = Field(default=None)
+    dashboard_dir: Path | None = Field(default=None)
+    masters_dir: Path | None = Field(default=None)
+    morning_reports_dir: Path | None = Field(default=None)
+    submissions_dir: Path | None = Field(default=None)
+    sessions_dir: Path | None = Field(default=None)
 
     # Database -----------------------------------------------------------------
-    database_url: str = Field(default="sqlite:///C:/ATLAS/data/atlas.db")
+    database_url: str | None = Field(default=None)
 
     # Server -------------------------------------------------------------------
     server_host: str = Field(default="0.0.0.0")
@@ -65,13 +83,49 @@ class Settings(BaseSettings):
     # Mode ---------------------------------------------------------------------
     simulation_mode: bool = Field(default=False)
 
+    @model_validator(mode="after")
+    def _derive_paths(self):
+        """Fill in any unset sub-paths from install_root. Lets the operator
+        set just ATLAS_INSTALL_ROOT=D:\\ATLAS and have everything follow."""
+        root = self.install_root
+        if self.data_dir is None:
+            self.data_dir = root / "data"
+        if self.frames_dir is None:
+            self.frames_dir = self.data_dir / "frames"
+        if self.references_dir is None:
+            self.references_dir = self.data_dir / "references"
+        if self.reports_dir is None:
+            self.reports_dir = self.data_dir / "reports"
+        if self.logs_dir is None:
+            self.logs_dir = self.data_dir / "logs"
+        if self.catalogs_dir is None:
+            self.catalogs_dir = root / "catalogs"
+        if self.dashboard_dir is None:
+            self.dashboard_dir = root / "dashboard"
+        if self.masters_dir is None:
+            self.masters_dir = self.data_dir / "masters"
+        if self.morning_reports_dir is None:
+            self.morning_reports_dir = self.data_dir / "morning_reports"
+        if self.submissions_dir is None:
+            self.submissions_dir = self.data_dir / "submissions"
+        if self.sessions_dir is None:
+            self.sessions_dir = self.data_dir / "sessions"
+        if self.database_url is None:
+            # Use forward slashes — SQLAlchemy parses them on Windows too.
+            db_path = (self.data_dir / "atlas.db").as_posix()
+            self.database_url = f"sqlite:///{db_path}"
+        return self
+
     def ensure_directories(self) -> None:
         """Create all required runtime directories."""
         for p in (
             self.data_dir, self.frames_dir, self.references_dir,
-            self.reports_dir, self.logs_dir,
+            self.reports_dir, self.logs_dir, self.masters_dir,
+            self.morning_reports_dir, self.submissions_dir,
+            self.sessions_dir,
         ):
-            p.mkdir(parents=True, exist_ok=True)
+            if p is not None:
+                p.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache(maxsize=1)

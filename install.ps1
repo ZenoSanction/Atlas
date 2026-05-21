@@ -21,7 +21,14 @@
 $ErrorActionPreference = "Stop"
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
-$ATLAS_ROOT  = "C:\ATLAS"
+# Default install root. Override by setting $env:ATLAS_INSTALL_ROOT
+# before running this script. Defaults to D:\ATLAS (the big data drive);
+# previous installs used C:\ATLAS — switch by setting the env var.
+if ($env:ATLAS_INSTALL_ROOT) {
+    $ATLAS_ROOT = $env:ATLAS_INSTALL_ROOT
+} else {
+    $ATLAS_ROOT = "D:\ATLAS"
+}
 $VENV        = Join-Path $ATLAS_ROOT "venv"
 $PYTHON_VENV = Join-Path $VENV "Scripts\python.exe"
 $REQUIREMENTS = Join-Path $ATLAS_ROOT "requirements.txt"

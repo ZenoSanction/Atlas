@@ -38,8 +38,14 @@ param(
 $ErrorActionPreference = "Stop"
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
-$ATLAS_ROOT     = "C:\ATLAS"
-$BACKUPS_ROOT   = "C:\ATLAS_backups"
+if ($env:ATLAS_INSTALL_ROOT) {
+    $ATLAS_ROOT = $env:ATLAS_INSTALL_ROOT
+} else {
+    $ATLAS_ROOT = "D:\ATLAS"
+}
+# Backups go next to the install root so a single drive failure doesn't
+# take both. If the install is on D:\ATLAS, backups land at D:\ATLAS_backups.
+$BACKUPS_ROOT   = ($ATLAS_ROOT.TrimEnd('\') + "_backups")
 $VENV           = Join-Path $ATLAS_ROOT "venv"
 $DATA_DIR       = Join-Path $ATLAS_ROOT "data"
 $LOG_DIR        = Join-Path $DATA_DIR "logs"
