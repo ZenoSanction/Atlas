@@ -68,17 +68,60 @@ class Archivist(BaseAgent):
                 await self.handle_relayed_message(msg)
 
     async def _idle_heartbeat(self) -> None:
-        """Emit a benign 'still here' tick so the dashboard sees the agent."""
+        """Emit a benign 'still here' tick + scan the configured capture
+        folder for any new FITS files NINA may have written since the
+        last tick. New frames get registered automatically — operator
+        no longer has to call register_frame after every capture."""
+        ingested = 0
+        try:
+            from atlas.db.managers import ConfigManager
+            equip = ConfigManager.get_equipment()
+            folder = getattr(equip, "capture_folder", None) if equip else None
+            if folder:
+                from atlas.capture.ingest import ingest_directory
+                from atlas.db.managers import SessionManager
+                # Tag new frames with the currently-open session, if any
+                latest = SessionManager.latest()
+                sid = None
+                if latest is not None:
+                    state_val = (latest.state.value
+                                  if hasattr(latest.state, "value")
+                                  else latest.state)
+                    if state_val in ("nominal", "warning"):
+                        sid = latest.id
+                new_ids = ingest_directory(folder, recursive=True,
+                                              session_id=sid)
+                ingested = len(new_ids)
+                if ingested:
+                    # Auto-grade new frames in the background
+                    try:
+                        from atlas.capture.quality import grade_frame
+                        for fid in new_ids:
+                            try:
+                                grade_frame(fid)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                    self.log.info("watch-folder: ingested + graded %d new "
+                                    "frame(s) (session=%s)", ingested, sid)
+        except Exception as e:
+            self.log.debug("watch-folder scan failed: %s", e)
+
         info = {
             "type": "idle",
             "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ingested": ingested,
         }
         get_state().set_archivist_last(info)
+        summary = (f"Archivist standing by; watch-folder ingested {ingested} "
+                     f"new frame(s)." if ingested
+                     else "Archivist standing by; no session to process.")
         await self.bus.broadcast_event({
             "type": "archivist_tick",
             "sender": "archivist",
             "kind": "idle_heartbeat",
-            "summary": "Archivist standing by; no session to process.",
+            "summary": summary,
             "sent_at": info["at"],
         })
 

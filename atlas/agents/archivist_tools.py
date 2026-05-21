@@ -107,6 +107,38 @@ async def _register_calibration_master(p: dict) -> dict:
                           "next 2-minute cycle."}
 
 
+async def _grade_recent(p: dict) -> dict:
+    limit = int(p.get("limit", 50))
+    from atlas.capture.quality import grade_ungraded
+    results = grade_ungraded(limit=limit)
+    counts = {"A": 0, "B": 0, "C": 0, "D": 0, "UNGRADED": 0, "error": 0}
+    for r in results:
+        if r.get("error"):
+            counts["error"] += 1
+        else:
+            counts[r.get("grade", "UNGRADED")] += 1
+    return {"ok": True, "graded": len(results), "by_grade": counts}
+
+
+async def _stack_master(p: dict) -> dict:
+    kind = (p.get("kind") or "").lower().strip()
+    if kind not in ("bias", "dark", "flat"):
+        return {"error": "kind must be bias / dark / flat"}
+    from atlas.capture.stack import stack_master as _do
+    try:
+        return _do(
+            kind=kind,
+            filter_name=p.get("filter_name"),
+            exposure_s=(float(p["exposure_s"]) if p.get("exposure_s") is not None else None),
+            ccd_temp_c=(float(p["ccd_temp_c"]) if p.get("ccd_temp_c") is not None else None),
+            gain=(int(p["gain"]) if p.get("gain") is not None else None),
+            offset=(int(p["offset"]) if p.get("offset") is not None else None),
+            min_frames=int(p.get("min_frames", 5)),
+        )
+    except Exception as e:
+        return {"error": f"Stacking failed: {type(e).__name__}: {e}"}
+
+
 async def _ingest_directory(p: dict) -> dict:
     directory = (p.get("directory") or "").strip()
     if not directory:
@@ -200,4 +232,38 @@ ARCHIVIST_TOOLS: list[ToolSpec] = [
               },
               "required": ["directory"]},
              _ingest_directory),
+    ToolSpec("grade_recent_frames",
+             "Grade up to N ungraded frames (FWHM-based or star-count-"
+             "based heuristic), writing A/B/C/D back to frames.quality. "
+             "Calibration frames (bias/dark/flat) auto-grade A. The "
+             "watch-folder ingest also auto-grades, so this tool is mostly "
+             "useful for re-grading after a heuristic change.",
+             {"type": "object",
+              "properties": {
+                  "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+              }},
+             _grade_recent),
+    ToolSpec("stack_master",
+             "Median-stack matching frames into a master bias/dark/flat, "
+             "write the master FITS to data/masters/, and auto-register "
+             "it in the calibration library. Frames must already be in "
+             "the frames table (use ingest_directory or register_frame "
+             "first). Match by kind + optional filter/exposure/temp/gain "
+             "/offset. Returns master_id + file_path + count combined.",
+             {"type": "object",
+              "properties": {
+                  "kind": {"type": "string", "enum": ["bias", "dark", "flat"]},
+                  "filter_name": {"type": "string",
+                                    "description": "Required for flats; optional for bias/dark."},
+                  "exposure_s": {"type": "number",
+                                   "description": "Match exposure ±0.05 s. Required for dark/flat."},
+                  "ccd_temp_c": {"type": "number",
+                                   "description": "Match CCD temp ±0.5 °C."},
+                  "gain": {"type": "integer"},
+                  "offset": {"type": "integer"},
+                  "min_frames": {"type": "integer", "minimum": 1,
+                                   "description": "Refuse to stack fewer than this many. Default 5."},
+              },
+              "required": ["kind"]},
+             _stack_master),
 ]

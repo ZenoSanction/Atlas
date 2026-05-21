@@ -163,6 +163,9 @@ class EquipmentProfile(Base):
     mount_supports_nonsidereal: Mapped[bool] = mapped_column(Boolean, default=False)
     cooling_setpoint_c: Mapped[float] = mapped_column(Float, default=-10.0)
     warmup_ramp_c_per_min: Mapped[float] = mapped_column(Float, default=5.0)
+    # Where the capture app (NINA / SharpCap) writes FITS files. The
+    # Archivist's watch-folder ingest polls this every 2 minutes.
+    capture_folder: Mapped[Optional[str]] = mapped_column(String(512))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
                                                   onupdate=datetime.utcnow)
 

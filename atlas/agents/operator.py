@@ -336,15 +336,95 @@ class Operator(BaseAgent):
         )
 
     async def _handle_human_command(self, msg) -> None:
-        """Dashboard-originated commands. Always execute."""
-        cmd = msg.payload.get("command")
-        self.log.info("HUMAN COMMAND: %s", cmd)
-        self.log_decision("human_command", inputs={"command": cmd, "params": msg.payload},
-                           rationale="Operator command from dashboard",
-                           session_id=self._current_session_id)
-        # TODO Phase 2: dispatch to specific command handlers
-        # commands: start_session, stop_session, take_control, release_control,
-        # approve_target, run_simulation, emergency_stop, etc.
+        """Dashboard-originated commands. Always execute. Dispatched by
+        the command name. Each dispatch logs a decision row + broadcasts
+        a flow event so the Mission Control feed shows the action."""
+        cmd = (msg.payload.get("command") or "").lower().strip()
+        params = msg.payload.get("params") or {}
+        self.log.info("HUMAN COMMAND: %s %s", cmd, params)
+        try:
+            if cmd == "start_session":
+                await self._cmd_start_session(params)
+            elif cmd == "stop_session":
+                await self._cmd_stop_session(params)
+            elif cmd == "take_control":
+                self.log_decision("take_control", inputs=params,
+                                    rationale="Human took control",
+                                    session_id=self._current_session_id)
+            elif cmd == "release_control":
+                self.log_decision("release_control", inputs=params,
+                                    rationale="Human released control",
+                                    session_id=self._current_session_id)
+            else:
+                self.log_decision("human_command_unrecognised",
+                                    inputs={"command": cmd, "params": params},
+                                    rationale="No dispatch for this command kind",
+                                    session_id=self._current_session_id)
+                self.log.warning("Operator command not recognised: %s", cmd)
+        except Exception:
+            self.log.exception("Operator command %s failed", cmd)
+
+    async def _cmd_start_session(self, params: dict) -> None:
+        """Create a new Session row in the DB, mark NOMINAL, broadcast.
+        The new session_id is held in self._current_session_id so the
+        Critic's fast loop + Archivist's POST_SESSION trigger have scope."""
+        from atlas.config import get_settings
+        simulation = bool(params.get("simulation",
+                                       get_settings().simulation_mode))
+        sid = SessionManager.start(simulation=simulation)
+        SessionManager.set_state(sid, SessionState.NOMINAL,
+                                   reason="Started by operator command")
+        self._current_session_id = sid
+        self.log_decision("session_started",
+                            inputs={"params": params, "simulation": simulation},
+                            outputs={"session_id": sid, "state": "nominal"},
+                            rationale="Operator command start_session",
+                            session_id=sid)
+        self.set_task(f"session #{sid} started — imaging window open",
+                      state="working")
+        await self.bus.broadcast_event({
+            "type": "session_started",
+            "sender": "operator",
+            "session_id": sid,
+            "simulation": simulation,
+            "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        })
+        self.log.info("Session #%d started (simulation=%s)", sid, simulation)
+
+    async def _cmd_stop_session(self, params: dict) -> None:
+        """End the current session, mark COMPLETE, trigger Archivist."""
+        sid = self._current_session_id or params.get("session_id")
+        if sid is None:
+            sess = SessionManager.latest()
+            if sess is None or sess.state == SessionState.COMPLETE:
+                self.log.warning("stop_session: no active session to stop")
+                return
+            sid = sess.id
+        reason = params.get("reason") or "Stopped by operator command"
+        SessionManager.set_state(sid, SessionState.COMPLETE, reason=reason)
+        self.log_decision("session_stopped",
+                            inputs={"session_id": sid, "reason": reason},
+                            outputs={"state": "complete"},
+                            rationale=reason,
+                            session_id=sid)
+        # Trigger the Archivist to process the session
+        await self.send(
+            AgentName.ARCHIVIST,
+            AgentMessageKind.POST_SESSION,
+            payload={"session_id": sid, "summary": f"Session #{sid} ended: {reason}"},
+            session_id=sid,
+        )
+        self.set_task(f"session #{sid} ended — Archivist notified",
+                      state="idle")
+        self._current_session_id = None
+        await self.bus.broadcast_event({
+            "type": "session_stopped",
+            "sender": "operator",
+            "session_id": sid,
+            "reason": reason,
+            "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        })
+        self.log.info("Session #%d stopped: %s", sid, reason)
 
     async def _periodic_check(self) -> None:
         """Idle housekeeping. Runs roughly every 5 seconds when no messages."""
