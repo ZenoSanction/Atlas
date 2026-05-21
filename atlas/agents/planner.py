@@ -37,6 +37,22 @@ from atlas.db.models import CampaignTarget, Target
 
 PLAN_REBUILD_INTERVAL_S = 30 * 60   # 30 minutes
 
+# Session shaping (operator-settable; defaults below match the policy
+# decided 2026-05-21 — "depth over breadth"):
+#
+#   MAX_TARGETS_PER_SESSION = 4
+#       Hard ceiling on how many targets a single night can include.
+#       Fewer targets means each one gets meaningful integration time
+#       rather than a tour of 12 ~10-min snapshots.
+#
+#   MIN_DWELL_MINUTES = 60
+#       Floor on actual imaging time per target. If a target's default
+#       exposure plan is shorter than this (e.g. some astrometry plans
+#       are only 5 min), the dwell is padded to 60 min by repeating
+#       the plan or extending the count.
+MAX_TARGETS_PER_SESSION = 4
+MIN_DWELL_MINUTES = 60
+
 
 class Planner(BaseAgent):
     name = AgentName.PLANNER
@@ -452,19 +468,68 @@ class Planner(BaseAgent):
 
         full.sort(key=lambda x: (-x["priority"], -x["alt_deg"]))
 
+        # ----------------------------------------------------------------
+        # Apply session shaping: top-4 cap + 60-min-minimum-dwell.
+        # The operator wants depth over breadth — better to get a deep,
+        # noise-averaged stack of a few targets than a token snapshot of
+        # twelve.
+        # ----------------------------------------------------------------
+        full_unshaped = list(full)   # keep the full ranked list for the
+                                       # dashboard's "considered but not
+                                       # scheduled" view
+        scheduled = full[:MAX_TARGETS_PER_SESSION]
+        for t in scheduled:
+            current_min = float(t.get("total_integration_min") or 0.0)
+            if current_min < MIN_DWELL_MINUTES and t.get("exposure_plan"):
+                pad_factor = MIN_DWELL_MINUTES / max(current_min, 1.0)
+                padded_plan = []
+                new_total = 0.0
+                for set_ in t["exposure_plan"]:
+                    # Scale the count, not the exposure_s — preserves SNR
+                    # characteristics and dither cadence.
+                    new_count = max(1, int(round(set_["count"] * pad_factor)))
+                    new_total_s = set_["exposure_s"] * new_count
+                    padded_plan.append({
+                        "filter": set_["filter"],
+                        "exposure_s": set_["exposure_s"],
+                        "count": new_count,
+                        "total_s": new_total_s,
+                        "total_min": round(new_total_s / 60.0, 1),
+                    })
+                    new_total += new_total_s / 60.0
+                t["exposure_plan"] = padded_plan
+                t["total_integration_min"] = round(new_total, 1)
+                t["dwell_padded_from_min"] = round(current_min, 1)
+            t["min_dwell_minutes"] = MIN_DWELL_MINUTES
+            t["scheduled_for_min"] = max(float(t.get("total_integration_min") or 0.0),
+                                            float(MIN_DWELL_MINUTES))
+
+        scheduled_total_min = sum(t["scheduled_for_min"] for t in scheduled)
+        window_min = (window["hours"] * 60.0) if window else None
+        overrun = (window_min is not None
+                     and scheduled_total_min > window_min)
+
         plan = {
             "built_at": now.isoformat(timespec="seconds") + "Z",
             "reason": reason,
             "active_campaigns": len(campaigns),
-            "visible_targets": full,
+            # The Operator + UI both read `visible_targets`; that's now
+            # the *scheduled* top-N, not the full ranked list. The full
+            # list is retained under `considered` for transparency.
+            "visible_targets": scheduled,
+            "considered": full_unshaped,
+            "considered_count": len(full_unshaped),
+            "max_targets_per_session": MAX_TARGETS_PER_SESSION,
+            "min_dwell_minutes": MIN_DWELL_MINUTES,
+            "scheduled_total_min": round(scheduled_total_min, 1),
+            "dark_window_min": (round(window_min, 1) if window_min else None),
+            "overruns_dark_window": bool(overrun),
             "skipped_below_horizon": skipped_below_horizon,
             "skipped_no_coords": skipped_no_coords,
             "horizon_alt_min_deg": horizon_alt,
             "window": window,
             "fallback_to_catalog": not visible and bool(from_catalog),
             "applied_constraints": applied_constraints,
-            # TODO Phase 2: NINA sequence XML, meridian-flip annotations,
-            # cadence weighting, per-target exposure plans.
         }
         get_state().set_tonight_plan(plan)
 
@@ -472,18 +537,32 @@ class Planner(BaseAgent):
             "type": "plan_update",
             "sender": "planner",
             "kind": "plan_rebuild",
-            "visible": len(full),
+            "visible": len(scheduled),
+            "considered": len(full_unshaped),
             "active_campaigns": len(campaigns),
             "fallback_to_catalog": plan["fallback_to_catalog"],
+            "scheduled_total_min": round(scheduled_total_min, 1),
+            "dark_window_min": (round(window_min, 1) if window_min else None),
+            "overruns_dark_window": bool(overrun),
             "reason": reason,
             "sent_at": plan["built_at"],
         })
+        n_sched = len(scheduled)
+        n_cons  = len(full_unshaped)
+        budget_note = ""
+        if window_min is not None:
+            budget_note = (f"; scheduled {scheduled_total_min:.0f} min "
+                            f"of {window_min:.0f} min dark"
+                            + ("  -- OVERRUNS WINDOW" if overrun else ""))
         if plan["fallback_to_catalog"]:
-            summary = (f"plan rebuilt — {len(full)} seasonal showcase "
-                       f"targets visible (no active campaigns)")
+            summary = (f"plan rebuilt -- {n_sched} of {n_cons} seasonal "
+                       f"showcase targets scheduled (top-{MAX_TARGETS_PER_SESSION}, "
+                       f">={MIN_DWELL_MINUTES} min each){budget_note}")
         else:
-            summary = (f"plan rebuilt — {len(full)} target(s) from "
-                       f"{len(campaigns)} active campaign(s)")
+            summary = (f"plan rebuilt -- {n_sched} of {n_cons} target(s) "
+                       f"scheduled (top-{MAX_TARGETS_PER_SESSION}, "
+                       f">={MIN_DWELL_MINUTES} min each) from "
+                       f"{len(campaigns)} active campaign(s){budget_note}")
         self.set_task(summary + "; next sweep in ~30 min", state="waiting")
         self.log.info(summary)
 
