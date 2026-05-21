@@ -26,7 +26,7 @@ from atlas.api.schemas import (
     HealthResponse, InitVaultRequest, OperatorCommand, SetCredentialRequest,
     SetupStatus, SiteConfigSchema, SubmissionAction, UnlockVaultRequest,
 )
-from atlas.config import get_settings
+from atlas.config import get_settings, is_simulation_mode
 from atlas.db.managers import (
     AlertManager, CampaignManager, ConfigManager, CredentialManager,
     SessionManager, SubmissionManager,
@@ -237,8 +237,7 @@ async def _hardware_snapshot_inner() -> dict:
     if equip is None:
         return out
 
-    from atlas.config import get_settings
-    if get_settings().simulation_mode:
+    if is_simulation_mode():
         from atlas.simulation.fake_hardware import FakeNina, FakePhd2
         nina = FakeNina()
         phd2 = FakePhd2()
@@ -584,6 +583,35 @@ async def session_preflight() -> dict:
 # Weather thresholds (Setup tab)
 # ============================================================================
 
+@api_router.get("/setup/system-flags")
+async def get_system_flags() -> dict:
+    """Return runtime-mutable flags. simulation_mode here is the DB value;
+    env-var ATLAS_SIMULATION_MODE still wins if set (effective flag is
+    surfaced via /api/mission-control)."""
+    flags = ConfigManager.get_system_flags()
+    return {
+        "simulation_mode_db": bool(flags.simulation_mode),
+        "simulation_mode_effective": is_simulation_mode(),
+        "env_override_set": ((__import__("os").environ.get("ATLAS_SIMULATION_MODE", "")
+                              ).lower() in ("1", "true", "yes", "on")),
+        "updated_at": flags.updated_at.isoformat() if flags.updated_at else None,
+    }
+
+
+@api_router.post("/setup/system-flags")
+async def save_system_flags(body: dict) -> dict:
+    """Patch runtime flags. Currently only simulation_mode."""
+    allowed = {"simulation_mode"}
+    bad = set(body.keys()) - allowed
+    if bad:
+        raise HTTPException(400, f"Unknown fields: {sorted(bad)}")
+    fields = {}
+    if "simulation_mode" in body:
+        fields["simulation_mode"] = bool(body["simulation_mode"])
+    ConfigManager.save_system_flags(**fields)
+    return {"ok": True, "simulation_mode_effective": is_simulation_mode()}
+
+
 @api_router.get("/setup/weather-thresholds")
 async def get_weather_thresholds() -> dict:
     """Return thresholds in imperial display units. Internally stored in SI."""
@@ -695,7 +723,7 @@ async def mission_control() -> dict:
     verdict = st.get_verdict()
     return {
         "now_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "simulation_mode": settings.simulation_mode,
+        "simulation_mode": is_simulation_mode(),
         "observatory_name": (site.observatory_name if site else None),
         "verdict": verdict.to_jsonable() if verdict else None,
         "preflight": st.get_preflight(),

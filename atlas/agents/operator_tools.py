@@ -209,9 +209,11 @@ async def _get_system_status(_params: dict) -> dict:
     equipment_configured = equipment is not None
 
     # Hardware reachability (skip in simulation mode — it's not meaningful)
+    from atlas.config import is_simulation_mode
+    sim = is_simulation_mode()
     nina_reachable: bool | None = None
     phd2_reachable: bool | None = None
-    if settings.simulation_mode:
+    if sim:
         nina_reachable = None
         phd2_reachable = None
     elif equipment is not None:
@@ -219,7 +221,7 @@ async def _get_system_status(_params: dict) -> dict:
         phd2_reachable = await _ping_phd2(equipment.phd2_host, equipment.phd2_port)
 
     return {
-        "simulation_mode": settings.simulation_mode,
+        "simulation_mode": sim,
         "vault": vault_status,
         "agents": agents,
         "site_configured": site_configured,
@@ -267,11 +269,10 @@ async def _capture_test_frame(p: dict) -> dict:
     filter_name = p.get("filter_name")
     wait_s = float(p.get("wait_seconds_after", 5.0))
 
-    from atlas.config import get_settings
-    settings = get_settings()
-    if settings.simulation_mode:
+    from atlas.config import is_simulation_mode
+    if is_simulation_mode():
         return {"error": "Simulation mode is on — capture wouldn't produce a real "
-                          "file. Turn off ATLAS_SIMULATION_MODE first."}
+                          "file. Turn it off in Setup → System Flags first."}
 
     from atlas.db.managers import ConfigManager
     equip = ConfigManager.get_equipment()

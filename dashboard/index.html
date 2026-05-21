@@ -306,6 +306,17 @@
     <h2>Setup</h2>
     <div id="setup-status" class="setup-status">Loading…</div>
 
+    <div class="card">
+      <h3>System Flags</h3>
+      <p class="hint">Runtime toggles. The <code>ATLAS_SIMULATION_MODE</code> environment variable (if set) overrides whatever's stored here.</p>
+      <div id="system-flags-status" class="muted" style="margin-bottom:8px"></div>
+      <label class="checkbox"><input type="checkbox" id="sim-toggle"> Simulation mode (no real hardware will be commanded)</label>
+      <div class="form-actions">
+        <button id="sim-save" class="btn-primary" type="button">Save</button>
+        <span id="sim-status" class="form-status"></span>
+      </div>
+    </div>
+
     <div class="card" id="vault-card">
       <h3>Master Password</h3>
       <p class="hint">ATLAS encrypts all credentials (API keys, submission tokens) with a key derived from this password.</p>

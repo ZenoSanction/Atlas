@@ -224,6 +224,22 @@ class VersionInfo(Base):
     installed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class SystemFlags(Base):
+    """Single-row table for runtime-mutable system flags.
+
+    Currently just holds the simulation-mode toggle, but designed to grow
+    over time as more boot-time/runtime flags emerge. The env var
+    ATLAS_SIMULATION_MODE (Settings.simulation_mode) still wins if set,
+    so existing deployments aren't affected; the Setup-tab toggle only
+    matters when the env var is absent."""
+    __tablename__ = "system_flags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    simulation_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                   onupdate=datetime.utcnow)
+
+
 class WeatherThresholds(Base):
     """User-tunable weather safety thresholds. Single-row table. The Critic
     reads these on every standard-loop tick; the Setup tab edits them.

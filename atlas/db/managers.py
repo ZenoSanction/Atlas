@@ -19,7 +19,7 @@ from atlas.db.models import (
     NotificationConfig, ReferenceFrame, RetentionPolicy,
     Session as SessionRow, SessionState, SiteConfig, StackProduct,
     StorageEvent, Submission, SubmissionDestination, SubmissionStatus,
-    Target, WeatherThresholds, WorkflowKind,
+    SystemFlags, Target, WeatherThresholds, WorkflowKind,
 )
 from atlas.db.session import get_session
 from atlas.logging_setup import get_logger
@@ -95,6 +95,32 @@ class ConfigManager:
                 obj = NotificationConfig()
                 s.add(obj)
                 s.flush()
+            s.expunge(obj)
+            return obj
+
+    @staticmethod
+    def get_system_flags() -> SystemFlags:
+        """Single-row table; lazily seeded with defaults."""
+        with get_session() as s:
+            obj = s.query(SystemFlags).first()
+            if obj is None:
+                obj = SystemFlags()
+                s.add(obj)
+                s.flush()
+            s.expunge(obj)
+            return obj
+
+    @staticmethod
+    def save_system_flags(**fields) -> SystemFlags:
+        with get_session() as s:
+            obj = s.query(SystemFlags).first()
+            if obj is None:
+                obj = SystemFlags(**fields)
+                s.add(obj)
+            else:
+                for k, v in fields.items():
+                    setattr(obj, k, v)
+            s.flush()
             s.expunge(obj)
             return obj
 

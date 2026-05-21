@@ -81,6 +81,30 @@ def get_settings() -> Settings:
     return s
 
 
+def is_simulation_mode() -> bool:
+    """Whether simulation mode is active. Resolution order:
+
+      1. If the ATLAS_SIMULATION_MODE env var is set (i.e., the
+         Settings.simulation_mode field was loaded as True from env),
+         it wins. Use this for boot-time overrides / CI / dev.
+      2. Otherwise read the system_flags table (set via the Setup tab
+         toggle). Default False.
+
+    This lets ops choose: env-var control for headless servers, GUI
+    toggle for interactive operators."""
+    # Env-var override (always wins when True)
+    if os.environ.get("ATLAS_SIMULATION_MODE", "").lower() in ("1", "true", "yes", "on"):
+        return True
+    # DB toggle — defer the import so this module stays importable from
+    # the DB layer itself (avoids circular import on first init).
+    try:
+        from atlas.db.managers import ConfigManager
+        flags = ConfigManager.get_system_flags()
+        return bool(flags.simulation_mode)
+    except Exception:
+        return False
+
+
 # ---- Site & equipment (DB-backed, runtime-editable) -------------------------
 
 # These accessors defer to atlas.db.managers.ConfigManager once the DB is up.

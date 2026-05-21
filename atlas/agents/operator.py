@@ -368,9 +368,8 @@ class Operator(BaseAgent):
         """Create a new Session row in the DB, mark NOMINAL, broadcast.
         The new session_id is held in self._current_session_id so the
         Critic's fast loop + Archivist's POST_SESSION trigger have scope."""
-        from atlas.config import get_settings
-        simulation = bool(params.get("simulation",
-                                       get_settings().simulation_mode))
+        from atlas.config import is_simulation_mode
+        simulation = bool(params.get("simulation", is_simulation_mode()))
         sid = SessionManager.start(simulation=simulation)
         SessionManager.set_state(sid, SessionState.NOMINAL,
                                    reason="Started by operator command")

@@ -207,9 +207,8 @@ def _gate_hardware() -> Gate:
     """Best-effort hardware probe. Uses the cached snapshot from the
     Tonight tab route (already TTL-cached + timeout-bounded so we don't
     block here)."""
-    from atlas.config import get_settings
-    settings = get_settings()
-    if settings.simulation_mode:
+    from atlas.config import is_simulation_mode
+    if is_simulation_mode():
         return Gate("hardware", "Hardware (sim)", "ok",
                      "Simulation mode — fake hardware reports all green.",
                      actionable=False)

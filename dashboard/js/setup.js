@@ -2,11 +2,49 @@
 
 export async function initSetup(api) {
   await refreshStatus(api);
+  await renderSystemFlags(api);
   await renderVaultForm(api);
   await renderSiteForm(api);
   await renderEquipmentForm(api);
   await renderThresholdsForm(api);
   wireCredentialForms(api);
+}
+
+async function renderSystemFlags(api) {
+  const toggle = document.getElementById("sim-toggle");
+  const save = document.getElementById("sim-save");
+  const status = document.getElementById("sim-status");
+  const statusLine = document.getElementById("system-flags-status");
+  if (!toggle || !save) return;
+  try {
+    const r = await api("/setup/system-flags");
+    toggle.checked = !!r.simulation_mode_db;
+    if (statusLine) {
+      const eff = r.simulation_mode_effective ? "ON (sim)" : "OFF (real)";
+      const env = r.env_override_set
+        ? " — env-var override active; toggle has no effect until you clear it"
+        : "";
+      statusLine.textContent = `Effective: ${eff}${env}`;
+    }
+  } catch (e) {
+    if (statusLine) statusLine.textContent = `Error loading flags: ${e.message}`;
+  }
+  if (save.dataset.bound) return;
+  save.dataset.bound = "1";
+  save.addEventListener("click", async () => {
+    try {
+      const r = await api("/setup/system-flags", {
+        method: "POST",
+        body: JSON.stringify({ simulation_mode: toggle.checked }),
+      });
+      status.textContent = `Saved. Effective sim mode: ${r.simulation_mode_effective ? "ON" : "OFF"}.`;
+      status.className = "form-status ok";
+      await renderSystemFlags(api);  // refresh effective line
+    } catch (e) {
+      status.textContent = e.message;
+      status.className = "form-status err";
+    }
+  });
 }
 
 async function renderThresholdsForm(api) {

@@ -397,8 +397,8 @@ class Critic(BaseAgent):
         self.set_task("fast loop: PHD2 guiding + NINA cooling check",
                       state="working")
 
-        from atlas.config import get_settings
-        if get_settings().simulation_mode:
+        from atlas.config import is_simulation_mode
+        if is_simulation_mode():
             # In sim mode the fast loop ticks but doesn't try to pull from
             # the fake hardware (the fakes don't expose guiding stats).
             self.log.debug("fast loop tick (sim)")
