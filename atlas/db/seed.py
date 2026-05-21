@@ -16,10 +16,38 @@ log = get_logger("db.seed")
 SCHEMA_VERSION = "1.0.0"
 
 
+def _apply_simple_migrations(engine) -> None:
+    """Add columns that have been added to models since the original
+    install. SQLAlchemy's create_all only creates missing TABLES, not
+    missing COLUMNS on existing tables. SQLite's ALTER TABLE supports
+    only ADD COLUMN, which is enough for additive schema evolution.
+
+    Each tuple: (table_name, column_name, sqlite_type, sqlite_default_sql).
+    If the column already exists, skipped silently. This is intentionally
+    a hand-maintained list rather than a generic differ — Phase 2 schema
+    is small enough that this keeps it predictable and easy to review."""
+    additive_columns = [
+        ("equipment_profile", "capture_folder", "VARCHAR(512)", "NULL"),
+    ]
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        for table, col, coltype, default_sql in additive_columns:
+            cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})"))}
+            if col in cols:
+                continue
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {coltype} DEFAULT {default_sql}"))
+                log.info("Migrated: ALTER TABLE %s ADD COLUMN %s %s",
+                         table, col, coltype)
+            except Exception as e:
+                log.warning("Skipped migration on %s.%s: %s", table, col, e)
+
+
 def initialise_database() -> None:
     """Create the database file, all tables, and minimal seed rows.
 
     Idempotent: running it again does nothing if the DB already has tables.
+    Also applies any pending additive column migrations to existing tables.
     """
     s = get_settings()
     s.ensure_directories()
@@ -31,6 +59,7 @@ def initialise_database() -> None:
     engine = get_engine()
     log.info("Creating database schema at %s ...", s.database_url)
     Base.metadata.create_all(engine)
+    _apply_simple_migrations(engine)
 
     with get_session() as sess:
         if sess.query(VersionInfo).first() is None:

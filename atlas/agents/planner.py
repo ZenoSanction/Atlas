@@ -326,12 +326,53 @@ class Planner(BaseAgent):
                     if alt < horizon_alt:
                         skipped_below_horizon += 1
                         continue
+                    # Cadence weighting: if this campaign hasn't run in the
+                    # last N days (per its cadence), bump its priority. Rough
+                    # cadence-to-days map; refined in a later pass.
+                    cadence_str = (camp.cadence or "every_clear_night").lower()
+                    cadence_days = {
+                        "every_clear_night": 1,
+                        "every_night": 1,
+                        "nightly": 1,
+                        "every_other_night": 2,
+                        "weekly": 7,
+                        "biweekly": 14,
+                        "monthly": 30,
+                    }.get(cadence_str, 1)
+                    bump = 0
+                    try:
+                        # Look at the most-recent frame this target produced
+                        from atlas.db.models import Frame
+                        last = (s.query(Frame.captured_at)
+                                  .filter(Frame.target_id == tgt.id)
+                                  .order_by(Frame.captured_at.desc())
+                                  .first())
+                        if last is None or last[0] is None:
+                            bump = 15   # never observed yet
+                        else:
+                            from datetime import datetime as _dt
+                            days_since = (_dt.utcnow() - last[0]).days
+                            if days_since > cadence_days:
+                                bump = min(20, days_since - cadence_days)
+                    except Exception:
+                        pass
+
+                    from atlas.agents.exposure_plan import default_plan_for, total_integration_min
+                    wf = camp.workflow.value if hasattr(camp.workflow, "value") else str(camp.workflow)
+                    equip = ConfigManager.get_equipment()
+                    cam_type = (equip.camera_type if equip else "OSC")
+                    exp_plan = default_plan_for(wf, cam_type)
+
                     visible.append({
                         "source": "campaign",
                         "campaign_id": camp.id,
                         "campaign_name": camp.name,
-                        "workflow": camp.workflow.value if hasattr(camp.workflow, "value") else str(camp.workflow),
-                        "priority": camp.priority,
+                        "workflow": wf,
+                        "priority": int(camp.priority) + bump,
+                        "cadence_bump": bump,
+                        "cadence": cadence_str,
+                        "exposure_plan": exp_plan,
+                        "total_integration_min": total_integration_min(exp_plan),
                         "target_id": tgt.id,
                         "target_name": tgt.name,
                         "object_type": tgt.object_type,
@@ -360,12 +401,20 @@ class Planner(BaseAgent):
                 )
                 if alt < horizon_alt:
                     continue
+                from atlas.agents.exposure_plan import default_plan_for, total_integration_min
+                equip = ConfigManager.get_equipment()
+                cam_type = (equip.camera_type if equip else "OSC")
+                exp_plan = default_plan_for("deepsky", cam_type)
                 from_catalog.append({
                     "source": "seasonal_catalog",
                     "campaign_id": None,
                     "campaign_name": "(seasonal showcase)",
                     "workflow": "deepsky",
                     "priority": int(50 + max(0, 6 - e.get("magnitude", 10)) * 5),
+                    "cadence_bump": 0,
+                    "cadence": "showcase",
+                    "exposure_plan": exp_plan,
+                    "total_integration_min": total_integration_min(exp_plan),
                     "target_id": None,
                     "target_name": e["name"],
                     "alt_names": e.get("alt_names", []),
