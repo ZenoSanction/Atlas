@@ -69,6 +69,23 @@ async def _pending_submissions(_p: dict) -> dict:
     }
 
 
+async def _prepare_submission(p: dict) -> dict:
+    """Format a measurement for an external destination and queue it."""
+    mid = p.get("measurement_id")
+    dest = (p.get("destination") or "").lower().strip()
+    if mid is None or not dest:
+        return {"error": "measurement_id and destination are required"}
+    from atlas.science.submission_engine import prepare_submission
+    return prepare_submission(int(mid), dest)
+
+
+async def _send_all_approved(p: dict) -> dict:
+    """Sweep APPROVED submissions and try to send each."""
+    limit = int(p.get("limit", 25))
+    from atlas.science.submission_engine import send_all_approved
+    return await send_all_approved(limit=limit)
+
+
 ORACLE_TOOLS: list[ToolSpec] = [
     ToolSpec("get_last_research_pass",
              "Return the Oracle's most recent background-research summary "
@@ -92,4 +109,31 @@ ORACLE_TOOLS: list[ToolSpec] = [
              "approval in the Science tab.",
              {"type": "object", "properties": {}},
              _pending_submissions),
+    ToolSpec("prepare_submission",
+             "Format a measurement for an external science destination "
+             "(MPC, AAVSO, TNS, NASA Exoplanet Watch) and queue a "
+             "Submission row at status=QUEUED for the operator to "
+             "review and approve. The formatted payload is what would "
+             "actually be sent on approval. Does NOT send.",
+             {"type": "object",
+              "properties": {
+                  "measurement_id": {"type": "integer"},
+                  "destination": {"type": "string",
+                                    "enum": ["mpc", "aavso", "tns", "nasa_exoplanet_watch"]},
+              },
+              "required": ["measurement_id", "destination"]},
+             _prepare_submission),
+    ToolSpec("send_all_approved_submissions",
+             "Sweep all APPROVED submissions and try to send each via "
+             "its destination-specific transport (e.g. AAVSO WebObs, TNS "
+             "API). Marks SUBMITTED on success, FAILED on error. Note: "
+             "MPC/AAVSO/TNS senders return 'manual upload required' "
+             "until the per-destination HTTP transports are wired in "
+             "the next pass — for now this prepares everything and "
+             "tells you what's ready.",
+             {"type": "object",
+              "properties": {
+                  "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+              }},
+             _send_all_approved),
 ]
