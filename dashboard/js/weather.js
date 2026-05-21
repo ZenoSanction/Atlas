@@ -197,14 +197,19 @@ function marginLabel(margin_f) {
 }
 
 // Format a UTC ISO timestamp as America/New_York (auto EST/EDT) for display.
+// Defensive: Open-Meteo sometimes returns "YYYY-MM-DDTHH:MM" without a
+// trailing 'Z'. JS parses such bare strings as LOCAL time, which made
+// every forecast hour appear shifted by the EDT offset. We append 'Z'
+// when the string is naked so the parse anchors to UTC.
 function fmtEastern(iso) {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleString("en-US", {
+    const safe = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    return new Date(safe).toLocaleString("en-US", {
       timeZone: "America/New_York",
       year: "numeric", month: "2-digit", day: "2-digit",
-      hour: "2-digit", minute: "2-digit",
-      hour12: false, timeZoneName: "short",
+      hour: "numeric", minute: "2-digit",
+      hour12: true, timeZoneName: "short",
     });
   } catch {
     return iso;

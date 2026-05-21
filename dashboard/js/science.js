@@ -16,7 +16,7 @@ export async function renderScience(api) {
             <span class="pill ${r.status === "queued" ? "warning" : ""}">${r.status}</span>
             <strong>Measurement #${r.measurement_id}</strong>
           </div>
-          <div class="hint">${new Date(r.queued_at).toLocaleString()}</div>
+          <div class="hint">${fmtEastern(r.queued_at)}</div>
         </div>
         <pre class="hint" style="margin-top:8px;white-space:pre-wrap;max-height:160px;overflow:auto">${esc(r.formatted_payload || "(no payload yet — will be generated when approved)")}</pre>
         <div class="actions">
@@ -46,4 +46,16 @@ export async function renderScience(api) {
 
 function esc(s) {
   return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function fmtEastern(iso) {
+  if (!iso) return "—";
+  try {
+    const safe = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    return new Date(safe).toLocaleString("en-US", {
+      timeZone: "America/New_York", hour12: true,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "numeric", minute: "2-digit", timeZoneName: "short",
+    });
+  } catch { return iso; }
 }

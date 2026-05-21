@@ -652,8 +652,13 @@ async def weather_forecast(hours: int = 48, nighttime_only: bool = True) -> dict
     out_rows = []
     for r in rows:
         dm_c = r["temperature_c"] - r["dew_point_c"]
+        # Open-Meteo returns UTC times without the trailing 'Z', so the
+        # browser parses them as local time and the displayed timestamps
+        # come out 4-5h off (depending on EDT/EST). Tag explicitly.
+        time_raw = r["time"]
+        time_utc = time_raw if time_raw.endswith("Z") else time_raw + "Z"
         out_rows.append({
-            "time_utc": r["time"],
+            "time_utc": time_utc,
             "temperature_f": round(c_to_f(r["temperature_c"]), 1),
             "humidity_pct": round(r["humidity_pct"], 0),
             "dew_point_f": round(c_to_f(r["dew_point_c"]), 1),

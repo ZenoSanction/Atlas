@@ -172,13 +172,16 @@ function fmtNextTick(status) {
 }
 
 function fmtClock(iso) {
-  // Render UTC timestamps as HH:MM:SS in Eastern (auto EST/EDT)
+  // Render UTC timestamps as h:mm:ss AM/PM in Eastern (auto EST/EDT).
+  // Defensive: if the ISO string is missing a trailing Z / offset, JS
+  // treats it as local time. Append Z so the parse anchors to UTC.
   if (!iso) return "";
   try {
-    return new Date(iso).toLocaleTimeString("en-US", {
+    const safe = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    return new Date(safe).toLocaleTimeString("en-US", {
       timeZone: "America/New_York",
-      hour: "2-digit", minute: "2-digit", second: "2-digit",
-      hour12: false,
+      hour: "numeric", minute: "2-digit", second: "2-digit",
+      hour12: true,
     });
   } catch { return iso; }
 }

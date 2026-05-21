@@ -1,5 +1,17 @@
 // Tonight tab — live session view.
 
+function fmtEastern(iso) {
+  if (!iso) return "—";
+  try {
+    const safe = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    return new Date(safe).toLocaleString("en-US", {
+      timeZone: "America/New_York", hour12: true,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "numeric", minute: "2-digit", timeZoneName: "short",
+    });
+  } catch { return iso; }
+}
+
 export function renderTonight(api) { refreshTonight(api); }
 
 export async function refreshTonight(api) {
@@ -51,7 +63,7 @@ export async function refreshTonight(api) {
     sessEl.innerHTML = `
       <div><span>ID</span><span>${s.session.id}</span></div>
       <div><span>State</span><span>${s.session.state}</span></div>
-      <div><span>Started</span><span>${new Date(s.session.started_at).toLocaleString()}</span></div>
+      <div><span>Started</span><span>${fmtEastern(s.session.started_at)}</span></div>
       <div><span>Mode</span><span>${s.session.simulation ? "SIMULATION" : "live"}</span></div>
     `;
   } else {

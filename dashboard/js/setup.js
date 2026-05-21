@@ -106,10 +106,11 @@ async function renderTlsPanel(api) {
 function fmtDate(iso) {
   if (!iso) return "—";
   try {
-    return new Date(iso).toLocaleString("en-US", {
-      timeZone: "America/New_York", hour12: false,
+    const safe = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    return new Date(safe).toLocaleString("en-US", {
+      timeZone: "America/New_York", hour12: true,
       year: "numeric", month: "short", day: "numeric",
-      hour: "2-digit", minute: "2-digit",
+      hour: "numeric", minute: "2-digit",
     });
   } catch { return iso; }
 }
