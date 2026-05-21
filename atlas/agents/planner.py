@@ -467,26 +467,26 @@ class Planner(BaseAgent):
                 self.log.exception("avoid_moon filter failed")
 
         full.sort(key=lambda x: (-x["priority"], -x["alt_deg"]))
-
-        # ----------------------------------------------------------------
-        # Apply session shaping: top-4 cap + 60-min-minimum-dwell.
-        # The operator wants depth over breadth — better to get a deep,
-        # noise-averaged stack of a few targets than a token snapshot of
-        # twelve.
-        # ----------------------------------------------------------------
-        full_unshaped = list(full)   # keep the full ranked list for the
+        full_unshaped = list(full)   # full ranked list, for the
                                        # dashboard's "considered but not
                                        # scheduled" view
-        scheduled = full[:MAX_TARGETS_PER_SESSION]
-        for t in scheduled:
+
+        # ----------------------------------------------------------------
+        # Time-aware scheduler: queue by when each target enters viewing
+        # range. Pad each entry's exposure plan to >= MIN_DWELL_MINUTES
+        # first so the scheduler has the actual preferred dwell on hand.
+        # Then walk dusk -> dawn and slot targets in by rise-time, with
+        # priority as tiebreaker. Targets that wouldn't fit a full dwell
+        # are dropped entirely (depth-over-breadth), not half-imaged.
+        # ----------------------------------------------------------------
+        for t in full:
             current_min = float(t.get("total_integration_min") or 0.0)
             if current_min < MIN_DWELL_MINUTES and t.get("exposure_plan"):
                 pad_factor = MIN_DWELL_MINUTES / max(current_min, 1.0)
                 padded_plan = []
                 new_total = 0.0
                 for set_ in t["exposure_plan"]:
-                    # Scale the count, not the exposure_s — preserves SNR
-                    # characteristics and dither cadence.
+                    # Scale count, not exposure_s — preserves SNR + dither cadence.
                     new_count = max(1, int(round(set_["count"] * pad_factor)))
                     new_total_s = set_["exposure_s"] * new_count
                     padded_plan.append({
@@ -501,29 +501,67 @@ class Planner(BaseAgent):
                 t["total_integration_min"] = round(new_total, 1)
                 t["dwell_padded_from_min"] = round(current_min, 1)
             t["min_dwell_minutes"] = MIN_DWELL_MINUTES
-            t["scheduled_for_min"] = max(float(t.get("total_integration_min") or 0.0),
-                                            float(MIN_DWELL_MINUTES))
 
-        scheduled_total_min = sum(t["scheduled_for_min"] for t in scheduled)
-        window_min = (window["hours"] * 60.0) if window else None
-        overrun = (window_min is not None
-                     and scheduled_total_min > window_min)
+        scheduled: list[dict] = []
+        unscheduled: list[dict] = []
+        sched_total_min = 0.0
+        if window is None:
+            # No dark window (polar day) — nothing schedulable. The
+            # session-cancel paths elsewhere handle this.
+            window_min = None
+            overrun = False
+            schedule_obj = None
+        else:
+            from atlas.astronomy.scheduler import schedule_targets
+            dusk_dt = datetime.fromisoformat(window["dusk_utc"].rstrip("Z"))
+            dawn_dt = datetime.fromisoformat(window["dawn_utc"].rstrip("Z"))
+            window_min = window["hours"] * 60.0
+            schedule_obj = schedule_targets(
+                full,
+                lat=lat, lon=lon, horizon_alt=horizon_alt,
+                dusk=dusk_dt, dawn=dawn_dt,
+                max_targets=MAX_TARGETS_PER_SESSION,
+                min_dwell_minutes=MIN_DWELL_MINUTES,
+                fit_strategy="depth",
+            )
+            for slot in schedule_obj.slots:
+                t = dict(slot.target)
+                t["start_utc"] = slot.start_utc.isoformat(timespec="seconds") + "Z"
+                t["end_utc"] = slot.end_utc.isoformat(timespec="seconds") + "Z"
+                t["scheduled_for_min"] = slot.dwell_min
+                if slot.truncated_from_min:
+                    t["scheduled_truncated_from_min"] = slot.truncated_from_min
+                if slot.visibility:
+                    t["visible_from_utc"] = slot.visibility.visible_from.isoformat(timespec="seconds") + "Z"
+                    t["visible_until_utc"] = slot.visibility.visible_until.isoformat(timespec="seconds") + "Z"
+                    t["peak_alt_deg"] = slot.visibility.peak_alt_deg
+                scheduled.append(t)
+            unscheduled = [{
+                "target_name": s["target"].get("target_name"),
+                "campaign_name": s["target"].get("campaign_name"),
+                "priority": s["target"].get("priority"),
+                "reason": s["reason"],
+            } for s in schedule_obj.skipped]
+            sched_total_min = schedule_obj.scheduled_total_min
+            overrun = False   # by construction the scheduler can't overrun
 
         plan = {
             "built_at": now.isoformat(timespec="seconds") + "Z",
             "reason": reason,
             "active_campaigns": len(campaigns),
-            # The Operator + UI both read `visible_targets`; that's now
-            # the *scheduled* top-N, not the full ranked list. The full
-            # list is retained under `considered` for transparency.
+            # The Operator + UI both read `visible_targets`; it's the
+            # scheduled queue, time-ordered, each entry carrying start_utc
+            # / end_utc / scheduled_for_min.
             "visible_targets": scheduled,
             "considered": full_unshaped,
             "considered_count": len(full_unshaped),
+            "unscheduled": unscheduled,
             "max_targets_per_session": MAX_TARGETS_PER_SESSION,
             "min_dwell_minutes": MIN_DWELL_MINUTES,
-            "scheduled_total_min": round(scheduled_total_min, 1),
+            "scheduled_total_min": round(sched_total_min, 1),
             "dark_window_min": (round(window_min, 1) if window_min else None),
             "overruns_dark_window": bool(overrun),
+            "fit_strategy": "depth",
             "skipped_below_horizon": skipped_below_horizon,
             "skipped_no_coords": skipped_no_coords,
             "horizon_alt_min_deg": horizon_alt,
@@ -551,17 +589,16 @@ class Planner(BaseAgent):
         n_cons  = len(full_unshaped)
         budget_note = ""
         if window_min is not None:
-            budget_note = (f"; scheduled {scheduled_total_min:.0f} min "
-                            f"of {window_min:.0f} min dark"
-                            + ("  -- OVERRUNS WINDOW" if overrun else ""))
+            budget_note = (f"; scheduled {sched_total_min:.0f} min "
+                            f"of {window_min:.0f} min dark "
+                            f"(fits depth-first, cap {MAX_TARGETS_PER_SESSION})")
         if plan["fallback_to_catalog"]:
             summary = (f"plan rebuilt -- {n_sched} of {n_cons} seasonal "
-                       f"showcase targets scheduled (top-{MAX_TARGETS_PER_SESSION}, "
-                       f">={MIN_DWELL_MINUTES} min each){budget_note}")
+                       f"showcase targets scheduled "
+                       f"(>={MIN_DWELL_MINUTES} min each){budget_note}")
         else:
             summary = (f"plan rebuilt -- {n_sched} of {n_cons} target(s) "
-                       f"scheduled (top-{MAX_TARGETS_PER_SESSION}, "
-                       f">={MIN_DWELL_MINUTES} min each) from "
+                       f"scheduled (>={MIN_DWELL_MINUTES} min each) from "
                        f"{len(campaigns)} active campaign(s){budget_note}")
         self.set_task(summary + "; next sweep in ~30 min", state="waiting")
         self.log.info(summary)
