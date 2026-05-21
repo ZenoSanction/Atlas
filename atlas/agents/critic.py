@@ -167,6 +167,27 @@ class Critic(BaseAgent):
                        FAST_LOOP_S, STANDARD_LOOP_S)
         self.set_task("watchdog online — first weather pull next",
                       state="working")
+        # PHD2 event-stream subscriber. Owned by the Critic for its
+        # lifetime; the fast loop reads rolling RMS off the in-memory
+        # buffer instead of RPC'ing PHD2 every 90 s. Sim mode synthesises
+        # events; real mode opens a TCP connection on equip.phd2_host.
+        try:
+            from atlas.config import is_simulation_mode
+            from atlas.hardware.phd2_events import get_event_stream
+            sim = is_simulation_mode()
+            equip = ConfigManager.get_equipment()
+            if equip is not None:
+                self._phd2_stream = get_event_stream(
+                    host=equip.phd2_host, port=equip.phd2_port,
+                    simulation=sim,
+                )
+            else:
+                self._phd2_stream = get_event_stream(
+                    host="localhost", port=4400, simulation=sim,
+                )
+        except Exception as e:
+            self.log.warning("PHD2 event stream not started: %s", e)
+            self._phd2_stream = None
         # Background task: drain the bus queue so relays to the Critic
         # (e.g., Planner asking for a fresh weather review) actually get
         # picked up. Until now Critic never read from its queue.
@@ -197,6 +218,11 @@ class Critic(BaseAgent):
                 await asyncio.sleep(5)
         finally:
             drain_task.cancel()
+            try:
+                from atlas.hardware.phd2_events import stop_event_stream
+                await stop_event_stream()
+            except Exception:
+                pass
             try:
                 await drain_task
             except (asyncio.CancelledError, Exception):
@@ -399,8 +425,9 @@ class Critic(BaseAgent):
         )
 
     async def _fast_loop(self) -> None:
-        """Fast loop: guiding RMS, focus HFR, camera temperature.
-        Only runs when a session is actively imaging."""
+        """Fast loop: guiding RMS (from PHD2 event stream), camera
+        temperature, focus HFR. Only runs when a session is actively
+        imaging."""
         sess = SessionManager.latest()
         if sess is None:
             self.set_task("fast loop: no active session — skipping",
@@ -416,44 +443,93 @@ class Critic(BaseAgent):
                       state="working")
 
         from atlas.config import is_simulation_mode
-        if is_simulation_mode():
-            # In sim mode the fast loop ticks but doesn't try to pull from
-            # the fake hardware (the fakes don't expose guiding stats).
-            self.log.debug("fast loop tick (sim)")
-            return
-
+        sim = is_simulation_mode()
         equip = ConfigManager.get_equipment()
-        if equip is None:
-            return
         session_id = sess.id
 
-        # ---- Guiding RMS (PHD2) ------------------------------------------
-        try:
-            from atlas.hardware.phd2 import Phd2Client
-            async with Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
-                                    timeout=3.0) as phd2:
-                stats = await phd2.call("get_star_image")  # cheap reachability probe
-                # Try to pull guiding stats
+        # ---- Guiding RMS (PHD2 event stream, in both real + sim) --------
+        # The Phd2EventStream singleton has been folding GuideStep events
+        # into a rolling buffer since boot. We just compute current RMS
+        # in arcseconds (using the equipment's pixel scale if available)
+        # and compare against thresholds.
+        if self._phd2_stream is not None:
+            pixel_scale = None
+            if equip and getattr(equip, "pixel_scale_arcsec", None):
                 try:
-                    gstats = await phd2.call("get_guide_stats")
-                    rms = float(gstats.get("rms_total", 0.0))
-                    if rms > 4.0:
-                        await self._raise(AlertSeverity.CRITICAL, "guiding_lost",
-                                            f"Guiding RMS {rms:.2f}\" > 4.0\"",
-                                            session_id=session_id,
-                                            data={"rms_total": rms})
-                    elif rms > 2.0:
-                        await self._raise(AlertSeverity.WARNING, "guiding_drift",
-                                            f"Guiding RMS {rms:.2f}\" > 2.0\"",
-                                            session_id=session_id,
-                                            data={"rms_total": rms})
-                    else:
-                        self._clear("guiding_lost")
-                        self._clear("guiding_drift")
-                except Exception:
-                    pass
-        except Exception as e:
-            self.log.debug("PHD2 fast-loop poll failed: %s", e)
+                    pixel_scale = float(equip.pixel_scale_arcsec)
+                except (TypeError, ValueError):
+                    pixel_scale = None
+            stats = self._phd2_stream.current(pixel_scale_arcsec=pixel_scale)
+            # Prefer arcseconds when we have pixel scale, fall back to
+            # pixels otherwise. Threshold: 2"/4" RMS-total in arcsec
+            # (standard amateur thresholds at long focal length); in
+            # pixel-only fallback we use 1.5px / 3px.
+            metric = stats.rms_total_arcsec
+            unit = '"'
+            warn_threshold, crit_threshold = 2.0, 4.0
+            if metric is None:
+                metric = stats.rms_total_px
+                unit = "px"
+                warn_threshold, crit_threshold = 1.5, 3.0
+
+            # Stale buffer = nothing arriving from PHD2 — guiding probably
+            # stopped or PHD2 lost the socket.
+            buffer_stale = (stats.last_step_age_s > 30 and stats.sample_count > 0)
+            if buffer_stale:
+                await self._raise(
+                    AlertSeverity.CRITICAL, "guiding_silent",
+                    f"PHD2 buffer stale ({stats.last_step_age_s:.0f}s "
+                    f"since last GuideStep). Guiding may have stopped.",
+                    session_id=session_id, data=stats.to_jsonable(),
+                )
+            elif stats.sample_count == 0:
+                # Never received a sample — cold boot or PHD2 offline.
+                # Don't alert (the GO/NO-GO hardware gate handles that).
+                self._clear("guiding_silent")
+                self._clear("guiding_drift")
+                self._clear("guiding_lost")
+            elif stats.star_lost_recent:
+                await self._raise(
+                    AlertSeverity.CRITICAL, "guiding_lost",
+                    "PHD2 emitted StarLost in the last 30 s",
+                    session_id=session_id, data=stats.to_jsonable(),
+                )
+            elif metric > crit_threshold:
+                await self._raise(
+                    AlertSeverity.CRITICAL, "guiding_lost",
+                    f"Guiding RMS {metric:.2f}{unit} > {crit_threshold:.1f}{unit}",
+                    session_id=session_id, data=stats.to_jsonable(),
+                )
+            elif metric > warn_threshold:
+                await self._raise(
+                    AlertSeverity.WARNING, "guiding_drift",
+                    f"Guiding RMS {metric:.2f}{unit} > {warn_threshold:.1f}{unit}",
+                    session_id=session_id, data=stats.to_jsonable(),
+                )
+            else:
+                self._clear("guiding_silent")
+                self._clear("guiding_lost")
+                self._clear("guiding_drift")
+            # Park the stats in shared state so the dashboard's Critic
+            # lane can display the live RMS reading.
+            try:
+                get_state().push_agent_message("critic", {
+                    "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "kind": "guiding_rms",
+                    "rms_total_px": stats.rms_total_px,
+                    "rms_total_arcsec": stats.rms_total_arcsec,
+                    "sample_count": stats.sample_count,
+                    "app_state": stats.app_state,
+                })
+            except Exception:
+                pass
+
+        if sim:
+            self.log.debug("fast loop tick (sim) — guiding from event stream")
+            return
+
+        if equip is None:
+            return
 
         # ---- Camera temperature + focuser HFR (NINA) ---------------------
         try:

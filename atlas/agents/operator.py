@@ -391,6 +391,12 @@ class Operator(BaseAgent):
                 await self._cmd_release_control(params)
             elif cmd == "manual_action":
                 await self._cmd_manual_action(params)
+            elif cmd == "start_cooling":
+                await self._cmd_start_cooling(params)
+            elif cmd == "start_capture_sequence":
+                await self._cmd_start_capture_sequence(params)
+            elif cmd == "abort_capture_sequence":
+                await self._cmd_abort_capture_sequence(params)
             else:
                 self.log_decision("human_command_unrecognised",
                                     inputs={"command": cmd, "params": params},
@@ -577,6 +583,160 @@ class Operator(BaseAgent):
             })
         except Exception:
             pass
+
+    async def _cmd_start_cooling(self, params: dict) -> None:
+        """Cool the camera to the requested setpoint and wait for stable.
+        Runs in a background task so the Operator's queue stays responsive
+        (cooling can take 10-15 min on a warm night). Progress events are
+        broadcast over the bus so the dashboard can show a live readout."""
+        from atlas.config import is_simulation_mode
+        from atlas.db.managers import ConfigManager
+        from atlas.hardware.cooling import CoolingController
+        target_c = float(params.get("target_c"))
+        tolerance_c = float(params.get("tolerance_c") or 0.3)
+        max_wait_s = float(params.get("max_wait_s") or 900.0)
+        sim = is_simulation_mode()
+        equip = ConfigManager.get_equipment()
+        if sim or equip is None:
+            from atlas.simulation.fake_hardware import FakeNina
+            nina = FakeNina()
+        else:
+            from atlas.hardware.nina import NinaClient
+            nina = NinaClient(host=equip.nina_host, port=equip.nina_port,
+                                timeout=10.0)
+        self.log_decision("start_cooling",
+                            inputs={"target_c": target_c,
+                                      "tolerance_c": tolerance_c},
+                            rationale="Pre-imaging cooling sequence",
+                            session_id=self._current_session_id)
+
+        async def run() -> None:
+            ctrl = CoolingController(
+                nina, target_c=target_c, tolerance_c=tolerance_c,
+                max_wait_s=max_wait_s, simulation=sim,
+            )
+            try:
+                async for snap in ctrl.run():
+                    get_state().push_agent_message("operator", {
+                        "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "kind": "cooling_progress",
+                        **snap.to_jsonable(),
+                    })
+                    self.set_task(
+                        f"cooling {snap.current_c:.2f}°C -> {snap.target_c:.1f}°C "
+                        f"({snap.state})" if snap.current_c is not None
+                        else f"cooling: {snap.state}",
+                        state="working",
+                    )
+                    try:
+                        await self.bus.broadcast_event({
+                            "type": "cooling_progress",
+                            "sender": "operator",
+                            **snap.to_jsonable(),
+                            "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        })
+                    except Exception:
+                        pass
+                final = ctrl.final
+                self.log_decision("cooling_complete",
+                                    inputs={"target_c": target_c},
+                                    outputs=final.to_jsonable() if final else {},
+                                    rationale=final.note if final else "",
+                                    session_id=self._current_session_id)
+                self.set_task(
+                    f"cooling {final.state}: {final.note}" if final
+                    else "cooling finished",
+                    state="idle",
+                )
+            finally:
+                try:
+                    await nina.close()
+                except Exception:
+                    pass
+
+        asyncio.create_task(run(), name="operator-cooling")
+
+    async def _cmd_start_capture_sequence(self, params: dict) -> None:
+        """Walk a target's exposure plan, capturing frames via NINA. See
+        atlas/capture/sequence.py. Runs in a background task; the
+        Operator's queue keeps responding to commands during capture."""
+        from atlas.capture.sequence import CaptureSequence
+        from atlas.config import is_simulation_mode
+        from atlas.db.managers import ConfigManager
+        target = params.get("target") or {}
+        exposure_plan = params.get("exposure_plan") or target.get("exposure_plan")
+        dither_every = int(params.get("dither_every_n_frames") or 1)
+        if not exposure_plan:
+            self.log.warning("start_capture_sequence: no exposure_plan given")
+            return
+        sim = is_simulation_mode()
+        equip = ConfigManager.get_equipment()
+        if sim or equip is None:
+            from atlas.simulation.fake_hardware import FakeNina, FakePhd2
+            nina = FakeNina()
+            phd2 = FakePhd2()
+        else:
+            from atlas.hardware.nina import NinaClient
+            from atlas.hardware.phd2 import Phd2Client
+            nina = NinaClient(host=equip.nina_host, port=equip.nina_port,
+                                timeout=30.0)
+            phd2 = Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
+                                timeout=10.0)
+        seq = CaptureSequence(nina=nina, phd2=phd2, target=target,
+                                exposure_plan=exposure_plan,
+                                dither_every_n_frames=dither_every,
+                                simulation=sim,
+                                session_id=self._current_session_id)
+        self._current_capture = seq
+        self.log_decision("start_capture_sequence",
+                            inputs={"target": target.get("target_name"),
+                                      "plan_length": len(exposure_plan)},
+                            rationale="Operator-initiated capture",
+                            session_id=self._current_session_id)
+
+        async def run() -> None:
+            try:
+                async for ev in seq.run():
+                    get_state().push_agent_message("operator", {
+                        "at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "kind": "capture_progress",
+                        **ev,
+                    })
+                    self.set_task(
+                        f"capture: {ev.get('summary', '')}",
+                        state="working" if ev.get("state") != "complete" else "idle",
+                    )
+                    try:
+                        await self.bus.broadcast_event({
+                            "type": "capture_progress",
+                            "sender": "operator",
+                            "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                            **ev,
+                        })
+                    except Exception:
+                        pass
+            finally:
+                self._current_capture = None
+                try:
+                    await nina.close()
+                except Exception:
+                    pass
+                try:
+                    await phd2.close()
+                except Exception:
+                    pass
+
+        asyncio.create_task(run(), name="operator-capture")
+
+    async def _cmd_abort_capture_sequence(self, params: dict) -> None:
+        seq = getattr(self, "_current_capture", None)
+        if seq is None:
+            self.log.info("abort_capture_sequence: nothing running")
+            return
+        seq.abort(reason=str(params.get("reason") or "operator-abort"))
+        self.log_decision("abort_capture_sequence",
+                            rationale=str(params.get("reason") or "operator-abort"),
+                            session_id=self._current_session_id)
 
     async def _cmd_start_session(self, params: dict) -> None:
         """Create a new Session row in the DB, mark NOMINAL, broadcast.
