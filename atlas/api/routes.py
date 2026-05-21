@@ -86,7 +86,51 @@ async def init_vault(req: InitVaultRequest) -> dict:
         vault.initialise(req.password)
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return {"ok": True}
+    # Newly initialised vaults are also automatically unlocked.
+    preflight = await _refresh_preflight_now(reason="vault_initialised")
+    return {"ok": True, "preflight": preflight}
+
+
+async def _refresh_preflight_now(reason: str = "vault state changed") -> dict:
+    """Run the pre-flight gates immediately and publish the result.
+
+    Normally the Operator agent runs this every 120 s on its own loop.
+    That's fine for slow-moving conditions but feels broken when the
+    operator just unlocked the vault and the dashboard's NO-GO banner
+    keeps insisting "Blocked by: Credential vault" for up to two
+    minutes. We poke the loop right after any state change that flips
+    a gate so the UI feedback is instant."""
+    from atlas.safety.preflight import run_session_preflight
+    from atlas.agents.state import OperatorVerdict, get_state
+    try:
+        preflight = await run_session_preflight()
+    except Exception as e:
+        log.warning("Immediate preflight refresh failed (%s): %s", reason, e)
+        return {"refreshed": False, "error": str(e)}
+    pf_dict = preflight.to_jsonable()
+    get_state().set_preflight(pf_dict)
+    new_verdict = OperatorVerdict(
+        decided_at=preflight.assessed_at,
+        verdict=preflight.verdict,
+        reason=preflight.reason,
+        sources=["session_preflight", reason],
+    )
+    get_state().set_verdict(new_verdict)
+    try:
+        await get_bus().broadcast_event({
+            "type": "session_preflight",
+            "sender": "api",
+            "kind": "preflight_verdict",
+            "verdict": preflight.verdict,
+            "reason": preflight.reason,
+            "next_action": preflight.next_action,
+            "triggered_by": reason,
+            "sent_at": preflight.assessed_at,
+        })
+    except Exception:
+        pass
+    return {"refreshed": True, "verdict": preflight.verdict,
+              "reason": preflight.reason}
 
 
 @api_router.post("/setup/vault/unlock")
@@ -96,13 +140,18 @@ async def unlock_vault(req: UnlockVaultRequest) -> dict:
         raise HTTPException(409, "Vault not initialised. Call /setup/vault/init first.")
     if not vault.unlock(req.password):
         raise HTTPException(401, "Incorrect master password")
-    return {"ok": True}
+    # Flip the pre-flight verdict immediately — otherwise the dashboard's
+    # NO-GO banner stays stale for up to 2 minutes while the Operator's
+    # background loop catches up.
+    preflight = await _refresh_preflight_now(reason="vault_unlocked")
+    return {"ok": True, "preflight": preflight}
 
 
 @api_router.post("/setup/vault/lock")
 async def lock_vault() -> dict:
     get_vault().lock()
-    return {"ok": True}
+    preflight = await _refresh_preflight_now(reason="vault_locked")
+    return {"ok": True, "preflight": preflight}
 
 
 @api_router.post("/setup/credentials")
@@ -753,7 +802,12 @@ async def save_system_flags(body: dict) -> dict:
     if "simulation_mode" in body:
         fields["simulation_mode"] = bool(body["simulation_mode"])
     ConfigManager.save_system_flags(**fields)
-    return {"ok": True, "simulation_mode_effective": is_simulation_mode()}
+    # Sim toggle flips the hardware gate (and indirectly several others).
+    # Refresh the verdict immediately so the dashboard doesn't lag.
+    preflight = await _refresh_preflight_now(reason="sim_mode_toggled")
+    return {"ok": True,
+              "simulation_mode_effective": is_simulation_mode(),
+              "preflight": preflight}
 
 
 @api_router.get("/setup/tls")

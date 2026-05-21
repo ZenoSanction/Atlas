@@ -1,5 +1,16 @@
 // Setup tab — wizard and forms.
 
+import { refreshMissionControl } from "/static/js/mission-control.js";
+
+function nudgeMissionControl() {
+  // Re-fetch /api/mission-control immediately so the Tonight tab's
+  // verdict banner + Session Readiness panel reflect the change
+  // (vault unlock, sim toggle, etc.) without waiting for the next poll.
+  try {
+    if (window.atlas && window.atlas.api) refreshMissionControl(window.atlas.api);
+  } catch {}
+}
+
 export async function initSetup(api) {
   await refreshStatus(api);
   await renderSystemFlags(api);
@@ -151,6 +162,7 @@ async function renderSystemFlags(api) {
       status.textContent = `Saved. Effective sim mode: ${r.simulation_mode_effective ? "ON" : "OFF"}.`;
       status.className = "form-status ok";
       await renderSystemFlags(api);  // refresh effective line
+      nudgeMissionControl();
     } catch (e) {
       status.textContent = e.message;
       status.className = "form-status err";
@@ -227,12 +239,13 @@ async function renderVaultForm(api) {
       const pw = document.getElementById("vault-new").value;
       const msg = document.getElementById("vault-msg");
       try {
-        await api("/setup/vault/init", { method: "POST",
+        const r = await api("/setup/vault/init", { method: "POST",
           body: JSON.stringify({ password: pw }) });
-        msg.textContent = "Vault created. ✓";
+        msg.textContent = `Vault created. Verdict now: ${r.preflight?.verdict || "—"} ✓`;
         msg.className = "cred-status ok";
         await refreshStatus(api);
         await renderVaultForm(api);
+        nudgeMissionControl();
       } catch (e) {
         msg.textContent = e.message;
         msg.className = "cred-status err";
@@ -249,11 +262,18 @@ async function renderVaultForm(api) {
       const pw = document.getElementById("vault-unlock-pw").value;
       const msg = document.getElementById("vault-msg");
       try {
-        await api("/setup/vault/unlock", { method: "POST",
+        const r = await api("/setup/vault/unlock", { method: "POST",
           body: JSON.stringify({ password: pw }) });
-        msg.textContent = "Unlocked. ✓";
+        const v = r.preflight?.verdict || "—";
+        msg.textContent = `Unlocked. Verdict now: ${v} ✓`;
         msg.className = "cred-status ok";
         await refreshStatus(api);
+        // Kick the Tonight tab to pick up the fresh verdict without
+        // waiting for its 3 s poll cycle. Without this the operator
+        // unlocks, switches to Tonight, and still sees NO-GO for
+        // another two seconds — feels broken even though the API
+        // already responded with the new verdict.
+        nudgeMissionControl();
       } catch (e) {
         msg.textContent = e.message;
         msg.className = "cred-status err";
