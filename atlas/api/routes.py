@@ -317,6 +317,113 @@ async def operator_command(cmd: OperatorCommand) -> dict:
 
 
 # ============================================================================
+# Manual control (human override of autonomous Operator)
+# ============================================================================
+
+@api_router.get("/control/status")
+async def control_status() -> dict:
+    """Current take-control state + recent manual hardware actions.
+    The dashboard polls this every few seconds to keep the MANUAL banner
+    + Hardware Controls panel in sync."""
+    from atlas.agents.state import get_state
+    mc = get_state().get_manual_control()
+    actions = get_state().get_manual_actions(limit=20)
+    return {
+        "engaged": mc.engaged,
+        "engaged_at": mc.engaged_at,
+        "released_at": mc.released_at,
+        "reason": mc.reason,
+        "engaged_by": mc.engaged_by,
+        "action_count": mc.action_count,
+        "last_action": mc.last_action,
+        "actions": actions,
+    }
+
+
+@api_router.post("/control/take")
+async def control_take(body: dict | None = None) -> dict:
+    """Engage human override. Posts the take_control command onto the
+    Operator's queue; the Operator's _cmd_take_control handler updates
+    state and broadcasts the engagement event."""
+    body = body or {}
+    reason = (body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(400, "reason required: explain why you're taking control")
+    sess = SessionManager.latest()
+    session_id = sess.id if sess else None
+    await get_bus().send(Message(
+        sender=AgentName.OPERATOR,
+        recipient=AgentName.OPERATOR,
+        kind=AgentMessageKind.OPERATOR_COMMAND,
+        payload={"command": "take_control",
+                  "params": {"reason": reason,
+                              "by": body.get("by") or "operator"}},
+        session_id=session_id,
+    ))
+    return {"ok": True, "reason": reason}
+
+
+@api_router.post("/control/release")
+async def control_release(body: dict | None = None) -> dict:
+    """Release human override. Operator resumes autonomy on next cycle."""
+    body = body or {}
+    reason = (body.get("reason") or "operator released control").strip()
+    sess = SessionManager.latest()
+    session_id = sess.id if sess else None
+    await get_bus().send(Message(
+        sender=AgentName.OPERATOR,
+        recipient=AgentName.OPERATOR,
+        kind=AgentMessageKind.OPERATOR_COMMAND,
+        payload={"command": "release_control",
+                  "params": {"reason": reason}},
+        session_id=session_id,
+    ))
+    return {"ok": True, "reason": reason}
+
+
+_VALID_MANUAL_KINDS = {
+    "slew", "park", "unpark", "capture", "set_cooling", "warmup",
+    "move_focuser", "change_filter", "dome_open", "dome_close",
+}
+
+
+@api_router.post("/control/command")
+async def control_command(body: dict | None = None) -> dict:
+    """Issue a single direct hardware command. Only honoured while manual
+    control is engaged — the Operator's _cmd_manual_action handler enforces
+    that and records every attempt in the audit ring buffer.
+
+    Body shape:
+        { "kind": "slew", "args": {"ra_hours": 5.6, "dec_deg": -5.4},
+          "rationale": "Recentre on Orion Nebula for visual check" }
+    """
+    from atlas.agents.state import get_state
+    body = body or {}
+    kind = (body.get("kind") or "").lower().strip()
+    args = body.get("args") or {}
+    rationale = (body.get("rationale") or "").strip()
+    if kind not in _VALID_MANUAL_KINDS:
+        raise HTTPException(400, f"unknown kind '{kind}'. Valid: {sorted(_VALID_MANUAL_KINDS)}")
+    if not rationale:
+        raise HTTPException(400, "rationale required for every manual action (audit trail)")
+    if not get_state().is_manual():
+        raise HTTPException(409,
+            "Manual control is not engaged. POST /api/control/take first.")
+    sess = SessionManager.latest()
+    session_id = sess.id if sess else None
+    await get_bus().send(Message(
+        sender=AgentName.OPERATOR,
+        recipient=AgentName.OPERATOR,
+        kind=AgentMessageKind.OPERATOR_COMMAND,
+        payload={"command": "manual_action",
+                  "params": {"kind": kind, "args": args,
+                              "rationale": rationale}},
+        session_id=session_id,
+    ))
+    return {"ok": True, "kind": kind, "rationale": rationale}
+
+
+# ============================================================================
 # Plan (campaigns + targets)
 # ============================================================================
 
@@ -721,6 +828,7 @@ async def mission_control() -> dict:
         d["memory_count"] = MemoryManager.count_for(name, include_shared=True)
         agents[name] = d
     verdict = st.get_verdict()
+    mc = st.get_manual_control()
     return {
         "now_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "simulation_mode": is_simulation_mode(),
@@ -728,6 +836,7 @@ async def mission_control() -> dict:
         "verdict": verdict.to_jsonable() if verdict else None,
         "preflight": st.get_preflight(),
         "session_review": st.get_session_review(),
+        "manual_control": mc.to_jsonable(),
         "agents": agents,
         "message_flow": st.get_message_flow(limit=40),
     }

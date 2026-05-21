@@ -163,6 +163,14 @@ class Operator(BaseAgent):
         from atlas.agents.session_workflow import (
             SessionReview, PHASE_ORACLE_QUERY,
         )
+        if get_state().is_manual():
+            self.log.info("Manual control engaged — pipeline paused (skipping Oracle hand-off).")
+            self.set_task("manual control engaged — pipeline paused (Oracle hand-off skipped)",
+                          state="waiting")
+            self.log_decision("pipeline_paused_manual",
+                                inputs={"phase": "route_to_oracle"},
+                                rationale="Manual override engaged; not dispatching to Oracle")
+            return
         review = SessionReview.from_jsonable(review_dict)
         n_warn = sum(1 for w in review.critic_warnings if w.severity != "ok")
         self.set_task(
@@ -190,6 +198,14 @@ class Operator(BaseAgent):
         from atlas.agents.session_workflow import (
             SessionReview, PHASE_OPERATOR_DECN,
         )
+        if get_state().is_manual():
+            self.log.info("Manual control engaged — pipeline paused (no session decision dispatched).")
+            self.set_task("manual control engaged — pipeline paused (decision held)",
+                          state="waiting")
+            self.log_decision("pipeline_paused_manual",
+                                inputs={"phase": "decide_session"},
+                                rationale="Manual override engaged; decision not dispatched to Planner")
+            return
         review = SessionReview.from_jsonable(review_dict)
 
         critical = [w for w in review.critic_warnings if w.severity == "critical"]
@@ -289,6 +305,28 @@ class Operator(BaseAgent):
             self.log.warning("[safe-mode] alert pass-through: %s", code)
             return
 
+        if get_state().is_manual():
+            # Human is driving — surface the alert in the audit log but do
+            # NOT auto-fix or trigger emergency shutdown sequences. Critical
+            # safety alerts still escalate via broadcast so the dashboard
+            # banner lights up; the human decides what to do about them.
+            self.log.warning("[manual-control] alert pass-through: %s (%s)", code, severity)
+            self.log_decision("alert_passthrough_manual",
+                                inputs={"code": code, "severity": str(severity), "message": text},
+                                rationale="Manual override engaged; not auto-fixing or shutting down",
+                                session_id=self._current_session_id)
+            try:
+                await self.bus.broadcast_event({
+                    "type": "alert_manual_passthrough",
+                    "sender": "operator", "code": code,
+                    "severity": severity.value if hasattr(severity, "value") else str(severity),
+                    "message": text,
+                    "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                })
+            except Exception:
+                pass
+            return
+
         # Critical alerts → emergency-class decision
         if severity == AlertSeverity.CRITICAL:
             self.log.error("CRITICAL alert: %s — %s", code, text)
@@ -348,13 +386,11 @@ class Operator(BaseAgent):
             elif cmd == "stop_session":
                 await self._cmd_stop_session(params)
             elif cmd == "take_control":
-                self.log_decision("take_control", inputs=params,
-                                    rationale="Human took control",
-                                    session_id=self._current_session_id)
+                await self._cmd_take_control(params)
             elif cmd == "release_control":
-                self.log_decision("release_control", inputs=params,
-                                    rationale="Human released control",
-                                    session_id=self._current_session_id)
+                await self._cmd_release_control(params)
+            elif cmd == "manual_action":
+                await self._cmd_manual_action(params)
             else:
                 self.log_decision("human_command_unrecognised",
                                     inputs={"command": cmd, "params": params},
@@ -363,6 +399,184 @@ class Operator(BaseAgent):
                 self.log.warning("Operator command not recognised: %s", cmd)
         except Exception:
             self.log.exception("Operator command %s failed", cmd)
+
+    async def _cmd_take_control(self, params: dict) -> None:
+        """Engage human override. Operator stops dispatching autonomous
+        session decisions, alert auto-fixes, and pipeline hand-offs until
+        release_control. Pre-flight + Critic still publish status."""
+        reason = (params.get("reason") or "operator requested control").strip()
+        by = (params.get("by") or "operator").strip() or "operator"
+        snap = get_state().set_manual_control(reason=reason, by=by)
+        self.log_decision("take_control",
+                            inputs={"reason": reason, "by": by},
+                            outputs={"engaged_at": snap.engaged_at},
+                            rationale=f"Human override engaged: {reason[:120]}",
+                            session_id=self._current_session_id)
+        self.set_task(f"manual control engaged by {by}: {reason[:60]}",
+                      state="waiting")
+        try:
+            await self.bus.broadcast_event({
+                "type": "manual_control",
+                "sender": "operator",
+                "engaged": True,
+                "reason": reason,
+                "by": by,
+                "sent_at": snap.engaged_at,
+            })
+        except Exception:
+            pass
+        self.log.warning("Manual control ENGAGED by %s: %s", by, reason)
+
+    async def _cmd_release_control(self, params: dict) -> None:
+        """Release human override and let autonomy resume on the next
+        pre-flight / message cycle."""
+        reason = (params.get("reason") or "operator released control").strip()
+        snap = get_state().clear_manual_control(reason=reason)
+        self.log_decision("release_control",
+                            inputs={"reason": reason},
+                            outputs={"released_at": snap.released_at,
+                                      "action_count": snap.action_count},
+                            rationale=f"Human override released: {reason[:120]}",
+                            session_id=self._current_session_id)
+        self.set_task("autonomy resumed — standing by",
+                      state="idle")
+        try:
+            await self.bus.broadcast_event({
+                "type": "manual_control",
+                "sender": "operator",
+                "engaged": False,
+                "reason": reason,
+                "action_count": snap.action_count,
+                "sent_at": snap.released_at,
+            })
+        except Exception:
+            pass
+        self.log.info("Manual control RELEASED: %s (%d manual actions recorded)",
+                        reason, snap.action_count)
+
+    async def _cmd_manual_action(self, params: dict) -> None:
+        """Execute a single direct hardware command on behalf of the human.
+        Only valid when manual control is engaged. Every action is logged +
+        appended to the manual-actions ring buffer for the audit panel."""
+        from atlas.config import is_simulation_mode
+        from atlas.db.managers import ConfigManager
+        kind = (params.get("kind") or "").lower().strip()
+        args = params.get("args") or {}
+        rationale = (params.get("rationale") or "").strip()
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        if not get_state().is_manual():
+            self.log.warning("manual_action %s rejected — not in manual mode", kind)
+            self.log_decision("manual_action_rejected",
+                                inputs={"kind": kind, "args": args},
+                                rationale="Manual mode not engaged",
+                                session_id=self._current_session_id)
+            return
+
+        # Pick the right client. Sim mode uses FakeNina (always succeeds);
+        # real mode uses the NinaClient pointed at the configured host/port.
+        equip = ConfigManager.get_equipment()
+        if is_simulation_mode() or equip is None:
+            from atlas.simulation.fake_hardware import FakeNina
+            nina = FakeNina()
+        else:
+            from atlas.hardware.nina import NinaClient
+            nina = NinaClient(host=equip.nina_host, port=equip.nina_port, timeout=10.0)
+
+        ok = False
+        result: dict = {}
+        try:
+            if kind == "slew":
+                # Dashboard sends RA in hours (NINA's native unit) + DEC in degrees.
+                ra_hours = float(args.get("ra_hours") if args.get("ra_hours") is not None
+                                   else (float(args.get("ra_deg") or 0.0) / 15.0))
+                dec_deg = float(args.get("dec_deg") or 0.0)
+                result = await nina.slew(ra_hours=ra_hours, dec_deg=dec_deg)
+                ok = bool(result.get("ok", True))
+            elif kind == "park":
+                result = await nina.park()
+                ok = bool(result.get("ok", True))
+            elif kind == "unpark":
+                result = await nina.unpark()
+                ok = bool(result.get("ok", True))
+            elif kind == "capture":
+                exposure_s = float(args.get("exposure_s") or 5.0)
+                filter_name = args.get("filter") or None
+                gain = args.get("gain")
+                result = await nina.camera_capture(
+                    exposure_s=exposure_s,
+                    filter_name=filter_name,
+                    gain=int(gain) if gain not in (None, "") else None,
+                )
+                ok = bool(result.get("ok", True))
+            elif kind == "set_cooling":
+                target_c = float(args.get("target_c") or -10.0)
+                result = await nina.camera_set_cooling(target_c=target_c)
+                ok = bool(result.get("ok", True))
+            elif kind == "warmup":
+                result = await nina.camera_warmup()
+                ok = bool(result.get("ok", True))
+            elif kind == "move_focuser":
+                position = int(args.get("position") or 0)
+                result = await nina.focuser_move(position=position)
+                ok = bool(result.get("ok", True))
+            elif kind == "change_filter":
+                # NINA has no standalone "change filter" call — the filter
+                # is selected as part of the next capture. We log the intent
+                # so the audit trail still records it; a zero-exposure
+                # snapshot would actually move the wheel but we don't want
+                # to fire the shutter just to rotate.
+                filt = args.get("filter") or "L"
+                result = {"ok": True, "note": "filter latched for next capture",
+                            "filter": filt}
+                ok = True
+            elif kind == "dome_open":
+                result = await nina.dome_open()
+                ok = bool(result.get("ok", True))
+            elif kind == "dome_close":
+                result = await nina.dome_close()
+                ok = bool(result.get("ok", True))
+            else:
+                result = {"error": f"unknown manual_action kind: {kind}"}
+                ok = False
+        except Exception as e:
+            self.log.exception("manual_action %s failed", kind)
+            result = {"error": str(e)}
+            ok = False
+        finally:
+            try:
+                await nina.close()
+            except Exception:
+                pass
+
+        action_record = {
+            "at": now,
+            "kind": kind,
+            "args": args,
+            "rationale": rationale or "(no rationale supplied)",
+            "ok": ok,
+            "result": result,
+        }
+        get_state().record_manual_action(action_record)
+        self.log_decision("manual_action",
+                            inputs={"kind": kind, "args": args,
+                                      "rationale": rationale},
+                            outputs={"ok": ok, "result": result},
+                            rationale=f"manual {kind}: {rationale[:120]}",
+                            session_id=self._current_session_id)
+        self.set_task(f"manual {kind} {'ok' if ok else 'FAILED'} — {rationale[:60]}",
+                      state="working")
+        try:
+            await self.bus.broadcast_event({
+                "type": "manual_action",
+                "sender": "operator",
+                "kind": kind,
+                "ok": ok,
+                "rationale": rationale,
+                "sent_at": now,
+            })
+        except Exception:
+            pass
 
     async def _cmd_start_session(self, params: dict) -> None:
         """Create a new Session row in the DB, mark NOMINAL, broadcast.

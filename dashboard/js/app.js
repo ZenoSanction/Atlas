@@ -10,6 +10,7 @@ import { renderScience } from "/static/js/science.js";
 import { renderHistory } from "/static/js/history.js";
 import { initChat } from "/static/js/atlas-chat.js";
 import { initSetup } from "/static/js/setup.js";
+import { initManualControl, refreshManualControl } from "/static/js/manual-control.js";
 
 const api = (path, opts = {}) =>
   fetch(`/api${path}`, {
@@ -63,22 +64,10 @@ window.atlas = { api };
   // off once at boot.
   renderMissionControl(api);
 
-  // Take Control toggle
-  const tc = document.getElementById("take-control");
-  tc.addEventListener("click", async () => {
-    tc.classList.toggle("active");
-    const taking = tc.classList.contains("active");
-    tc.textContent = taking ? "Release Control" : "Take Control";
-    try {
-      await api("/tonight/command", {
-        method: "POST",
-        body: JSON.stringify({
-          command: taking ? "take_control" : "release_control",
-          params: {},
-        }),
-      });
-    } catch (e) {
-      console.error("Take control failed:", e);
-    }
-  });
+  // Manual control: banner, take/release dialogs, Hardware Controls panel.
+  // initManualControl wires the topbar Take Control button, the banner's
+  // Release button, every hw-form / hw-quick button on the Tonight tab,
+  // and starts a 4s poll against /api/control/status so the audit list
+  // stays current.
+  initManualControl(api);
 })();

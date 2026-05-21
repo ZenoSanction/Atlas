@@ -70,6 +70,34 @@ class OperatorVerdict:
         return asdict(self)
 
 
+# ---- Manual control (operator override) -------------------------------------
+
+@dataclass
+class ManualControl:
+    """Tracks whether the human operator has 'taken control' away from the
+    autonomous Operator agent.
+
+    When engaged=True, the Operator agent stops dispatching session
+    decisions, alert auto-fixes, and oracle replans. The pre-flight gate
+    still publishes status, the Critic still reports weather, the
+    dashboard still polls — but the *autonomy* is paused. Direct hardware
+    commands from the dashboard's Hardware Controls panel are the only
+    way work happens until control is released.
+
+    Every manual action is logged with the supplied rationale so the
+    morning report can reconstruct who did what and why."""
+    engaged: bool = False
+    engaged_at: Optional[str] = None      # ISO timestamp when taken
+    released_at: Optional[str] = None     # ISO timestamp when released
+    reason: str = ""                      # operator's stated rationale
+    engaged_by: str = "operator"          # who took control (future: multi-user)
+    last_action: Optional[dict] = None    # most recent manual hardware action
+    action_count: int = 0                 # how many manual actions this session
+
+    def to_jsonable(self) -> dict:
+        return asdict(self)
+
+
 # ---- Singleton store --------------------------------------------------------
 
 @dataclass
@@ -121,6 +149,14 @@ class _ObservatoryState:
         # plan → critic → operator → oracle → operator → planner pipeline.
         # The dashboard's Session Workflow panel reads this.
         self._session_review: dict | None = None
+        # Human "take control" override. When engaged the Operator agent
+        # halts autonomous dispatch; the dashboard's Hardware Controls
+        # panel becomes the only way work happens.
+        self._manual_control: ManualControl = ManualControl()
+        # Ring buffer of recent manual hardware commands (for the audit
+        # panel in the dashboard + morning report).
+        self._manual_actions: list[dict] = []
+        self._max_manual_actions = 40
 
     # Critic writes here ----------------------------------------------------
     def set_assessment(self, a: WeatherAssessment) -> None:
@@ -248,6 +284,69 @@ class _ObservatoryState:
             status = self._agent_status.setdefault(agent, AgentLiveStatus(name=agent))
             status.outbox.insert(0, item)
             status.outbox = status.outbox[:limit]
+
+    # Manual control override -----------------------------------------------
+    def set_manual_control(self, reason: str, by: str = "operator") -> ManualControl:
+        """Engage human override. Operator agent will park its autonomy
+        until clear_manual_control() runs. Returns the new snapshot."""
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._lock:
+            self._manual_control = ManualControl(
+                engaged=True,
+                engaged_at=now,
+                released_at=None,
+                reason=(reason or "no reason given").strip()[:300],
+                engaged_by=by,
+                last_action=None,
+                action_count=0,
+            )
+            return self._manual_control
+
+    def clear_manual_control(self, reason: str = "") -> ManualControl:
+        """Release human override and let the Operator resume autonomy.
+        Returns the new (disengaged) snapshot."""
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._lock:
+            prev = self._manual_control
+            self._manual_control = ManualControl(
+                engaged=False,
+                engaged_at=prev.engaged_at,
+                released_at=now,
+                reason=(reason or "released").strip()[:300],
+                engaged_by=prev.engaged_by,
+                last_action=prev.last_action,
+                action_count=prev.action_count,
+            )
+            return self._manual_control
+
+    def get_manual_control(self) -> ManualControl:
+        with self._lock:
+            return self._manual_control
+
+    def is_manual(self) -> bool:
+        with self._lock:
+            return self._manual_control.engaged
+
+    def record_manual_action(self, action: dict) -> None:
+        """Append a manual hardware command to the audit ring buffer and
+        update the live snapshot's action_count + last_action."""
+        with self._lock:
+            self._manual_actions.insert(0, action)
+            self._manual_actions = self._manual_actions[:self._max_manual_actions]
+            mc = self._manual_control
+            self._manual_control = ManualControl(
+                engaged=mc.engaged,
+                engaged_at=mc.engaged_at,
+                released_at=mc.released_at,
+                reason=mc.reason,
+                engaged_by=mc.engaged_by,
+                last_action=action,
+                action_count=mc.action_count + 1,
+            )
+
+    def get_manual_actions(self, limit: int = 40) -> list[dict]:
+        with self._lock:
+            return list(self._manual_actions[:limit])
 
 
 _state: _ObservatoryState | None = None

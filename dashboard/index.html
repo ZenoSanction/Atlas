@@ -31,9 +31,108 @@
   </div>
 </header>
 
+<!-- MANUAL CONTROL BANNER — visible across every tab while engaged -->
+<div id="manual-banner" class="manual-banner hidden">
+  <div class="manual-banner-inner">
+    <span class="manual-icon">🛑</span>
+    <div class="manual-text">
+      <div class="manual-title">MANUAL CONTROL — autonomy paused</div>
+      <div class="manual-detail" id="manual-banner-detail">—</div>
+    </div>
+    <div class="manual-stats">
+      <span id="manual-action-count">0</span> action(s)
+    </div>
+    <button id="release-control-banner" class="btn-primary" type="button">
+      Release Control
+    </button>
+  </div>
+</div>
+
 <main>
   <!-- TONIGHT — MISSION CONTROL -->
   <section class="panel" id="tab-tonight">
+    <!-- Hardware Controls — only visible while manual control is engaged.
+         The MANUAL banner stays across every tab; this panel gives direct
+         hardware command buttons + the audit trail. -->
+    <div id="hardware-controls" class="hardware-controls hidden">
+      <div class="hw-head">
+        <h3>Hardware Controls</h3>
+        <span class="hw-hint muted">
+          Every action requires a rationale and is logged to the morning
+          report. Autonomy resumes when you release control.
+        </span>
+      </div>
+
+      <div class="hw-grid">
+        <div class="hw-card" data-group="mount">
+          <h4>Mount</h4>
+          <form class="hw-form" data-kind="slew">
+            <label>RA (hours)<input name="ra_hours" type="number" step="0.001" min="0" max="24" placeholder="e.g. 5.575"></label>
+            <label>Dec (deg) <input name="dec_deg"  type="number" step="0.01"  min="-90" max="90" placeholder="e.g. -5.39"></label>
+            <label>Rationale<input name="rationale" type="text" placeholder="why slew now?" required></label>
+            <button class="btn-primary" type="submit">Slew</button>
+          </form>
+          <div class="hw-row">
+            <button class="btn-secondary hw-quick" data-kind="unpark" data-needs-reason="1">Unpark</button>
+            <button class="btn-secondary hw-quick" data-kind="park"   data-needs-reason="1">Park</button>
+          </div>
+        </div>
+
+        <div class="hw-card" data-group="camera">
+          <h4>Camera</h4>
+          <form class="hw-form" data-kind="capture">
+            <label>Exposure (s)<input name="exposure_s" type="number" step="0.1" min="0" value="5"></label>
+            <label>Filter<input name="filter" type="text" placeholder="L / R / G / B / Ha / V"></label>
+            <label>Gain (optional)<input name="gain" type="number" step="1" min="0"></label>
+            <label>Rationale<input name="rationale" type="text" placeholder="test frame / focus / etc." required></label>
+            <button class="btn-primary" type="submit">Capture</button>
+          </form>
+          <form class="hw-form" data-kind="set_cooling">
+            <label>Target temp (°C)<input name="target_c" type="number" step="0.5" value="-10"></label>
+            <label>Rationale<input name="rationale" type="text" placeholder="why change setpoint?" required></label>
+            <button class="btn-primary" type="submit">Set Cooling</button>
+          </form>
+          <div class="hw-row">
+            <button class="btn-secondary hw-quick" data-kind="warmup" data-needs-reason="1">Warmup</button>
+          </div>
+        </div>
+
+        <div class="hw-card" data-group="focuser">
+          <h4>Focuser</h4>
+          <form class="hw-form" data-kind="move_focuser">
+            <label>Position (steps)<input name="position" type="number" step="1" min="0" value="15000"></label>
+            <label>Rationale<input name="rationale" type="text" placeholder="autofocus / nudge / etc." required></label>
+            <button class="btn-primary" type="submit">Move</button>
+          </form>
+        </div>
+
+        <div class="hw-card" data-group="filterwheel">
+          <h4>Filter wheel</h4>
+          <form class="hw-form" data-kind="change_filter">
+            <label>Filter<input name="filter" type="text" placeholder="L / R / G / B / Ha"></label>
+            <label>Rationale<input name="rationale" type="text" placeholder="why this filter?" required></label>
+            <button class="btn-primary" type="submit">Select</button>
+          </form>
+          <p class="hint muted">NINA latches the filter on the next capture; this just records the choice.</p>
+        </div>
+
+        <div class="hw-card" data-group="dome">
+          <h4>Dome / Roof</h4>
+          <div class="hw-row">
+            <button class="btn-secondary hw-quick" data-kind="dome_open"  data-needs-reason="1">Open</button>
+            <button class="btn-secondary hw-quick" data-kind="dome_close" data-needs-reason="1">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <details class="hw-audit" open>
+        <summary>Recent manual actions <span id="manual-actions-count" class="muted">0</span></summary>
+        <div id="manual-actions-list" class="manual-actions-list">
+          <em class="muted">no actions yet</em>
+        </div>
+      </details>
+    </div>
+
     <div id="gonogo" class="gonogo neutral">
       <div class="gonogo-label">VERDICT</div>
       <div class="gonogo-text" id="gonogo-text">Loading…</div>
