@@ -40,6 +40,16 @@ window.atlas = { api };
   initChat(api);
   connectEvents();
 
+  // TTS toggle persists in localStorage. mission-control.js's speakReply
+  // reads the same key.
+  const tts = document.getElementById("tts-toggle");
+  if (tts) {
+    tts.checked = localStorage.getItem("atlas_tts_enabled") === "1";
+    tts.addEventListener("change", () => {
+      localStorage.setItem("atlas_tts_enabled", tts.checked ? "1" : "0");
+    });
+  }
+
   // version pill
   try {
     const h = await api("/health");

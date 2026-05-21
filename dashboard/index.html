@@ -24,6 +24,9 @@
   </nav>
   <div class="controls">
     <span id="ws-indicator" class="indicator" title="WebSocket status">●</span>
+    <label class="tts-toggle" title="Speak agent replies aloud">
+      <input type="checkbox" id="tts-toggle"> 🔊
+    </label>
     <button id="take-control" class="btn-secondary">Take Control</button>
   </div>
 </header>
@@ -86,6 +89,7 @@
           </details>
           <form class="agent-chat" data-agent="planner">
             <input type="text" placeholder="Ask the Planner…" autocomplete="off">
+            <button type="button" class="lane-mic" title="Hold to speak">🎙</button>
             <button class="btn-primary" type="submit">Send</button>
           </form>
           <div class="agent-chat-history" data-agent="planner"></div>
@@ -118,6 +122,7 @@
           </details>
           <form class="agent-chat" data-agent="critic">
             <input type="text" placeholder="Ask the Critic…" autocomplete="off">
+            <button type="button" class="lane-mic" title="Hold to speak">🎙</button>
             <button class="btn-primary" type="submit">Send</button>
           </form>
           <div class="agent-chat-history" data-agent="critic"></div>
@@ -150,6 +155,7 @@
           </details>
           <form class="agent-chat" data-agent="operator">
             <input type="text" placeholder="Ask the Operator…" autocomplete="off">
+            <button type="button" class="lane-mic" title="Hold to speak">🎙</button>
             <button class="btn-primary" type="submit">Send</button>
           </form>
           <div class="agent-chat-history" data-agent="operator"></div>
@@ -182,6 +188,7 @@
           </details>
           <form class="agent-chat" data-agent="archivist">
             <input type="text" placeholder="Ask the Archivist…" autocomplete="off">
+            <button type="button" class="lane-mic" title="Hold to speak">🎙</button>
             <button class="btn-primary" type="submit">Send</button>
           </form>
           <div class="agent-chat-history" data-agent="archivist"></div>
@@ -214,6 +221,7 @@
           </details>
           <form class="agent-chat" data-agent="oracle">
             <input type="text" placeholder="Ask the Oracle…" autocomplete="off">
+            <button type="button" class="lane-mic" title="Hold to speak">🎙</button>
             <button class="btn-primary" type="submit">Send</button>
           </form>
           <div class="agent-chat-history" data-agent="oracle"></div>

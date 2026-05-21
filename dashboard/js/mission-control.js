@@ -189,7 +189,42 @@ function wireChatForms(api) {
     form.dataset.bound = "1";
     const agent = form.dataset.agent;
     const input = form.querySelector("input");
+    const micBtn = form.querySelector(".lane-mic");
     const history = document.querySelector(`.agent-chat-history[data-agent="${agent}"]`);
+
+    // Voice input — Web Speech API. Same wiring as the ATLAS-tab chat,
+    // per-lane so each agent's chat input gets its own mic button.
+    if (micBtn) {
+      const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (Recog) {
+        const recog = new Recog();
+        recog.continuous = false;
+        recog.interimResults = false;
+        recog.lang = "en-US";
+        micBtn.addEventListener("click", () => {
+          if (micBtn.classList.contains("recording")) {
+            recog.stop();
+            micBtn.classList.remove("recording");
+          } else {
+            micBtn.classList.add("recording");
+            recog.start();
+          }
+        });
+        recog.onresult = (ev) => {
+          const txt = ev.results[0][0].transcript;
+          input.value = txt;
+          micBtn.classList.remove("recording");
+          form.dispatchEvent(new Event("submit"));
+        };
+        recog.onend = () => micBtn.classList.remove("recording");
+        recog.onerror = () => micBtn.classList.remove("recording");
+      } else {
+        micBtn.disabled = true;
+        micBtn.title = "Voice input not supported by this browser.";
+        micBtn.style.opacity = "0.4";
+      }
+    }
+
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const text = (input.value || "").trim();
@@ -211,6 +246,8 @@ function wireChatForms(api) {
           who: agent + (r.safe_mode ? " (safe)" : ""),
           text: r.reply || "(no reply)",
         });
+        // Speak the reply if TTS available + lane has TTS enabled
+        speakReply(r.reply || "");
       } catch (e) {
         _historyByAgent[agent].pop();
         _historyByAgent[agent].push({ who: agent, text: `error: ${e.message}` });
@@ -316,6 +353,20 @@ function renderChatHistory(container, history) {
 function esc(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Browser TTS — kept short and disabled if the user hasn't interacted with
+// the page (Chrome's autoplay policy blocks speech otherwise). Bound to a
+// "TTS replies aloud" toggle stored in localStorage.
+function speakReply(text) {
+  try {
+    if (!("speechSynthesis" in window)) return;
+    if (localStorage.getItem("atlas_tts_enabled") !== "1") return;
+    const u = new SpeechSynthesisUtterance(text.slice(0, 500));
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    window.speechSynthesis.speak(u);
+  } catch {}
 }
 
 function gateIcon(status) {
