@@ -144,7 +144,10 @@ class Operator(BaseAgent):
                 await self._tick_verdict_watcher()
             except Exception:
                 self.log.exception("verdict watcher tick failed")
-            await asyncio.sleep(30)
+            # 15s cadence (was 30s). Transition from CAUTION → NO-GO
+            # now drives a shutdown within ~15s of the Critic noticing,
+            # not 30s+. Cheap loop: reads shared-state only, no IO.
+            await asyncio.sleep(15)
 
     async def _tick_verdict_watcher(self) -> None:
         # Manual override pauses all autonomous recovery

@@ -28,17 +28,19 @@ from atlas.weather.openmeteo import OpenMeteoClient, WeatherSnapshot
 
 
 FAST_LOOP_S = 90
-# Bumped from 5 min to 15 min. The Critic no longer drives weather
-# pulls — it reads from WeatherCache, which refreshes on a 15 min TTL.
-# The standard loop's job is now just "re-assess against the cached
-# snapshot if the cache rotated, otherwise idle". Network round-trips
-# drop from ~12/hr to ~4/hr per agent.
-STANDARD_LOOP_S = 900
+# Standard loop is the "expensive" pass: full forecast pull + per-hour
+# severity. It runs no more often than the cache TTL allows. Adaptive
+# mode (set on the cache from this loop) tightens the cache TTL when
+# imaging is active or borderline.
+STANDARD_LOOP_S = 90    # poll frequency; cache TTL gates the actual refresh
 FORECAST_HOURS = 12
 # Sun-altitude cutoff for "astronomical night". Reports + per-hour
 # severity entries only cover hours where the sun is below this. -18°
 # matches the IAU definition of astronomical twilight (full darkness).
 ASTRO_DARK_ALT_DEG = -18.0
+# A metric is "borderline" when it has reached this fraction of its
+# critical threshold — within 20% means we tighten the polling mode.
+BORDERLINE_FRACTION = 0.80
 
 
 # Severity-rank helper -------------------------------------------------------
@@ -550,6 +552,17 @@ class Critic(BaseAgent):
             except Exception:
                 pass
 
+        # ---- Moon proximity to the currently-imaged target -----------
+        # Run-time equivalent of the plan-time moon check. If a target
+        # is being imaged AND the moon has risen since the plan was
+        # built (or the target has slewed close to it), surface an
+        # advisory. Quality concern, not safety — never blocks
+        # execution, just informs the operator.
+        try:
+            await self._check_moon_proximity_runtime(session_id)
+        except Exception:
+            self.log.exception("moon proximity runtime check failed")
+
         if sim:
             self.log.debug("fast loop tick (sim) — guiding from event stream")
             return
@@ -590,6 +603,144 @@ class Critic(BaseAgent):
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
 
+    async def _check_moon_proximity_runtime(self, session_id: int) -> None:
+        """If a target is being imaged, compute moon position + the
+        target's current separation. Surface an advisory when the
+        moon is up, bright (>30% illum), and within 30° — quality
+        concern, never an execution block.
+
+        Severity bumps to warning when the operator has no narrowband
+        filter installed (Halpha/OIII/SII) to fight back against
+        moonlight. With NB filters even a full moon is workable for
+        the targets that emit in those lines."""
+        from atlas.astronomy import (
+            angular_separation, compute_alt_az, moon_position,
+        )
+        from atlas.db.managers import ConfigManager
+        from atlas.db.models import Frame
+        from atlas.db.session import get_session
+        from datetime import datetime as _dt
+
+        site = ConfigManager.get_site()
+        if site is None:
+            return
+        # Find the active target — most recent frame on this session
+        # is the strongest signal of "what are we currently on?"
+        with get_session() as s:
+            row = (s.query(Frame.target_id, Frame.captured_at)
+                     .filter(Frame.session_id == session_id)
+                     .order_by(Frame.captured_at.desc())
+                     .first())
+            target_id = row[0] if row else None
+            if not target_id:
+                return
+            from atlas.db.models import Target
+            tgt = s.get(Target, target_id)
+            if tgt is None or tgt.ra_deg is None or tgt.dec_deg is None:
+                return
+            target_name = tgt.name
+            ra = float(tgt.ra_deg); dec = float(tgt.dec_deg)
+
+        now = _dt.utcnow()
+        lat = float(site.latitude); lon = float(site.longitude)
+        try:
+            moon_ra, moon_dec, illum = moon_position(now)
+            moon_alt, _ = compute_alt_az(moon_ra, moon_dec, lat, lon, now)
+        except Exception:
+            return
+        if moon_alt <= 0 or illum is None or illum < 0.30:
+            self._clear("moon_close_runtime")
+            return
+        sep = angular_separation(ra, dec, moon_ra, moon_dec)
+        if sep >= 30.0:
+            self._clear("moon_close_runtime")
+            return
+
+        # Within 30° of a bright moon. Is the operator equipped for it?
+        equip = ConfigManager.get_equipment()
+        has_nb = False
+        try:
+            filters = (equip.filters or []) if equip else []
+            has_nb = any(f.lower() in ("ha", "halpha", "h-alpha",
+                                          "oiii", "o3", "sii", "s2",
+                                          "nb")
+                          for f in filters)
+        except Exception:
+            pass
+        sev = (AlertSeverity.WARNING if not has_nb
+                else AlertSeverity.WARNING)   # always warning, not critical
+        await self._raise(
+            sev, "moon_close_runtime",
+            (f"Moon {illum*100:.0f}% illum, alt {moon_alt:.0f}° — "
+              f"{target_name} now {sep:.0f}° from moon"
+              + ("; no narrowband filter installed to mitigate" if not has_nb
+                  else "; narrowband filter available")),
+            session_id=session_id,
+            data={"illum_pct": round(illum * 100, 0),
+                    "moon_alt_deg": round(moon_alt, 1),
+                    "separation_deg": round(sep, 1),
+                    "target": target_name,
+                    "has_narrowband_filter": has_nb},
+        )
+
+    def _resolve_polling_mode(self, snap, t, is_dark: bool,
+                                 session_active: bool) -> str:
+        """Decide which polling mode the WeatherCache should use.
+
+        BORDERLINE  (60 s)  — any metric within 20% of its critical
+                               threshold. Whatever phase we're in, if
+                               weather is moving toward critical we
+                               want to see it fast.
+        ACTIVE      (90 s)  — session running, OR we're inside the
+                               astronomical dark window, OR we're in
+                               evening / morning twilight (operator
+                               may start a session at any moment).
+        IDLE        (900 s) — daytime with no session and conditions
+                               comfortably inside the safe band.
+        """
+        from atlas.weather.cache import (
+            MODE_IDLE, MODE_ACTIVE, MODE_BORDERLINE,
+        )
+
+        # ANY-metric-near-critical wins over phase — storms don't care
+        # what time of day it is, and we want to feed the dashboard
+        # live data when the operator is watching.
+        def near(value: float, crit: float) -> bool:
+            try:
+                return float(value) >= float(crit) * BORDERLINE_FRACTION
+            except (TypeError, ValueError):
+                return False
+        dm_c = snap.temperature_c - snap.dew_point_c
+        if (near(snap.wind_speed_ms, t.wind_speed_critical_ms) or
+            near(snap.cloud_cover_pct, t.cloud_cover_critical_pct) or
+            near(snap.humidity_pct, t.humidity_critical_pct) or
+            dm_c <= float(t.dew_margin_critical_c) * 1.25):
+            return MODE_BORDERLINE
+
+        # Session running OR inside / approaching the imaging window?
+        # Bump to active polling so the verdict watcher sees changes
+        # within ~90 seconds. Sun above horizon AND well clear of
+        # any twilight → idle.
+        from atlas.astronomy.day_phase import (
+            PHASE_DAY, current_phase as _phase,
+        )
+        # Cheap re-classify from the snapshot's site coords — caller
+        # has them but doesn't pass them through. Recompute here.
+        try:
+            from atlas.db.managers import ConfigManager
+            site = ConfigManager.get_site()
+            if site is not None:
+                p = _phase(float(site.latitude), float(site.longitude))
+                in_or_near_dark = p.phase != PHASE_DAY
+            else:
+                in_or_near_dark = is_dark
+        except Exception:
+            in_or_near_dark = is_dark
+
+        if session_active or in_or_near_dark:
+            return MODE_ACTIVE
+        return MODE_IDLE
+
     async def _standard_loop(self) -> None:
         """Standard loop: weather pull + per-metric assessment + push to Operator.
 
@@ -622,14 +773,16 @@ class Critic(BaseAgent):
             if nw is not None:
                 next_dark_iso = nw[0].isoformat(timespec="seconds") + "Z"
 
-        # Read through WeatherCache rather than hitting Open-Meteo
-        # directly. The cache refreshes on its own 15-min TTL; the
-        # Critic just consumes whatever's there. Force-refresh is only
-        # used by the Planner before building a new session plan — for
-        # the Critic, "what does the cache currently say" is the right
-        # question at every tick.
-        from atlas.weather.cache import get_weather_cache
+        # Read through WeatherCache. Polling mode is adaptive: the
+        # Critic sets it each tick based on session state + verdict +
+        # metric trend, and the cache's TTL follows. So an active
+        # session running on a borderline night refreshes every 60 s
+        # without us issuing manual force_refresh calls.
+        from atlas.weather.cache import get_weather_cache, MODE_IDLE
         cache = get_weather_cache()
+        # First read uses whatever mode is already set (cold boot = IDLE).
+        # We re-set the mode immediately below once we have a snapshot
+        # and know whether we're borderline.
         try:
             state = await cache.get(lat=lat, lon=lon,
                                        forecast_hours=FORECAST_HOURS)
@@ -661,6 +814,30 @@ class Critic(BaseAgent):
         overall = "ok"
         for c in checks:
             overall = _max_sev(overall, c.severity)
+
+        # ----------------------------------------------------------------
+        # Adaptive polling mode: tighten the cache TTL when conditions
+        # warrant. The Critic is the only thing that knows the live
+        # combination of (session running, weather, day phase), so it
+        # owns the decision.
+        # ----------------------------------------------------------------
+        try:
+            from atlas.db.managers import SessionManager
+            from atlas.db.models import SessionState as _SS
+            latest_sess = SessionManager.latest()
+            session_active = (latest_sess is not None
+                                and getattr(latest_sess, "state", None) in
+                                    (_SS.NOMINAL, _SS.WARNING))
+        except Exception:
+            session_active = False
+        new_mode = self._resolve_polling_mode(snap, t, is_dark, session_active)
+        prev_mode = cache.set_mode(new_mode)
+        if prev_mode != new_mode:
+            self.log.info(
+                "Critic switched polling mode %s → %s (session_active=%s, "
+                "is_dark=%s, overall=%s)",
+                prev_mode, new_mode, session_active, is_dark, overall,
+            )
 
         dm_c = snap.temperature_c - snap.dew_point_c
         # During daytime, drop the severity to "ok" for the Operator's

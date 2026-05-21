@@ -39,10 +39,35 @@ from atlas.weather.openmeteo import OpenMeteoClient, WeatherSnapshot
 log = get_logger("weather.cache")
 
 
-# Cache TTL — how stale before consumers see a refresh on next get().
-# 15 minutes matches Open-Meteo's typical "current" granularity and is
-# comfortably tighter than session-decision latency tolerances.
-DEFAULT_TTL_S = 900
+# ---- Polling modes ---------------------------------------------------------
+# The cache exposes a polling-mode dial so monitoring tightens up when
+# conditions matter and relaxes when nothing's happening. The Critic
+# sets the mode each tick based on session state + verdict + metric
+# trend.
+#
+#   IDLE        — no session, day phase or clearly nominal weather.
+#                  Open-Meteo's "current" only updates roughly once
+#                  per hour at the source anyway, so polling more often
+#                  during the day burns API quota for no signal.
+#   ACTIVE      — a session is running normally. We need fresh weather
+#                  fast enough to catch storms forming during the night.
+#   BORDERLINE  — at least one metric is within 20% of its critical
+#                  threshold, OR the verdict is CAUTION. Tighten further.
+MODE_IDLE       = "idle"
+MODE_ACTIVE     = "active"
+MODE_BORDERLINE = "borderline"
+
+# Per-mode TTL (seconds). Tuned for Open-Meteo's free tier (≤ 10k
+# requests/day): 60s borderline × 1 site = ~1440 requests/day even if
+# we stayed pinned in that mode for 24 h, well inside the limit.
+TTL_BY_MODE = {
+    MODE_IDLE:       900,    # 15 min — was the old default
+    MODE_ACTIVE:      90,    # 1.5 min — fast enough to catch storms
+    MODE_BORDERLINE:  60,    # 1 min — tightest we go
+}
+
+# Legacy alias still referenced by older imports
+DEFAULT_TTL_S = TTL_BY_MODE[MODE_IDLE]
 
 
 @dataclass
@@ -54,22 +79,52 @@ class WeatherCacheState:
     fresh: bool                # True if age <= ttl
     refreshed_this_call: bool  # True if we just hit the network
     forecast_hours: list[dict] | None = None
+    mode: str = MODE_IDLE      # what polling mode the cache is in
+    ttl_s: int = 900           # current TTL — derived from mode
 
 
 class WeatherCache:
     """Singleton cache. Use ``get_weather_cache()`` to access — there's
-    one instance per process, lazily constructed on first call."""
+    one instance per process, lazily constructed on first call.
 
-    def __init__(self, ttl_s: int = DEFAULT_TTL_S) -> None:
-        self._ttl_s = ttl_s
+    Polling mode (IDLE / ACTIVE / BORDERLINE) controls the TTL, set by
+    the Critic each tick. The cache itself doesn't decide when to be
+    "active" — that's a policy decision that lives upstream where
+    session + verdict state is known."""
+
+    def __init__(self, ttl_s: int | None = None) -> None:
+        # ttl_s arg retained for tests / explicit overrides. When None
+        # we follow the polling-mode dial.
+        self._mode: str = MODE_IDLE
+        self._ttl_override_s: int | None = ttl_s
         self._snapshot: Optional[WeatherSnapshot] = None
         self._pulled_at: Optional[datetime] = None
         self._forecast_hours: list[dict] | None = None
         self._lock = asyncio.Lock()
 
     @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
     def ttl_s(self) -> int:
-        return self._ttl_s
+        if self._ttl_override_s is not None:
+            return self._ttl_override_s
+        return TTL_BY_MODE.get(self._mode, DEFAULT_TTL_S)
+
+    def set_mode(self, mode: str) -> str:
+        """Switch polling tightness. Returns the previous mode so
+        callers can detect transitions and log them."""
+        if mode not in TTL_BY_MODE:
+            log.warning("Unknown polling mode %r — staying in %s",
+                         mode, self._mode)
+            return self._mode
+        prev = self._mode
+        if mode != prev:
+            log.info("Weather polling mode %s → %s (TTL %d s → %d s)",
+                      prev, mode, TTL_BY_MODE[prev], TTL_BY_MODE[mode])
+        self._mode = mode
+        return prev
 
     def age_seconds(self) -> Optional[float]:
         if self._pulled_at is None:
@@ -80,7 +135,7 @@ class WeatherCache:
         age = self.age_seconds()
         if age is None:
             return True
-        return age > self._ttl_s
+        return age > self.ttl_s
 
     def peek(self) -> WeatherCacheState:
         """Non-blocking snapshot of current cache state. Never pulls."""
@@ -90,6 +145,7 @@ class WeatherCache:
             age_seconds=age, fresh=not self.is_stale(),
             refreshed_this_call=False,
             forecast_hours=self._forecast_hours,
+            mode=self._mode, ttl_s=self.ttl_s,
         )
 
     async def get(self, *, lat: float, lon: float,
@@ -126,6 +182,7 @@ class WeatherCache:
                 age_seconds=state.age_seconds, fresh=state.fresh,
                 refreshed_this_call=True,
                 forecast_hours=state.forecast_hours,
+                mode=self._mode, ttl_s=self.ttl_s,
             )
             return state
 

@@ -77,10 +77,11 @@ export async function refreshMissionControl(api) {
     }
   }
 
-  // Cache the verdict globally so renderWorkflow() can fold the
-  // execution-gate badge into the plan panel. Plan READY + Execution
-  // GO are two separate things; we show them side-by-side.
+  // Cache the verdict + weather-monitor globally so renderWorkflow()
+  // can fold the execution-gate badge and the monitoring-mode pill
+  // into the plan panel header.
   window._lastVerdict = mc.verdict || null;
+  window._lastWeatherMonitor = mc.weather_monitor || null;
   renderWorkflow(mc.session_review);
 
   // Per-agent lanes
@@ -431,6 +432,23 @@ function renderWorkflow(review) {
       <span class="muted">${esc(v.reason || "")}</span>
     </div>`;
   }
+  // Monitoring mode: idle / active / borderline + age of the cached
+  // weather snapshot. Operator sees how tight the watch is.
+  const wm = window._lastWeatherMonitor || null;
+  let monitorLine = "";
+  if (wm && wm.mode) {
+    const modeCls = wm.mode === "borderline" ? "warn"
+                    : wm.mode === "active" ? "ok" : "";
+    const ageTxt = wm.age_seconds != null
+      ? `${Math.round(wm.age_seconds)}s ago`
+      : "no data yet";
+    const ttlTxt = wm.ttl_s ? `(refresh ≤ ${wm.ttl_s}s)` : "";
+    monitorLine = `<div class="exec-state monitor-state">
+      Weather monitor:
+      <span class="plan-state ${modeCls}">${esc(wm.mode.toUpperCase())}</span>
+      <span class="muted">snapshot ${ageTxt} ${ttlTxt}</span>
+    </div>`;
+  }
 
   stages.innerHTML = `
     <div class="plan-summary">
@@ -444,6 +462,7 @@ function renderWorkflow(review) {
       </div>
     </div>
     ${execLine}
+    ${monitorLine}
   `;
 
   if (!body) return;

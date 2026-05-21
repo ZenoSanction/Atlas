@@ -1155,6 +1155,21 @@ async def mission_control() -> dict:
         agents[name] = d
     verdict = st.get_verdict()
     mc = st.get_manual_control()
+    # Weather cache state — the dashboard surfaces the current polling
+    # mode (idle / active / borderline) so the operator can see how
+    # tight the monitoring is right now. age_seconds tells them when
+    # the cached snapshot was pulled.
+    try:
+        from atlas.weather.cache import get_weather_cache
+        wc = get_weather_cache().peek()
+        weather_monitor = {
+            "mode": wc.mode, "ttl_s": wc.ttl_s,
+            "age_seconds": wc.age_seconds, "fresh": wc.fresh,
+            "snapshot_at": (wc.pulled_at.isoformat(timespec="seconds") + "Z"
+                              if wc.pulled_at else None),
+        }
+    except Exception:
+        weather_monitor = None
     return {
         "now_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "simulation_mode": is_simulation_mode(),
@@ -1163,6 +1178,7 @@ async def mission_control() -> dict:
         "preflight": st.get_preflight(),
         "session_review": st.get_session_review(),
         "manual_control": mc.to_jsonable(),
+        "weather_monitor": weather_monitor,
         "agents": agents,
         "message_flow": st.get_message_flow(limit=40),
     }
