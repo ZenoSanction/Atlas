@@ -541,13 +541,16 @@ async def search_targets(q: str = "", fallback_simbad: bool = False,
     queries SIMBAD's TAP service for the long tail (NGC/IC/Sh2/Bayer
     designations, comets by name, etc.).
 
-    Each match is enriched with current alt/az at the site for "is it
-    up right now?" feedback in the modal. Results from SIMBAD are
-    tagged `source: "simbad"` so the dashboard can show them
-    distinctly.
+    Each match is enriched with *tonight's* visibility: the peak
+    altitude reached during the astronomical dark window plus the
+    rise/set times within it. That's far more useful than "is it up
+    right now?" for a search modal — the operator is planning what to
+    image *tonight*, not snapping pictures right now. Results from
+    SIMBAD are tagged `source: "simbad"`.
     """
     from atlas.astronomy.catalog import search as catalog_search
-    from atlas.astronomy.visibility import compute_alt_az
+    from atlas.astronomy.visibility import night_window
+    from atlas.astronomy.scheduler import compute_visibility_window
     from datetime import datetime as _dt
     site = ConfigManager.get_site()
     lat = float(site.latitude) if site else 0.0
@@ -555,18 +558,39 @@ async def search_targets(q: str = "", fallback_simbad: bool = False,
     horizon = float(site.horizon_alt_min) if site else 20.0
     now = _dt.utcnow()
 
+    # Compute tonight's astronomical dark window once — every result
+    # uses the same window so the visibility numbers are comparable.
+    nw = None
+    if site is not None:
+        nw = night_window(lat, lon, now, altitude_deg=-18.0)
+
     def enrich(entry: dict, source: str) -> dict:
         ra, dec = entry.get("ra_deg"), entry.get("dec_deg")
         out = dict(entry); out["source"] = source
-        if ra is not None and dec is not None and site is not None:
-            try:
-                alt, az = compute_alt_az(float(ra), float(dec), lat, lon, now)
-                out["alt_deg"] = round(alt, 1)
-                out["az_deg"] = round(az, 1)
-                out["above_horizon_now"] = bool(alt >= horizon)
-            except Exception:
-                out["alt_deg"] = None; out["az_deg"] = None
-                out["above_horizon_now"] = None
+        if ra is None or dec is None or site is None or nw is None:
+            out["visible_tonight"] = None
+            out["peak_alt_deg"] = None
+            return out
+        dusk, dawn = nw
+        try:
+            vis = compute_visibility_window(
+                {"ra_deg": float(ra), "dec_deg": float(dec)},
+                lat=lat, lon=lon, horizon_alt=horizon,
+                dusk=dusk, dawn=dawn,
+            )
+        except Exception:
+            vis = None
+        if vis is None:
+            out["visible_tonight"] = False
+            out["peak_alt_deg"] = None
+        else:
+            out["visible_tonight"] = True
+            out["peak_alt_deg"] = vis.peak_alt_deg
+            out["visible_from_utc"] = (
+                vis.visible_from.isoformat(timespec="seconds") + "Z")
+            out["visible_until_utc"] = (
+                vis.visible_until.isoformat(timespec="seconds") + "Z")
+            out["visible_minutes"] = round(vis.length_minutes, 0)
         return out
 
     catalog_hits = [enrich(e, "catalog") for e in catalog_search(q, limit=limit)]

@@ -97,11 +97,22 @@ async function runSearch(query) {
 function renderResult(r) {
   const sourceTag = r.source === "simbad"
     ? `<span class="pill simbad">SIMBAD</span>` : "";
-  const altTag = r.alt_deg !== null && r.alt_deg !== undefined
-    ? (r.above_horizon_now
-        ? `<span class="pill ok">up · ${r.alt_deg}°</span>`
-        : `<span class="pill warn">below horizon · ${r.alt_deg}°</span>`)
-    : "";
+  // Tonight's visibility — peak altitude during astronomical dark plus
+  // the rise/set times inside the window. Three cases:
+  //   * visible_tonight === true → green pill, peak alt, "9:48 PM → 2:14 AM"
+  //   * visible_tonight === false → red pill, "not above horizon tonight"
+  //   * visible_tonight === null → no site config or no dark window
+  let visTag = "";
+  if (r.visible_tonight === true) {
+    const window = (r.visible_from_utc && r.visible_until_utc)
+      ? ` · ${fmtClock(r.visible_from_utc)} - ${fmtClock(r.visible_until_utc)}`
+      : "";
+    visTag = `<span class="pill ok">tonight peak ${r.peak_alt_deg}°${window}</span>`;
+  } else if (r.visible_tonight === false) {
+    visTag = `<span class="pill crit">not above horizon tonight</span>`;
+  } else {
+    visTag = `<span class="pill">visibility unknown (no site / dark window)</span>`;
+  }
   const magTag = r.magnitude !== null && r.magnitude !== undefined
     ? `<span class="muted">mag ${r.magnitude}</span>` : "";
   const aliases = (r.alt_names || []).length
@@ -120,7 +131,7 @@ function renderResult(r) {
           ${sourceTag}
         </div>
         <div class="result-meta">
-          ${esc(r.object_type || "")} ${magTag} ${altTag}
+          ${esc(r.object_type || "")} ${magTag} ${visTag}
         </div>
         ${notes}
       </div>
@@ -128,6 +139,18 @@ function renderResult(r) {
         <button class="btn-primary add-target" data-payload='${esc(payload)}'>+ Add</button>
       </div>
     </div>`;
+}
+
+// h:mm AM/PM Eastern. Time-only — date is implicit (tonight).
+function fmtClock(iso) {
+  if (!iso) return "—";
+  try {
+    const safe = /[Zz]$|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + "Z";
+    return new Date(safe).toLocaleTimeString("en-US", {
+      timeZone: "America/New_York",
+      hour: "numeric", minute: "2-digit", hour12: true,
+    });
+  } catch { return iso; }
 }
 
 async function addTarget(button, payload) {
