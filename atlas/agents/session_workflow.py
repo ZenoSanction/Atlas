@@ -1,35 +1,30 @@
 """Session plan + advisory annotations.
 
-ORIGINAL DESIGN (now removed): A six-stage gated pipeline ran every
-plan rebuild — Planner → Critic → Operator → Oracle → Operator →
-Planner — and only published a plan after every agent approved.
-That held perfectly good plans hostage to advisory warnings and
-slowed the dashboard's "tonight's targets" view by however long the
-slowest agent took to file its review.
+The Planner builds the plan and publishes it READY. Period. The plan
+exists regardless of weather, hardware state, or anything else —
+making the plan and executing the plan are two different things.
 
-CURRENT DESIGN: The Planner builds the plan and **publishes it
-immediately** in the FINALIZED state. The plan is usable the moment
-it's built. The Critic and Oracle still run their checks, but they
-do so in parallel as *advisors* — their findings get appended to
-the plan's ``advisories[]`` list asynchronously, and the dashboard
-shows them as inline annotations.
+Plan states:
+  building   - Planner is still computing (very brief, often skipped)
+  ready      - Plan is built and stays this way until superseded
+  replanned  - A newer plan exists; this one is historical
 
-The Operator only intervenes for HARD-STOP conditions — things that
-would damage equipment or wipe out the entire night:
+The Critic and Oracle still run their checks. Their findings get
+appended as advisories[] for the operator to read. Advisories never
+change the plan state — they're purely informational about *what's
+going on around the plan*, not the plan itself.
 
-  - precipitation > 0 in current weather (storm)
-  - wind > critical threshold (mount/scope at risk)
-  - sustained 100% cloud cover across the entire dark window
-    (no point opening the roof)
-  - critical hardware fault (camera disconnect, mount park failure)
+Execution authorization is a separate concept handled elsewhere
+(atlas.agents.state.OperatorVerdict — the GO / CAUTION / NO-GO
+banner). Hard-stop conditions (storm rolling in, wind beyond
+critical, hardware fault) flip the verdict to NO-GO, which gates
+session execution. They DO NOT touch the plan. When weather clears,
+the verdict flips back to GO/CAUTION and execution resumes against
+the same plan — no rebuild required.
 
-Everything else is an advisory the operator reads on the dashboard
-and decides what to do about. The new model trusts the operator to
-make those judgement calls; it doesn't pre-empt them.
-
-Backward-compat note: the old PHASE_* constants are kept as aliases
-for any in-flight references in chat history / decision logs. New
-code should use ``Advisory`` and ``SessionPlanState``.
+Backward-compat: the old PHASE_* constants and STATE_HARD_STOP are
+kept as aliases for any in-flight references in chat history /
+decision logs. New code should use STATE_READY / STATE_REPLANNED.
 """
 from __future__ import annotations
 
@@ -41,12 +36,16 @@ from typing import Any
 # ---- States the plan can be in --------------------------------------------
 
 STATE_BUILDING   = "building"     # Planner is still computing (very brief)
-STATE_READY      = "ready"        # Plan published, advisories accumulating
-STATE_HARD_STOP  = "hard_stop"    # Operator cancelled — storm / damage risk
-STATE_REPLANNED  = "replanned"    # Superseded by a fresh rebuild
+STATE_READY      = "ready"        # Plan published; stays this way until superseded
+STATE_REPLANNED  = "replanned"    # A newer plan exists; this one is historical
 
-ALL_STATES = [STATE_BUILDING, STATE_READY, STATE_HARD_STOP, STATE_REPLANNED]
-TERMINAL_STATES = {STATE_HARD_STOP, STATE_REPLANNED}
+ALL_STATES = [STATE_BUILDING, STATE_READY, STATE_REPLANNED]
+TERMINAL_STATES = {STATE_REPLANNED}
+
+# Legacy state name. Kept so old log rows / decisions deserialise. New
+# code should never write this — execution-blocking lives on the
+# OperatorVerdict, not the plan.
+STATE_HARD_STOP  = "hard_stop"
 
 
 # ---- Legacy phase aliases (kept so old log rows still resolve) ------------
@@ -101,13 +100,17 @@ class SessionPlanState:
     started_at: str
     state: str = STATE_READY
     advisories: list[Advisory] = field(default_factory=list)
-    hard_stop_reason: str | None = None
     finalized_at: str | None = None
     # Audit trail — what events happened against this plan, in order.
     history: list[dict] = field(default_factory=list)
 
     def add_advisory(self, advisory: Advisory) -> None:
-        """Append an advisory and record the event in the audit history."""
+        """Append an advisory and record the event in the audit history.
+
+        Advisories never change the plan state. They're informational —
+        the operator reads them on the dashboard. Execution gating
+        (storm, equipment risk) is handled by the OperatorVerdict
+        separately."""
         self.advisories.append(advisory)
         self.history.append({
             "kind": "advisory",
@@ -117,18 +120,10 @@ class SessionPlanState:
             "message": advisory.message[:160],
         })
 
-    def hard_stop(self, reason: str, source: str = "operator") -> None:
-        """Flip the plan into the HARD_STOP terminal state."""
-        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-        self.state = STATE_HARD_STOP
-        self.hard_stop_reason = reason
-        self.finalized_at = now
-        self.history.append({
-            "kind": "hard_stop", "at": now,
-            "source": source, "reason": reason,
-        })
-
     def replanned(self, reason: str = "rebuild") -> None:
+        """Mark this plan as superseded. The Planner does this right
+        before publishing a fresh plan so the old one is clearly
+        retired in the history."""
         now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
         self.state = STATE_REPLANNED
         self.finalized_at = now
@@ -154,21 +149,26 @@ class SessionPlanState:
             "state": self.state,
             "advisories": [asdict(a) for a in self.advisories],
             "advisory_counts": self.severity_counts(),
-            "hard_stop_reason": self.hard_stop_reason,
             "finalized_at": self.finalized_at,
             "history": list(self.history),
         }
 
     @classmethod
     def from_jsonable(cls, d: dict) -> "SessionPlanState":
+        # Legacy compatibility: any plan blob written before the
+        # decoupling refactor may have state="hard_stop". Coerce to
+        # ready — that plan is just as usable now as it was then;
+        # execution gating moved to the OperatorVerdict.
+        legacy_state = d.get("state", STATE_READY)
+        if legacy_state == STATE_HARD_STOP:
+            legacy_state = STATE_READY
         s = cls(
             review_id=d["review_id"],
             plan=d.get("plan") or {},
             started_at=d["started_at"],
-            state=d.get("state", STATE_READY),
+            state=legacy_state,
         )
         s.advisories = [Advisory(**a) for a in d.get("advisories") or []]
-        s.hard_stop_reason = d.get("hard_stop_reason")
         s.finalized_at = d.get("finalized_at")
         s.history = list(d.get("history") or [])
         return s

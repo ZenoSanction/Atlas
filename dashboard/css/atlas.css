@@ -1169,6 +1169,15 @@ footer .muted { color: var(--text-dim); }
   padding: 6px 10px; margin-top: 6px;
   font-size: 13px; border-radius: 3px;
 }
+.exec-state {
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: rgba(0,0,0,0.20);
+  border-radius: 3px;
+  font-size: 13px;
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+}
 
 .advisory-group { margin-bottom: 10px; }
 .advisory-group h4 {

@@ -77,7 +77,10 @@ export async function refreshMissionControl(api) {
     }
   }
 
-  // Session Workflow pipeline — 5 stages with phase progression
+  // Cache the verdict globally so renderWorkflow() can fold the
+  // execution-gate badge into the plan panel. Plan READY + Execution
+  // GO are two separate things; we show them side-by-side.
+  window._lastVerdict = mc.verdict || null;
   renderWorkflow(mc.session_review);
 
   // Per-agent lanes
@@ -383,11 +386,13 @@ function gateIcon(status) {
   }
 }
 
-// Session Plan + Advisories. The previous design rendered a 6-stage
-// gated pipeline (Planner → Critic → Operator → Oracle → Operator →
-// Planner). That was overengineered — the plan is now READY the
-// moment the Planner builds it. Critic + Oracle file advisories
-// asynchronously which we render inline.
+// Session Plan + Advisories. The plan is READY the moment the Planner
+// builds it; advisories are informational notes about what's happening
+// around the plan (weather, moon, revisits). They never change the
+// plan's state. Whether to *execute* a plan is a separate question —
+// handled by the OperatorVerdict (the GO/CAUTION/NO-GO banner at the
+// top of the Tonight tab). Storm rolls in → verdict goes NO-GO. Plan
+// stays READY. Storm passes → verdict back to GO. Same plan, no rebuild.
 function renderWorkflow(review) {
   const stages = document.getElementById("workflow-stages");
   const idEl = document.getElementById("workflow-review-id");
@@ -410,17 +415,23 @@ function renderWorkflow(review) {
   const stateBadge = ({
     ready:      `<span class="plan-state ok">PLAN READY</span>`,
     building:   `<span class="plan-state warn">building…</span>`,
-    hard_stop:  `<span class="plan-state crit">HARD STOP</span>`,
     replanned:  `<span class="plan-state">replanned</span>`,
   })[review.state] || `<span class="plan-state">${esc(review.state)}</span>`;
 
-  const reasonLine = (review.state === "hard_stop" && review.hard_stop_reason)
-    ? `<div class="hard-stop-reason">Hard stop: ${esc(review.hard_stop_reason)}</div>`
-    : "";
+  // Execution gate: the verdict from /api/mission-control. The Plan
+  // panel surfaces it inline so the operator sees plan + execution
+  // status together. Note the deliberate phrasing: the plan stays
+  // READY even when execution is blocked — they're decoupled.
+  const v = window._lastVerdict || null;
+  let execLine = "";
+  if (v) {
+    const cls = ({"GO":"ok","CAUTION":"warn","NO-GO":"crit"})[v.verdict] || "";
+    execLine = `<div class="exec-state">
+      Execution: <span class="plan-state ${cls}">${esc(v.verdict)}</span>
+      <span class="muted">${esc(v.reason || "")}</span>
+    </div>`;
+  }
 
-  // Compact summary strip — one line of state + advisory counts. No
-  // multi-stage pipeline UI; the plan is either ready, hard-stopped,
-  // or being rebuilt. Advisories show beneath as a list.
   stages.innerHTML = `
     <div class="plan-summary">
       ${stateBadge}
@@ -432,7 +443,7 @@ function renderWorkflow(review) {
             ? `<span class="muted">no advisories</span>` : ""}
       </div>
     </div>
-    ${reasonLine}
+    ${execLine}
   `;
 
   if (!body) return;

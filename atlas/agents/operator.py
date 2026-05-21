@@ -157,7 +157,8 @@ class Operator(BaseAgent):
         """Status updates from other agents:
 
           kind=weather_assessment   → fold into the GO/CAUTION/NO-GO verdict
-          kind=critical_advisories  → evaluate hard-stop conditions
+          kind=critical_advisories  → evaluate whether to block execution
+                                       (does NOT touch the plan itself)
           (everything else)         → debug-log + ignore (advisories show up
                                        on the dashboard via shared state, not
                                        through the Operator's queue anymore)
@@ -168,47 +169,47 @@ class Operator(BaseAgent):
             await self._update_verdict_from_weather(payload)
             return
         if kind == "critical_advisories" and payload.get("advisories"):
-            await self._evaluate_hard_stop(payload)
+            await self._evaluate_execution_block(payload)
             return
         self.log.debug("Operator ignoring status kind=%s", kind)
 
-    async def _evaluate_hard_stop(self, payload: dict) -> None:
-        """Decide whether incoming critical advisories warrant a
-        hard-stop (autonomous session cancel).
+    async def _evaluate_execution_block(self, payload: dict) -> None:
+        """Decide whether incoming critical advisories warrant blocking
+        *execution* — opening the roof, slewing the mount, running a
+        sequence.
 
-        Hard-stops are reserved for things that could damage equipment
-        or guarantee a wasted night:
+        Critical to keep straight: this never touches the plan. The
+        plan is READY; it stays READY. What changes is the
+        OperatorVerdict (GO / CAUTION / NO-GO), which is the gate
+        elsewhere in the codebase that authorizes a session start.
 
-          * precipitation > 0 in current weather  (storm)
-          * wind > critical threshold             (mount/scope risk)
-          * sustained 100% cloud across the whole dark window
-            (no point opening the roof)
+        Execution-block triggers:
+
+          * precipitation > 0 in current weather  (storm — roof stays closed)
+          * wind > critical threshold             (mount/scope at risk)
           * any hardware kind=critical advisory   (mount/camera fault)
 
-        Operator-warning advisories (high humidity, moon proximity,
-        dew margin tight) are NOT hard-stops — the operator decides
-        whether to act on them via the dashboard banner.
+        Operator-warning advisories (humidity high, moon proximity,
+        dew margin tight) are NOT blocks — the operator decides on
+        those via the dashboard banner. When weather clears, the
+        verdict flips back to GO/CAUTION and execution can resume
+        against the same plan, no rebuild required.
         """
         if get_state().is_manual():
-            self.log.info("Manual control engaged — skipping autonomous hard-stop evaluation.")
-            self.log_decision("hard_stop_paused_manual",
-                                rationale="Operator is driving; not auto-cancelling.")
+            self.log.info("Manual control engaged — skipping autonomous "
+                            "execution-block evaluation.")
+            self.log_decision("execution_block_paused_manual",
+                                rationale="Operator is driving; not gating.")
             return
 
         advisories = payload.get("advisories") or []
-        # Hard-stop triggers:
         hardware_fault = any(a.get("kind") == "hardware" for a in advisories)
         weather_storm = False
-        # Look at current weather snapshot — precipitation > 0 is a storm.
         a = get_state().get_assessment()
         if a is not None:
             raw = a.raw_current or {}
             precip = raw.get("precip_in") or 0.0
             wind_mph = raw.get("wind_speed_mph") or 0.0
-            # Wind hard-stop threshold (mph): a step above the user-set
-            # "critical" wind. We're not second-guessing the threshold
-            # the operator chose in Setup; we're saying "if wind is
-            # already at critical, that IS a hard-stop."
             from atlas.safety.thresholds import SafetyThresholds
             t = SafetyThresholds.from_db()
             from atlas.units import ms_to_mph
@@ -216,44 +217,56 @@ class Operator(BaseAgent):
             if precip > 0:
                 weather_storm = True
             if wind_mph >= crit_mph:
-                weather_storm = True   # treat as same class of risk
+                weather_storm = True
 
         if not (hardware_fault or weather_storm):
-            self.log.info("Critical advisories filed but no hard-stop "
-                            "conditions met — leaving plan READY.")
-            self.log_decision("hard_stop_evaluated",
+            self.log.info("Critical advisories filed but no execution-"
+                            "block conditions met — verdict unchanged.")
+            self.log_decision("execution_block_evaluated",
                                 inputs={"advisories": advisories},
-                                outputs={"hard_stop": False},
+                                outputs={"blocked": False},
                                 rationale="No storm / damage-risk indicators")
             return
 
-        # Hard-stop fires. Flip the live plan into HARD_STOP, broadcast,
-        # and log.
-        from atlas.agents.session_workflow import SessionPlanState
-        live = get_state().get_session_review()
+        # Execution block fires. Flip the verdict to NO-GO and broadcast.
+        # The plan itself stays READY — the operator can still review
+        # what was planned, and when weather clears, execution resumes
+        # against this same plan.
         reasons = []
         if hardware_fault:
             reasons.append("hardware critical")
         if weather_storm:
             reasons.append("storm / extreme wind")
         reason = " + ".join(reasons)
-        if live is not None:
-            try:
-                plan = SessionPlanState.from_jsonable(live)
-                plan.hard_stop(reason, source="operator")
-                get_state().set_session_review(plan.to_jsonable())
-            except Exception:
-                self.log.exception("Failed to mark plan hard-stopped")
-        self.log.warning("HARD STOP: %s", reason)
-        self.set_task(f"HARD STOP: {reason}", state="safe-mode")
-        self.log_decision("session_hard_stop",
+        new = OperatorVerdict(
+            decided_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            verdict=VERDICT_NOGO, reason=f"Execution blocked: {reason}",
+            sources=["execution_block", "critical_advisories"],
+        )
+        get_state().set_verdict(new)
+        self.log.warning("EXECUTION BLOCK: %s (plan stays READY)", reason)
+        self.set_task(f"execution blocked: {reason} (plan unchanged)",
+                      state="waiting")
+        self.log_decision("execution_block",
                             inputs={"advisories": advisories,
                                       "reason": reason},
                             rationale=reason)
+        # If a session is actively running, stop it. The plan survives;
+        # only the execution stops.
+        if self._current_session_id is not None:
+            try:
+                SessionManager.set_state(self._current_session_id,
+                                           SessionState.STANDBY,
+                                           reason=f"execution blocked: {reason}")
+                self.log.warning("Session #%d → STANDBY due to execution block",
+                                  self._current_session_id)
+            except Exception:
+                self.log.exception("Failed to STANDBY active session")
         await self.bus.broadcast_event({
-            "type": "hard_stop",
+            "type": "execution_block",
             "sender": "operator",
             "reason": reason,
+            "verdict": VERDICT_NOGO,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
 
