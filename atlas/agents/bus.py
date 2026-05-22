@@ -1,11 +1,18 @@
 """Inter-agent message bus.
 
-Each agent has its own asyncio.Queue. The bus routes a Message from sender to
-recipient and persists it to the ``agent_messages`` table for audit.
+Each agent has its own asyncio.Queue, **unbounded**: agent-to-agent
+messages are never dropped, never blocked. If an agent falls behind
+processing its queue, that's a real problem we want to surface, not
+hide behind a silent drop. Memory pressure here would be a symptom,
+not a cause — at typical ATLAS message rates the queues hold a few
+hundred entries at most across an entire night.
 
-The bus also exposes a broadcast pubsub for the dashboard WebSocket layer:
-every persisted message is also dispatched to dashboard subscribers in
-near-real-time.
+The bus also exposes a broadcast pubsub for the dashboard WebSocket
+layer. Subscriber queues are also unbounded — operational messages
+never get dropped — but a subscriber that falls more than
+DEAD_SUBSCRIBER_THRESHOLD messages behind is treated as dead and
+disconnected. Healthy subscribers keep every event; failed
+subscribers get garbage-collected instead of silently leaking memory.
 """
 from __future__ import annotations
 
@@ -19,6 +26,21 @@ from atlas.db.models import AgentMessageKind, AgentName
 from atlas.logging_setup import get_logger
 
 log = get_logger("agents.bus")
+
+# A WebSocket subscriber that's accumulated this many un-consumed
+# events is presumed dead (browser tab closed without notifying us,
+# network dropped silently, etc.). At 1 event/sec sustained it
+# represents ~17 minutes of stale data — well past anything an active
+# operator would tolerate. The bus pushes a close sentinel into the
+# subscriber's queue; the WebSocket handler in atlas/api/ws.py sees
+# the sentinel and drops the socket cleanly.
+DEAD_SUBSCRIBER_THRESHOLD = 10_000
+
+# Sentinel pushed into a subscriber queue when the bus decides the
+# subscriber is dead. The WebSocket handler watches for this exact
+# dict shape and closes the connection on receipt.
+SUBSCRIBER_CLOSE_SENTINEL = {"__bus_close__": True,
+                               "reason": "subscriber backlog exceeded"}
 
 
 @dataclass
@@ -42,9 +64,13 @@ class Message:
 
 
 class AgentBus:
-    """One queue per agent + a fan-out broadcast for dashboard subscribers."""
+    """One unbounded queue per agent + a fan-out broadcast for
+    dashboard subscribers (also unbounded, with dead-subscriber GC)."""
 
     def __init__(self) -> None:
+        # Unbounded agent queues. Agent-to-agent messages are never
+        # dropped, never blocked. asyncio.Queue() with no maxsize is
+        # unlimited per Python docs.
         self._queues: dict[AgentName, asyncio.Queue[Message]] = {
             name: asyncio.Queue() for name in AgentName
         }
@@ -83,12 +109,11 @@ class AgentBus:
             st.push_outbox(jsonable["sender"], item)
         except Exception:
             pass
-        # Fan-out to dashboard
-        for q in list(self._broadcast_subs):
-            try:
-                q.put_nowait(msg.to_jsonable())
-            except asyncio.QueueFull:
-                pass
+        # Fan-out to dashboard subscribers. Each queue is unbounded;
+        # if one has accumulated more than DEAD_SUBSCRIBER_THRESHOLD
+        # entries the client is presumed gone — drop the subscriber
+        # instead of letting it leak memory forever.
+        self._broadcast(msg.to_jsonable())
 
     async def recv(self, agent: AgentName) -> Message:
         return await self._queues[agent].get()
@@ -96,7 +121,10 @@ class AgentBus:
     # --- dashboard pubsub ---------------------------------------------------
 
     def subscribe(self) -> asyncio.Queue[dict]:
-        q: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
+        # Unbounded subscriber queue. The dead-subscriber GC in
+        # _broadcast() catches abandoned clients without blocking
+        # operational messages.
+        q: asyncio.Queue[dict] = asyncio.Queue()
         self._broadcast_subs.add(q)
         return q
 
@@ -105,10 +133,40 @@ class AgentBus:
 
     async def broadcast_event(self, event: dict) -> None:
         """Emit a non-agent event to dashboard subscribers (status updates, etc.)."""
+        self._broadcast(event)
+
+    def _broadcast(self, event: dict) -> None:
+        """Push an event to every dashboard subscriber. Subscribers
+        whose queues have grown past the dead threshold are garbage-
+        collected — that's how we maintain the no-drop guarantee for
+        live subscribers while not leaking memory for failed ones."""
+        dead: list[asyncio.Queue[dict]] = []
         for q in list(self._broadcast_subs):
+            if q.qsize() >= DEAD_SUBSCRIBER_THRESHOLD:
+                dead.append(q)
+                continue
+            # put_nowait on an unbounded queue can't raise QueueFull,
+            # but defensively handle anything weird (e.g. queue
+            # already closed by another task).
             try:
                 q.put_nowait(event)
-            except asyncio.QueueFull:
+            except Exception as e:
+                log.warning("broadcast put failed on subscriber: %s", e)
+                dead.append(q)
+        for q in dead:
+            log.warning("Dropping dead WebSocket subscriber "
+                          "(qsize=%d ≥ threshold=%d). Client appears "
+                          "to have stopped consuming.",
+                          q.qsize(), DEAD_SUBSCRIBER_THRESHOLD)
+            self._broadcast_subs.discard(q)
+            # Push the close sentinel directly (bypass qsize check).
+            # The WebSocket handler's loop sees it on its next get()
+            # and tears the socket down. If the queue is already full
+            # of stale data, this still works — the WS handler reads
+            # in FIFO order and will eventually drain to the sentinel.
+            try:
+                q.put_nowait(SUBSCRIBER_CLOSE_SENTINEL)
+            except Exception:
                 pass
 
 
