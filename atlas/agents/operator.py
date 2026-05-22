@@ -1518,6 +1518,15 @@ class Operator(BaseAgent):
         self.set_task(f"session #{sid} ended — Archivist notified",
                       state="idle")
         self._current_session_id = None
+        # Generate the morning report for this just-finished session.
+        # Best-effort: never block the session-stop on the report.
+        try:
+            from atlas.reports.morning_report import write_morning_report
+            path = write_morning_report(session_id=sid)
+            if path is not None:
+                self.log.info("morning report written: %s", path)
+        except Exception as e:
+            self.log.warning("morning report generation failed: %s", e)
         await self.bus.broadcast_event({
             "type": "session_stopped",
             "sender": "operator",

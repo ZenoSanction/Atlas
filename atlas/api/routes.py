@@ -998,6 +998,28 @@ async def get_external_tools() -> dict:
     return {"tools": get_tool_status()}
 
 
+@api_router.get("/reports/morning")
+async def get_morning_report(session_id: int | None = None) -> dict:
+    """Generate a morning-report markdown summary for ``session_id``
+    (or the latest COMPLETE session if omitted). Returns the structured
+    SessionReport JSON plus the rendered markdown.
+
+    The dashboard's 'Last night summary' button calls this endpoint
+    on demand without writing to disk; the Operator's session-stop
+    flow writes the .md file separately via reports.write_morning_report."""
+    from atlas.reports.morning_report import generate_morning_report
+    report = generate_morning_report(session_id=session_id)
+    if report is None:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=404,
+            detail=("no session found"
+                      if session_id is None
+                      else f"session {session_id} not found"),
+        )
+    return report.to_jsonable()
+
+
 @api_router.get("/campaigns/progress")
 async def get_campaigns_progress() -> dict:
     """Progress snapshot for every ACTIVE campaign.
