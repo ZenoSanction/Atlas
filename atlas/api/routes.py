@@ -998,6 +998,31 @@ async def get_external_tools() -> dict:
     return {"tools": get_tool_status()}
 
 
+@api_router.get("/calibration/coverage")
+async def get_calibration_coverage() -> dict:
+    """Calibration library coverage report.
+
+    Cross-references existing CalibrationMaster rows against the
+    equipment's recent light-frame combos (filter, exposure, gain,
+    offset, temp). Returns:
+
+      * bias / dark / flat — every master grouped by kind
+      * missing — combos that have no usable master at all
+      * stale — masters past their freshness window
+      * actions — prioritized list of capture runs to do next
+
+    Dashboard surfaces this on the Setup tab so the operator sees
+    exactly what calibration work is needed before tonight."""
+    from atlas.calibration.library import CalibrationLibrary
+    lib = CalibrationLibrary()
+    cov = lib.coverage_report()
+    actions = lib.recommended_actions()
+    return {
+        "coverage": cov.to_jsonable(),
+        "actions": actions,
+    }
+
+
 @api_router.get("/setup/system-flags")
 async def get_system_flags() -> dict:
     """Return runtime-mutable flags. simulation_mode here is the DB

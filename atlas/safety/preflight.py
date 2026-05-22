@@ -234,50 +234,39 @@ def _gate_hardware() -> Gate:
 
 
 def _gate_calibration() -> Gate:
-    """Recent calibration masters (bias + dark + flat) within the
-    configured freshness window.
+    """Calibration library coverage + freshness, cross-referenced
+    against the equipment's recent light-frame combos.
 
-    Until Phase-2 ingestion populates calibration_masters from the
-    Archivist pipeline, every install starts with an empty table —
-    so we treat 'no masters yet' as a non-blocking warning. Once a
-    real session writes masters, the gate begins enforcing the
-    freshness window properly."""
-    from atlas.db.managers import ConfigManager
-    from atlas.db.models import CalibrationMaster
-    from atlas.db.session import get_session
-    from datetime import datetime, timedelta
-    retention = ConfigManager.get_retention()
-    days = int(retention.calibration_freshness_days or 7)
-    cutoff = datetime.utcnow() - timedelta(days=days)
-    with get_session() as s:
-        total = s.query(CalibrationMaster).count()
-        fresh_kinds = {row[0] for row in s.query(CalibrationMaster.kind)
-                                              .filter(CalibrationMaster.created_at >= cutoff)
-                                              .distinct().all()}
-    have_bias = "bias" in fresh_kinds
-    have_dark = "dark" in fresh_kinds
-    have_flat = "flat" in fresh_kinds
-    n_have = sum([have_bias, have_dark, have_flat])
+    Uses CalibrationLibrary.coverage_report() so the verdict is
+    informed by *what masters this equipment actually needs* (per
+    filter / exposure / gain / temp), not just "is the table empty"."""
+    from atlas.calibration.library import CalibrationLibrary
+    lib = CalibrationLibrary()
+    cov = lib.coverage_report()
+    n_total = len(cov.bias) + len(cov.dark) + len(cov.flat)
+    n_missing = len(cov.missing)
+    n_stale = len(cov.stale)
 
-    if n_have == 3:
+    if n_total == 0:
+        # Phase-2 stub — no ingestion has run yet. Don't block the
+        # verdict on something we can't populate without sky time.
+        return Gate("calibration", "Calibration library", "warning",
+                     "Library empty — no masters captured yet. Not "
+                     "blocking the verdict (bench day will populate).")
+    if n_missing == 0 and n_stale == 0:
         return Gate("calibration", "Calibration library", "ok",
-                     f"All three master types within {days} days.")
-    if n_have == 0 and total == 0:
-        # Phase-2 stub — no calibration ingestion exists yet, so the
-        # table is empty by construction. Don't block the verdict on
-        # something the system can't populate itself.
+                     cov.summary)
+    if n_missing > 0:
+        # Flag which kinds are missing for the dashboard
+        missing_kinds = sorted({m.get("kind") for m in cov.missing})
         return Gate("calibration", "Calibration library", "warning",
-                     "Library empty — Archivist calibration ingestion is "
-                     "Phase 2. Not blocking the verdict.")
-    if n_have == 0:
-        # Table has entries but nothing fresh — stale library, real warning.
-        return Gate("calibration", "Calibration library", "warning",
-                     f"No fresh masters in last {days} days. "
-                     f"Library has {total} older row(s). Plan a calibration run.")
-    missing = [k for k, p in [("bias", have_bias), ("dark", have_dark),
-                                ("flat", have_flat)] if not p]
+                     f"{n_missing} combo(s) need capture "
+                     f"(missing: {', '.join(missing_kinds)}). "
+                     f"{n_stale} stale. See /api/calibration/coverage.")
+    # n_stale > 0 only
     return Gate("calibration", "Calibration library", "warning",
-                 f"Missing fresh: {', '.join(missing)} (window: {days} days)")
+                 f"{n_stale} master(s) past freshness window — "
+                 "queue refresh.")
 
 
 def _gate_plan() -> Gate:
