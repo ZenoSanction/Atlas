@@ -958,6 +958,16 @@ async def session_preflight() -> dict:
 # Weather thresholds (Setup tab)
 # ============================================================================
 
+@api_router.get("/setup/external-tools")
+async def get_external_tools() -> dict:
+    """Status of external binaries (ASTAP, Siril, etc.) checked at
+    boot. Each entry: configured / available / detail. Dashboard
+    surfaces these so the operator knows what's working before a
+    session needs it."""
+    from atlas.startup_checks import get_tool_status
+    return {"tools": get_tool_status()}
+
+
 @api_router.get("/setup/system-flags")
 async def get_system_flags() -> dict:
     """Return runtime-mutable flags. simulation_mode here is the DB

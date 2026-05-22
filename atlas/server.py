@@ -67,6 +67,16 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("Dirty-shutdown recovery failed (non-fatal)")
 
+    # ASTAP installation check. If the operator configured an
+    # astap_path but the binary doesn't exist (uninstall, drive
+    # remapped, typo'd path), surface it loudly at boot rather than
+    # silently failing mid-night when a plate-solve is needed.
+    try:
+        from atlas.startup_checks import check_external_tools
+        check_external_tools(log)
+    except Exception:
+        log.exception("External-tools check failed (non-fatal)")
+
     # Agents
     coord = get_coordinator()
     await coord.start_all()
