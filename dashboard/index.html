@@ -452,6 +452,17 @@
       <p class="hint">Runtime toggles. The <code>ATLAS_SIMULATION_MODE</code> environment variable (if set) overrides whatever's stored here.</p>
       <div id="system-flags-status" class="muted" style="margin-bottom:8px"></div>
       <label class="checkbox"><input type="checkbox" id="sim-toggle"> Simulation mode (no real hardware will be commanded)</label>
+      <div style="margin-top:8px"></div>
+      <label class="checkbox"><input type="checkbox" id="auto-start-toggle">
+        Auto-start sessions when ready</label>
+      <p class="hint" style="margin-top:4px;margin-left:24px;font-size:11px">
+        When enabled, the Operator autonomously starts a session the
+        moment ALL of these are true at the same time:
+        verdict <b>GO</b>, day phase <b>astronomical dark</b>,
+        plan <b>READY</b>, no session already running, manual control
+        OFF, no cloudover-forecast advisory. The night autonomously
+        stops near dawn. Leave off if you want to be the one who
+        clicks "Start" each night.</p>
       <div class="form-actions">
         <button id="sim-save" class="btn-primary" type="button">Save</button>
         <span id="sim-status" class="form-status"></span>

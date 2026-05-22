@@ -65,7 +65,7 @@ class Operator(BaseAgent):
         self.log.info("Operator agent online — final authority")
         self.set_task("standing by — final-authority watch on agent bus",
                       state="idle")
-        # Verdict-transition watcher. Runs every 30 seconds; reads the
+        # Verdict-transition watcher. Runs every 15 seconds; reads the
         # current OperatorVerdict from shared state and decides whether
         # to fire safe-shutdown (NO-GO) or safe-startup + replan (GO/
         # CAUTION after the hysteresis). This is the loop that turns
@@ -74,6 +74,20 @@ class Operator(BaseAgent):
             self._verdict_watcher_loop(),
             name="operator-verdict-watcher",
         )
+        # Autonomous-session loop. Off by default; gated on the
+        # auto_start_sessions DB flag. When enabled and all prereqs
+        # align (verdict GO + astro_dark + plan READY + no session
+        # + no manual + no cloudover-forecast advisory), starts a
+        # session autonomously, runs SafeStartupSequence, walks
+        # the plan's scheduled slots, then stops near dawn.
+        self._auto_session_task: asyncio.Task | None = (
+            asyncio.create_task(
+                self._autonomous_session_loop(),
+                name="operator-autonomous-session",
+            )
+        )
+        self._auto_session_active = False
+        self._auto_session_active_slot_idx: int = -1
         # Background task: run the comprehensive pre-flight every 2 min and
         # publish the aggregated verdict (weather + hardware + calibration
         # + plan + disk + vault + API + dark window) to shared state. The
@@ -106,6 +120,8 @@ class Operator(BaseAgent):
             preflight_task.cancel()
             if self._verdict_watcher_task is not None:
                 self._verdict_watcher_task.cancel()
+            if self._auto_session_task is not None:
+                self._auto_session_task.cancel()
             try:
                 await preflight_task
             except (asyncio.CancelledError, Exception):
@@ -113,6 +129,11 @@ class Operator(BaseAgent):
             if self._verdict_watcher_task is not None:
                 try:
                     await self._verdict_watcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if self._auto_session_task is not None:
+                try:
+                    await self._auto_session_task
                 except (asyncio.CancelledError, Exception):
                     pass
 
@@ -399,6 +420,273 @@ class Operator(BaseAgent):
                 await phd2.close()
             except Exception:
                 pass
+
+    # ---- Autonomous session loop -------------------------------------------
+
+    async def _autonomous_session_loop(self) -> None:
+        """Watch for the moment all preconditions align, then run an
+        autonomous session: SafeStartupSequence → walk plan slots →
+        stop at dawn → SafeShutdownSequence.
+
+        Off by default; activated only when the operator flips
+        auto_start_sessions on the Setup tab. Even when on, ALL of
+        these must be true at the same time for autonomy to kick in:
+
+          * day_phase = ASTRO_DARK and minutes_until_dawn >= MIN_USEFUL+OVERHEAD
+          * verdict = GO  (CAUTION won't trigger — operator's call only)
+          * plan READY with at least one scheduled slot
+          * no active session
+          * manual control NOT engaged
+          * no critical advisories of kind=session_wasted_forecast
+            or kind=hardware on the live plan
+
+        Ticks every 30 s — slow because every condition is read from
+        in-memory shared state and a single tick is essentially free.
+        The actual session walks proceeds in a separate task once
+        kicked off."""
+        from atlas.db.managers import ConfigManager
+        from atlas.db.models import SessionState as _SS
+        await asyncio.sleep(20)   # let startup settle
+        while not self.should_stop:
+            try:
+                await self._autonomous_session_tick()
+            except Exception:
+                self.log.exception("autonomous-session tick failed")
+            await asyncio.sleep(30)
+
+    async def _autonomous_session_tick(self) -> None:
+        from atlas.db.managers import ConfigManager
+        # Honor the toggle. If off, do nothing.
+        flags = ConfigManager.get_system_flags()
+        if not bool(getattr(flags, "auto_start_sessions", False)):
+            return
+        # Already running a session OR mid-execution → skip
+        if self._auto_session_active:
+            return
+        if self._current_session_id is not None:
+            return
+        if get_state().is_manual():
+            return
+        # Verdict must be GO (not CAUTION — too marginal for autonomy)
+        v = get_state().get_verdict()
+        if v is None or v.verdict != VERDICT_GO:
+            return
+        # Plan must be READY with slots
+        review = get_state().get_session_review() or {}
+        if review.get("state") != "ready":
+            return
+        slots = (review.get("plan") or {}).get("visible_targets") or []
+        if not slots:
+            return
+        # Critical advisories that block autonomous start
+        for a in review.get("advisories") or []:
+            if a.get("severity") == "critical" and a.get("kind") in (
+                "session_wasted_forecast", "hardware",
+            ):
+                self.log.info(
+                    "auto-start blocked: critical advisory %s — %s",
+                    a.get("kind"), a.get("message", "")[:80],
+                )
+                return
+        # Must currently be in astronomical dark with enough usable time
+        site = ConfigManager.get_site()
+        if site is None:
+            return
+        from atlas.astronomy.day_phase import (
+            current_phase, minutes_useful_remaining,
+        )
+        phase = current_phase(float(site.latitude), float(site.longitude))
+        if not phase.is_imaging_window:
+            return
+        usable = minutes_useful_remaining(
+            phase, safe_startup_overhead_min=SAFE_STARTUP_OVERHEAD_MIN,
+        ) or 0.0
+        if usable < MIN_USEFUL_IMAGING_MIN:
+            self.log.info(
+                "auto-start declined: only %.0f usable min remaining",
+                usable,
+            )
+            return
+
+        # All preconditions met — fire the session.
+        self._auto_session_active = True
+        self.log.warning(
+            "AUTO-START: conditions aligned (verdict=GO, dark with "
+            "%.0f usable min, plan READY with %d slot(s))",
+            usable, len(slots),
+        )
+        self.log_decision(
+            "auto_session_start_triggered",
+            inputs={"usable_min": usable, "slots": len(slots),
+                      "review_id": review.get("review_id")},
+            rationale="all auto-start preconditions met",
+        )
+        asyncio.create_task(
+            self._run_autonomous_session(review),
+            name="operator-auto-session-run",
+        )
+
+    async def _run_autonomous_session(self, review: dict) -> None:
+        """One full autonomous night: startup → slots → shutdown."""
+        from atlas.db.managers import ConfigManager
+        from atlas.db.models import SessionState as _SS
+        try:
+            # 1. SafeStartupSequence (cool camera, unpark mount, etc.)
+            await self._run_startup(verdict_reason="auto-start")
+
+            # 2. Create the session row
+            from atlas.config import is_simulation_mode
+            sim = is_simulation_mode()
+            sid = SessionManager.start(simulation=sim)
+            SessionManager.set_state(sid, SessionState.NOMINAL,
+                                       reason="autonomous start")
+            self._current_session_id = sid
+            self.log.warning("AUTO-START: session #%d started", sid)
+            await self.bus.broadcast_event({
+                "type": "session_started",
+                "sender": "operator",
+                "session_id": sid, "simulation": sim,
+                "autonomous": True,
+                "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            })
+
+            # 3. Walk the plan's scheduled slots in time order
+            await self._walk_plan_slots(review, sid)
+
+            # 4. Stop the session cleanly
+            SessionManager.set_state(sid, SessionState.COMPLETE,
+                                       reason="autonomous stop at dawn")
+            await self.send(
+                AgentName.ARCHIVIST,
+                AgentMessageKind.POST_SESSION,
+                payload={"session_id": sid,
+                          "summary": f"Autonomous session #{sid} ended"},
+                session_id=sid,
+            )
+            self.log.warning("AUTO-START: session #%d complete", sid)
+            await self.bus.broadcast_event({
+                "type": "session_stopped",
+                "sender": "operator",
+                "session_id": sid, "autonomous": True,
+                "reason": "dawn",
+                "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            })
+            self._current_session_id = None
+
+            # 5. SafeShutdownSequence (park mount, warm camera, close roof)
+            await self._run_shutdown(reason="auto-stop at dawn")
+
+        except Exception:
+            self.log.exception("autonomous session run failed")
+        finally:
+            self._auto_session_active = False
+            self._auto_session_active_slot_idx = -1
+
+    async def _walk_plan_slots(self, review: dict, session_id: int) -> None:
+        """Fire start_capture_sequence for each scheduled slot in order.
+        Sleeps to the slot's start_utc before firing. Exits early when:
+          - the verdict goes NO-GO (verdict watcher already fired
+            shutdown; we just stop the walk)
+          - we leave the astronomical dark window
+          - all slots are processed
+        """
+        from atlas.db.managers import ConfigManager
+        from datetime import datetime as _dt
+        slots = (review.get("plan") or {}).get("visible_targets") or []
+        site = ConfigManager.get_site()
+        if site is None:
+            return
+        for idx, slot in enumerate(slots):
+            if self.should_stop:
+                return
+            # Hard exits — verdict turned bad, dark window over
+            v = get_state().get_verdict()
+            if v is None or v.verdict == VERDICT_NOGO:
+                self.log.warning(
+                    "auto-session: verdict %s at slot %d/%d; abandoning walk",
+                    v.verdict if v else "?", idx + 1, len(slots),
+                )
+                return
+            from atlas.astronomy.day_phase import current_phase
+            phase = current_phase(float(site.latitude),
+                                    float(site.longitude))
+            if not phase.is_imaging_window:
+                self.log.warning(
+                    "auto-session: left astronomical dark "
+                    "(phase=%s); ending walk at slot %d/%d",
+                    phase.phase, idx + 1, len(slots),
+                )
+                return
+
+            # Sleep until slot.start_utc if it's in the future
+            start_iso = slot.get("start_utc")
+            if start_iso:
+                try:
+                    slot_start = _dt.fromisoformat(start_iso.rstrip("Z"))
+                    wait_s = (slot_start - _dt.utcnow()).total_seconds()
+                    if wait_s > 1.0:
+                        self.set_task(
+                            f"auto-session slot {idx+1}/{len(slots)} "
+                            f"({slot.get('target_name')}) starts in "
+                            f"{int(wait_s)}s",
+                            state="waiting",
+                        )
+                        # Sleep in 30s chunks so we can re-check verdict
+                        # mid-wait without going dark for hours
+                        remaining = wait_s
+                        while remaining > 0 and not self.should_stop:
+                            await asyncio.sleep(min(30.0, remaining))
+                            remaining -= 30.0
+                            v = get_state().get_verdict()
+                            if v is None or v.verdict == VERDICT_NOGO:
+                                self.log.warning(
+                                    "auto-session: verdict went NO-GO "
+                                    "while waiting for slot %d", idx + 1)
+                                return
+                except Exception:
+                    pass
+            self._auto_session_active_slot_idx = idx
+
+            # Fire start_capture_sequence for this slot
+            self.set_task(
+                f"auto-session: capturing slot {idx+1}/{len(slots)} "
+                f"({slot.get('target_name')})",
+                state="working",
+            )
+            self.log.info(
+                "auto-session: dispatching slot %d/%d %s",
+                idx + 1, len(slots), slot.get("target_name"),
+            )
+            try:
+                await self._cmd_start_capture_sequence({
+                    "target": slot,
+                    "exposure_plan": slot.get("exposure_plan"),
+                    "dither_every_n_frames": 1,
+                })
+            except Exception:
+                self.log.exception(
+                    "auto-session: slot %d dispatch failed", idx + 1)
+                continue
+
+            # Wait until the slot's end_utc OR the capture completes
+            # (whichever first). The capture sequence is in another
+            # background task; we poll for end_utc here.
+            end_iso = slot.get("end_utc")
+            if end_iso:
+                try:
+                    slot_end = _dt.fromisoformat(end_iso.rstrip("Z"))
+                    while _dt.utcnow() < slot_end and not self.should_stop:
+                        await asyncio.sleep(30)
+                        v = get_state().get_verdict()
+                        if v is None or v.verdict == VERDICT_NOGO:
+                            self.log.warning(
+                                "auto-session: verdict went NO-GO "
+                                "during slot %d capture", idx + 1)
+                            return
+                except Exception:
+                    pass
+        self.log.info("auto-session: walked all %d slot(s) to completion",
+                      len(slots))
 
     async def _preflight_loop(self) -> None:
         """Periodic pre-flight tick.

@@ -960,13 +960,17 @@ async def session_preflight() -> dict:
 
 @api_router.get("/setup/system-flags")
 async def get_system_flags() -> dict:
-    """Return runtime-mutable flags. simulation_mode here is the DB value;
-    env-var ATLAS_SIMULATION_MODE still wins if set (effective flag is
-    surfaced via /api/mission-control)."""
+    """Return runtime-mutable flags. simulation_mode here is the DB
+    value; env-var ATLAS_SIMULATION_MODE still wins if set (effective
+    flag is surfaced via /api/mission-control). auto_start_sessions
+    gates the Operator's autonomous start path — see the Setup-tab
+    description for the full preconditions."""
     flags = ConfigManager.get_system_flags()
     return {
         "simulation_mode_db": bool(flags.simulation_mode),
         "simulation_mode_effective": is_simulation_mode(),
+        "auto_start_sessions": bool(
+            getattr(flags, "auto_start_sessions", False)),
         "env_override_set": ((__import__("os").environ.get("ATLAS_SIMULATION_MODE", "")
                               ).lower() in ("1", "true", "yes", "on")),
         "updated_at": flags.updated_at.isoformat() if flags.updated_at else None,
@@ -996,20 +1000,25 @@ async def seed_bench_campaign_route() -> dict:
 
 @api_router.post("/setup/system-flags")
 async def save_system_flags(body: dict) -> dict:
-    """Patch runtime flags. Currently only simulation_mode."""
-    allowed = {"simulation_mode"}
+    """Patch runtime flags: simulation_mode + auto_start_sessions."""
+    allowed = {"simulation_mode", "auto_start_sessions"}
     bad = set(body.keys()) - allowed
     if bad:
         raise HTTPException(400, f"Unknown fields: {sorted(bad)}")
     fields = {}
     if "simulation_mode" in body:
         fields["simulation_mode"] = bool(body["simulation_mode"])
+    if "auto_start_sessions" in body:
+        fields["auto_start_sessions"] = bool(body["auto_start_sessions"])
     ConfigManager.save_system_flags(**fields)
-    # Sim toggle flips the hardware gate (and indirectly several others).
     # Refresh the verdict immediately so the dashboard doesn't lag.
-    preflight = await _refresh_preflight_now(reason="sim_mode_toggled")
+    preflight = await _refresh_preflight_now(reason="system_flags_changed")
     return {"ok": True,
               "simulation_mode_effective": is_simulation_mode(),
+              "auto_start_sessions":
+                bool(ConfigManager.get_system_flags().auto_start_sessions
+                       if hasattr(ConfigManager.get_system_flags(), "auto_start_sessions")
+                       else False),
               "preflight": preflight}
 
 

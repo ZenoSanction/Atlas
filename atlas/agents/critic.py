@@ -441,6 +441,21 @@ class Critic(BaseAgent):
         except Exception:
             pass
 
+        # 4. Cloud-cover forecast over the coming dark window. If the
+        #    weather forecast says the whole night is going to be
+        #    socked in, file a critical advisory tagged
+        #    "session_wasted_forecast". The Operator's autonomous-
+        #    start logic checks for this and skips the night rather
+        #    than pointlessly cooling the camera + opening the roof
+        #    just to capture clouds. Manual start still works (the
+        #    operator can override if they want to try).
+        try:
+            await self._check_cloudover_forecast(
+                plan, _add, criticals, now_iso,
+            )
+        except Exception:
+            self.log.exception("cloudover-forecast check failed")
+
         # Atomic append — survives concurrent writes from Oracle's
         # parallel advisory pass against the same plan.
         from dataclasses import asdict
@@ -480,6 +495,75 @@ class Critic(BaseAgent):
             f"{sev_counts['info']} info",
             state="idle",
         )
+
+    async def _check_cloudover_forecast(self, plan: dict, add_fn,
+                                            criticals: list,
+                                            now_iso: str) -> None:
+        """Look at the forecast over the plan's effective dark window.
+        If average cloud cover ≥ 85% AND every hour ≥ 75%, file a
+        critical 'session_wasted_forecast' advisory.
+
+        The two thresholds together filter out:
+          * Single bad hours surrounded by clear ones (avg trips but
+            min doesn't — we'd lose some hours but still get useful
+            data)
+          * Broken cloud nights that the average doesn't capture
+            (avg looks fine but one bad hour makes a single target
+            unusable — but other targets still imageable)
+
+        Both conditions must trip to pull the trigger. Conservative
+        on purpose — calling a night dead and shutting down is a
+        heavy decision; we want to be confident the forecast is
+        actually that bad.
+        """
+        window = plan.get("window") or {}
+        if not window.get("dusk_utc") or not window.get("dawn_utc"):
+            return
+        from atlas.weather.cache import get_weather_cache
+        from datetime import datetime as _dt
+        cache_state = get_weather_cache().peek()
+        rows = cache_state.forecast_hours or []
+        if not rows:
+            return
+        try:
+            dusk_dt = _dt.fromisoformat(
+                window["dusk_utc"].rstrip("Z"))
+            dawn_dt = _dt.fromisoformat(
+                window["dawn_utc"].rstrip("Z"))
+            now = _dt.utcnow()
+            effective_start = max(dusk_dt, now)
+        except Exception:
+            return
+        in_window = []
+        for r in rows:
+            try:
+                t = _dt.fromisoformat(r["time"].rstrip("Z"))
+            except Exception:
+                continue
+            if effective_start <= t < dawn_dt:
+                cloud = r.get("cloud_cover_pct")
+                if cloud is not None:
+                    in_window.append(float(cloud))
+        if len(in_window) < 3:
+            # Not enough forecast coverage in the window — can't
+            # confidently call it. Silent skip.
+            return
+        avg = sum(in_window) / len(in_window)
+        min_cov = min(in_window)
+        if avg >= 85.0 and min_cov >= 75.0:
+            from atlas.agents.session_workflow import Advisory
+            adv = Advisory(
+                kind="session_wasted_forecast", severity="critical",
+                message=(
+                    f"Forecast shows cloudover throughout tonight's "
+                    f"dark window: avg {avg:.0f}% across {len(in_window)}h, "
+                    f"minimum {min_cov:.0f}%. Autonomous-start "
+                    f"will skip; manual start still permitted."
+                ),
+                source="critic", at=now_iso,
+            )
+            add_fn(adv)
+            criticals.append(adv)
 
     def _publish_next_ticks(self, now_monotonic: float) -> None:
         """Compute when the next fast + standard loops will fire (in wall

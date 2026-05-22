@@ -28,6 +28,7 @@ def _apply_simple_migrations(engine) -> None:
     is small enough that this keeps it predictable and easy to review."""
     additive_columns = [
         ("equipment_profile", "capture_folder", "VARCHAR(512)", "NULL"),
+        ("system_flags", "auto_start_sessions", "BOOLEAN", "0"),
     ]
     from sqlalchemy import text
     with engine.begin() as conn:

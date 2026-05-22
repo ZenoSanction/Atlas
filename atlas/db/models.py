@@ -236,6 +236,13 @@ class SystemFlags(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     simulation_mode: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Autonomous mission switch. When True and conditions allow (verdict
+    # GO, plan READY, currently in astronomical dark, no manual control,
+    # no cloudover-forecast advisory), the Operator autonomously starts
+    # a session and walks through the scheduled plan slots. The night
+    # autonomously stops near dawn. Default False — opt-in; safer to
+    # require the operator's explicit go-ahead on a new install.
+    auto_start_sessions: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
                                                    onupdate=datetime.utcnow)
 

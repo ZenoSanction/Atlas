@@ -165,6 +165,7 @@ function esc(s) {
 
 async function renderSystemFlags(api) {
   const toggle = document.getElementById("sim-toggle");
+  const autoToggle = document.getElementById("auto-start-toggle");
   const save = document.getElementById("sim-save");
   const status = document.getElementById("sim-status");
   const statusLine = document.getElementById("system-flags-status");
@@ -172,12 +173,15 @@ async function renderSystemFlags(api) {
   try {
     const r = await api("/setup/system-flags");
     toggle.checked = !!r.simulation_mode_db;
+    if (autoToggle) autoToggle.checked = !!r.auto_start_sessions;
     if (statusLine) {
       const eff = r.simulation_mode_effective ? "ON (sim)" : "OFF (real)";
       const env = r.env_override_set
         ? " — env-var override active; toggle has no effect until you clear it"
         : "";
-      statusLine.textContent = `Effective: ${eff}${env}`;
+      const auto = r.auto_start_sessions
+        ? " · auto-start: ENABLED" : " · auto-start: off";
+      statusLine.textContent = `Effective: ${eff}${env}${auto}`;
     }
   } catch (e) {
     if (statusLine) statusLine.textContent = `Error loading flags: ${e.message}`;
@@ -186,13 +190,15 @@ async function renderSystemFlags(api) {
   save.dataset.bound = "1";
   save.addEventListener("click", async () => {
     try {
+      const body = { simulation_mode: toggle.checked };
+      if (autoToggle) body.auto_start_sessions = autoToggle.checked;
       const r = await api("/setup/system-flags", {
-        method: "POST",
-        body: JSON.stringify({ simulation_mode: toggle.checked }),
+        method: "POST", body: JSON.stringify(body),
       });
-      status.textContent = `Saved. Effective sim mode: ${r.simulation_mode_effective ? "ON" : "OFF"}.`;
+      const autoLabel = r.auto_start_sessions ? "auto-start ON" : "auto-start off";
+      status.textContent = `Saved. Sim: ${r.simulation_mode_effective ? "ON" : "OFF"}, ${autoLabel}.`;
       status.className = "form-status ok";
-      await renderSystemFlags(api);  // refresh effective line
+      await renderSystemFlags(api);
       nudgeMissionControl();
     } catch (e) {
       status.textContent = e.message;
