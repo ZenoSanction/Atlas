@@ -998,6 +998,34 @@ async def get_external_tools() -> dict:
     return {"tools": get_tool_status()}
 
 
+@api_router.get("/campaigns/progress")
+async def get_campaigns_progress() -> dict:
+    """Progress snapshot for every ACTIVE campaign.
+
+    Each entry includes per-target accumulated integration (broken
+    down by filter), completion percentage vs success_criterion,
+    deficit per filter, and an is_done flag. The Planner uses this
+    to skip done campaigns + prioritize deficit filters; the
+    dashboard shows it on the Plan tab so the operator sees
+    multi-night progress at a glance."""
+    from atlas.campaigns.continuity import all_active_campaigns_progress
+    progress = all_active_campaigns_progress()
+    return {"campaigns": [p.to_jsonable() for p in progress]}
+
+
+@api_router.get("/campaigns/{campaign_id}/progress")
+async def get_campaign_progress(campaign_id: int) -> dict:
+    """Detailed progress for one campaign — same shape as the list
+    endpoint's entries, but returns 404 if the campaign doesn't exist."""
+    from atlas.campaigns.continuity import campaign_progress
+    p = campaign_progress(campaign_id)
+    if p is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404,
+                              detail=f"campaign {campaign_id} not found")
+    return p.to_jsonable()
+
+
 @api_router.get("/calibration/coverage")
 async def get_calibration_coverage() -> dict:
     """Calibration library coverage report.
