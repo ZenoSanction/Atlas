@@ -1309,43 +1309,81 @@ class Operator(BaseAgent):
                                 timeout=30.0)
             phd2 = Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
                                 timeout=10.0)
-        # Construct an autofocus engine per workflow. Each workflow
-        # (deepsky, photometry, exoplanet, etc.) configures it
-        # differently — deepsky AFs on filter change, exoplanet locks
-        # focus mid-sequence. For now use sensible defaults; per-
-        # workflow tuning lands when the workflow modules fill in.
+        # Resolve the workflow policy for this target. The workflow's
+        # plan() returns a SequenceSpec carrying AutofocusPolicy +
+        # PlateSolvePolicy + DitherPolicy + AcceptancePolicy — those
+        # are the per-science-mode behavior differences (deepsky AFs
+        # on filter change, exoplanet locks focus, astrometry solves
+        # every frame, etc.).
+        from atlas.workflows.registry import get_workflow
+        wf_kind = (target.get("workflow") or "deepsky")
+        try:
+            wf = get_workflow(wf_kind)
+            wf_spec = wf.plan(target=target, conditions={})
+        except Exception as e:
+            self.log.warning("workflow %s plan() failed; using deepsky "
+                               "defaults: %s", wf_kind, e)
+            wf = get_workflow("deepsky")
+            wf_spec = wf.plan(target=target, conditions={})
+
+        # Construct the autofocus engine straight from the workflow's
+        # AutofocusPolicy. Every trigger comes from policy, no hardcoded
+        # defaults at this layer.
         from atlas.capture.autofocus import AutofocusDecisionEngine
-        af_engine = AutofocusDecisionEngine()
+        af_pol = wf_spec.autofocus
+        af_engine = AutofocusDecisionEngine(
+            trigger_on_session_start=af_pol.before_sequence,
+            trigger_on_filter_change=af_pol.on_filter_change,
+            temp_delta_c=af_pol.temperature_delta_c,
+            time_elapsed_min=(af_pol.time_interval_min
+                                or 9999.0),  # None = effectively never
+            hfr_factor=af_pol.hfr_drift_factor,
+        )
         is_mono = bool(equip and getattr(equip, "camera_type", "OSC") == "MONO")
 
-        # Plate-solve client. If ASTAP isn't configured, pass None and
-        # CaptureSequence will skip all solve+sync decisions silently
-        # (preserving prior behavior). When configured, the orchestrator
-        # solves before the first frame, after meridian flip, after
-        # guiding recovery, and on operator request.
+        # Plate-solve client gated by the workflow's PlateSolvePolicy.
+        # Planetary turns this off entirely; everything else uses ASTAP.
         astap_client = None
-        if not sim and equip is not None and getattr(equip, "astap_path", None):
-            try:
+        if wf_spec.platesolve.enabled:
+            if not sim and equip is not None and getattr(equip, "astap_path", None):
+                try:
+                    from atlas.hardware.astap import AstapClient
+                    astap_client = AstapClient(astap_path=equip.astap_path)
+                except Exception as e:
+                    self.log.warning("AstapClient construction failed; plate-solve "
+                                       "disabled for this sequence: %s", e)
+            elif sim:
+                # Simulation mode: pass a sentinel so the sequence's
+                # plate-solve gate fires and exercises the orchestrator
+                # end-to-end (sim path returns synthetic success).
                 from atlas.hardware.astap import AstapClient
-                astap_client = AstapClient(astap_path=equip.astap_path)
-            except Exception as e:
-                self.log.warning("AstapClient construction failed; plate-solve "
-                                   "disabled for this sequence: %s", e)
-        elif sim:
-            # Simulation mode: pass a sentinel so the sequence's
-            # plate-solve gate fires and exercises the orchestrator
-            # end-to-end (sim path returns synthetic success).
-            from atlas.hardware.astap import AstapClient
-            astap_client = AstapClient(astap_path=None)
+                astap_client = AstapClient(astap_path=None)
+        else:
+            self.log.info("workflow %s disables plate-solve (e.g. planetary "
+                            "ROI too small to solve)", wf_kind)
+
+        # Dither cadence from workflow policy. enabled=False -> set
+        # every_n_frames to a huge number so CaptureSequence skips
+        # every check; enabled=True -> use the policy's cadence.
+        dither_policy = wf_spec.dither
+        dither_every_effective = (dither_policy.every_n_frames
+                                     if dither_policy.enabled
+                                     else 99999)
 
         seq = CaptureSequence(nina=nina, phd2=phd2, target=target,
                                 exposure_plan=exposure_plan,
-                                dither_every_n_frames=dither_every,
+                                dither_every_n_frames=dither_every_effective,
                                 simulation=sim,
                                 session_id=self._current_session_id,
                                 autofocus_engine=af_engine,
                                 is_mono=is_mono,
                                 astap_client=astap_client)
+        # Stash the resolved spec on the sequence for the broadcast
+        # event (dashboard shows which policies were applied).
+        try:
+            seq._workflow_spec = wf_spec  # type: ignore[attr-defined]
+        except Exception:
+            pass
         self._current_capture = seq
         self.log_decision("start_capture_sequence",
                             inputs={"target": target.get("target_name"),
