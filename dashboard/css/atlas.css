@@ -1239,3 +1239,53 @@ footer .muted { color: var(--text-dim); }
 }
 .advisory .adv-sev { font-size: 10px; color: var(--text-dim); }
 
+
+/* ---- Calibration / campaign / morning-report panel styles --------- */
+.kv-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 13px;
+}
+.kv-table th, .kv-table td {
+  text-align: left; padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.kv-table th {
+  font-weight: 600; color: var(--text-dim);
+  font-size: 11px; text-transform: uppercase;
+}
+.kv-table tr:last-child td { border-bottom: none; }
+
+.progress-bar {
+  display: inline-block; vertical-align: middle;
+  width: 140px; height: 8px;
+  background: var(--line);
+  border-radius: 4px; overflow: hidden;
+  margin-right: 6px;
+}
+.progress-fill {
+  height: 100%; background: var(--gold, #d4a93b);
+  transition: width 200ms ease-out;
+}
+
+.ok-pill {
+  display: inline-block;
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600;
+  background: rgba(46, 160, 67, 0.2);
+  color: #4cc26b;
+}
+.warn-pill {
+  display: inline-block;
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600;
+  background: rgba(217, 154, 47, 0.2);
+  color: #e0a93c;
+}
+.muted-pill {
+  display: inline-block;
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 11px;
+  background: var(--line);
+  color: var(--text-dim);
+}

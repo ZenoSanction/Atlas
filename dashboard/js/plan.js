@@ -1,11 +1,14 @@
 // Plan tab — tonight's targets + campaigns list.
 
 import { openTargetModal, initTargetModal } from "/static/js/target-modal.js";
+import { renderCampaignProgress } from "/static/js/campaign-progress.js";
 
 export async function renderPlan(api) {
   initTargetModal();   // idempotent — binds close/escape/search wiring once
   await renderTonightTargets(api);
   await renderCampaigns(api);
+  // Multi-night progress panel below campaigns list
+  await renderCampaignProgress(api);
 }
 
 async function renderTonightTargets(api) {

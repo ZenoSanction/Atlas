@@ -391,6 +391,15 @@
       <button id="new-campaign" class="btn-primary">+ New Campaign</button>
     </div>
     <div id="campaigns-list" class="list">Loading…</div>
+
+    <div class="card" id="campaign-progress-card" style="margin-top:24px">
+      <div class="row-spread">
+        <h3>Multi-night progress</h3>
+        <button id="campaign-progress-refresh" class="btn-secondary" type="button">Refresh</button>
+      </div>
+      <p class="hint">Accumulated minutes per filter vs each campaign's success_criterion. Bars fill as nights add data; Planner deprioritizes campaigns that are 100% complete + uses the deficit filter as next-night priority.</p>
+      <div id="campaign-progress-body" class="muted">Loading…</div>
+    </div>
   </section>
 
   <!-- SCIENCE -->
@@ -594,6 +603,24 @@
         <button class="btn-primary cred-save">Save</button>
         <span class="cred-status"></span>
       </div>
+    </div>
+
+    <div class="card" id="calibration-coverage-card">
+      <div class="row-spread">
+        <h3>Calibration library</h3>
+        <button id="calibration-refresh" class="btn-secondary" type="button">Refresh</button>
+      </div>
+      <p class="hint">Bias/dark/flat masters cross-referenced against the equipment's recent light frames. Missing combos + stale (past freshness) entries land in the action queue below. Bench day uses this to know which calibration runs to schedule first.</p>
+      <div id="calibration-coverage-body" class="muted">Loading…</div>
+    </div>
+
+    <div class="card" id="morning-report-card">
+      <div class="row-spread">
+        <h3>Last session summary</h3>
+        <button id="morning-report-load" class="btn-secondary" type="button">Load latest</button>
+      </div>
+      <p class="hint">Markdown summary of the most recent COMPLETE session — targets, frames per filter, mean HFR, autofocus events, plate-solve runs, recoveries, alerts. Auto-written to <code>data/morning_reports/</code> after every session-stop; this panel is the on-demand preview.</p>
+      <div id="morning-report-body" class="muted">Click "Load latest" to fetch.</div>
     </div>
 
     <div class="card">

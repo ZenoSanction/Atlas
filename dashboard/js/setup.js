@@ -1,6 +1,8 @@
 // Setup tab — wizard and forms.
 
 import { refreshMissionControl } from "/static/js/mission-control.js";
+import { renderCalibrationCoverage } from "/static/js/calibration-coverage.js";
+import { initMorningReport } from "/static/js/morning-report.js";
 
 function nudgeMissionControl() {
   // Re-fetch /api/mission-control immediately so the Tonight tab's
@@ -21,6 +23,9 @@ export async function initSetup(api) {
   await renderEquipmentForm(api);
   await renderThresholdsForm(api);
   wireCredentialForms(api);
+  // New panels for the calibration library + last-session preview
+  await renderCalibrationCoverage(api);
+  await initMorningReport(api);
 }
 
 async function renderBenchSeed(api) {
