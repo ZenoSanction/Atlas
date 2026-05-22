@@ -201,15 +201,57 @@ class BaseAgent(ABC):
             }
             if tool_defs:
                 create_kwargs["tools"] = tool_defs
-            try:
-                resp = await asyncio.to_thread(
-                    client.messages.create,
-                    **create_kwargs,
-                )
-            except Exception as e:
-                self.log.warning("Claude API call failed: %s", e)
+            # Anthropic's 529 "overloaded" + 429 "rate limited" + transient
+            # network errors are recoverable — retry a couple of times with
+            # exponential backoff before falling through to safe-autonomous.
+            # 4xx auth / bad-request errors are NOT retried (they won't
+            # heal by waiting).
+            resp = None
+            last_err: Exception | None = None
+            backoff = 1.5
+            for attempt in range(3):
+                try:
+                    resp = await asyncio.to_thread(
+                        client.messages.create,
+                        **create_kwargs,
+                    )
+                    break
+                except Exception as e:
+                    last_err = e
+                    name = type(e).__name__
+                    is_transient = (
+                        "Overloaded" in name
+                        or "RateLimit" in name
+                        or "Timeout" in name
+                        or "ConnectionError" in name
+                        or "ServiceUnavailable" in name
+                    )
+                    if not is_transient or attempt == 2:
+                        break
+                    self.log.warning(
+                        "Claude API %s (attempt %d/3); retrying in %.1fs",
+                        name, attempt + 1, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    backoff *= 2
+            if resp is None:
+                err_name = type(last_err).__name__ if last_err else "Unknown"
+                self.log.warning("Claude API call failed after retries: %s",
+                                  last_err)
                 self.set_safe_mode(True)
-                return f"[safe-autonomous: {type(e).__name__}]"
+                # Human-friendlier message for the operator. We know what
+                # most of these mean from production.
+                friendly = {
+                    "OverloadedError": "Anthropic's API is overloaded right now. "
+                                           "Try again in a few seconds.",
+                    "RateLimitError":  "Hit Anthropic's rate limit. Wait a moment "
+                                           "and try again.",
+                    "APITimeoutError": "Anthropic's API timed out. Network issue "
+                                           "or upstream slowness.",
+                    "AuthenticationError": "Anthropic API key is invalid. "
+                                               "Check Setup → Anthropic API key.",
+                }.get(err_name, f"Claude API error: {err_name}")
+                return f"[safe-autonomous: {friendly}]"
             self.set_safe_mode(False)
 
             if resp.stop_reason == "tool_use":
