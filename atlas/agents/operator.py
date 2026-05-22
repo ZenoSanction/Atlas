@@ -1374,6 +1374,37 @@ class Operator(BaseAgent):
                         })
                     except Exception:
                         pass
+                    # When the sequence flags needs_human=True (e.g.
+                    # guiding or focus recovery exhausted all steps),
+                    # page the operator through every configured
+                    # notification channel.
+                    if ev.get("needs_human"):
+                        try:
+                            from atlas.notifications.dispatcher import (
+                                NotificationDispatcher,
+                            )
+                            from atlas.notifications.base import (
+                                Notification,
+                            )
+                            dispatcher = NotificationDispatcher()
+                            tgt = target.get("target_name") or "?"
+                            steps = ev.get("steps_tried") or []
+                            await dispatcher.dispatch(Notification(
+                                severity="critical",
+                                title=f"ATLAS needs you — "
+                                        f"{ev.get('state','?')}",
+                                message=ev.get("summary",
+                                                 "auto-recovery exhausted"),
+                                detail=(f"Target: {tgt}\n"
+                                          f"State: {ev.get('state','?')}\n"
+                                          f"Summary: {ev.get('summary','')}\n"
+                                          f"Steps tried: {steps}"),
+                                source="capture.recovery",
+                                tags=["recovery", "escalated"],
+                            ))
+                        except Exception as e:
+                            self.log.warning(
+                                "notification dispatch failed: %s", e)
             finally:
                 self._current_capture = None
                 try:

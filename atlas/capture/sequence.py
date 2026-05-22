@@ -405,22 +405,48 @@ class CaptureSequence:
                 global_frame += 1
 
                 # Pre-capture safety check: is PHD2 still guiding?
+                # When it isn't, run the escalating recovery state machine
+                # (passive wait -> restart-guide -> plate-solve resync).
+                # Every step emits an event for human visibility.
                 if not await self._guiding_ok():
-                    yield self._event(
-                        state="guiding_paused",
-                        summary="guiding lost — pausing capture, waiting "
-                                  "up to 30 s for recovery",
-                    )
-                    if not await self._wait_for_guiding(timeout_s=30.0):
+                    from atlas.capture.recovery import recover_guiding
+                    recovered = False
+                    async for rec_ev in recover_guiding(
+                        phd2=self._phd2,
+                        astap_client=self._astap_client,
+                        nina=self._nina,
+                        target_ra_deg=self._target.get("ra_deg"),
+                        target_dec_deg=self._target.get("dec_deg"),
+                        target_name=self._target.get("target_name"),
+                        simulation=self._sim,
+                    ):
+                        # Re-emit as a sequence event with state=recovery_*
+                        yield self._event(
+                            state=f"recovery_{rec_ev['phase']}",
+                            **{k: v for k, v in rec_ev.items()
+                                 if k not in ("phase",)},
+                        )
+                        if rec_ev.get("phase") == "recovered":
+                            recovered = True
+                        elif rec_ev.get("phase") == "escalated":
+                            recovered = False
+                    if not recovered:
+                        # Recovery exhausted — emit the terminal state.
+                        # The Operator listens for `state=guiding_lost`
+                        # on capture_progress events and dispatches the
+                        # human page via the notification dispatcher.
+                        # Keeping notifications out of CaptureSequence
+                        # so it stays pure orchestration.
                         yield self._event(
                             state="guiding_lost",
-                            summary="guiding did not recover in 30 s — "
-                                      "ending sequence early",
+                            summary="guiding recovery exhausted — "
+                                      "ending sequence safely; operator paged",
+                            needs_human=True,
                         )
                         return
-                    # Guiding came back — flag a solve so we can re-anchor
-                    # pointing before the next exposure (we may have
-                    # drifted during the guiding outage).
+                    # Guiding came back — recovery may have already
+                    # plate-solved; if not, flag it so the next gate
+                    # solves before the next exposure.
                     self._after_guiding_recovery = True
 
                 # Plate-solve gate (operator request / meridian flip /
@@ -459,6 +485,58 @@ class CaptureSequence:
                     filter=filt, frame_index_in_set=frame_in_set + 1,
                     set_count=count, result=result,
                 )
+
+                # Focus-drift recovery. If the just-captured frame's HFR
+                # is way above our reference, run the recovery state
+                # machine (standard AF -> wide-range AF -> escalate).
+                # Skipped when reference_hfr is unset (we haven't AFed
+                # yet) or when result has no HFR field. Threshold 1.5x
+                # is intentionally looser than the autofocus engine's
+                # 1.25x trigger — recovery is for "AF didn't fire in
+                # time" cases, not normal drift.
+                frame_hfr = None
+                try:
+                    frame_hfr = (result or {}).get("hfr")
+                    if frame_hfr is not None:
+                        frame_hfr = float(frame_hfr)
+                except Exception:
+                    frame_hfr = None
+                if (frame_hfr is not None
+                      and self._reference_hfr is not None
+                      and self._reference_hfr > 0
+                      and frame_hfr > 1.5 * self._reference_hfr):
+                    from atlas.capture.recovery import recover_focus
+                    focus_recovered = False
+                    async for rec_ev in recover_focus(
+                        nina=self._nina,
+                        autofocus_engine=self._af_engine,
+                        current_hfr=frame_hfr,
+                        reference_hfr=self._reference_hfr,
+                        current_filter=filt,
+                        simulation=self._sim,
+                    ):
+                        yield self._event(
+                            state=f"recovery_{rec_ev['phase']}",
+                            **{k: v for k, v in rec_ev.items()
+                                 if k not in ("phase",)},
+                        )
+                        if rec_ev.get("phase") == "recovered":
+                            focus_recovered = True
+                            # Update reference so next frame doesn't
+                            # immediately re-trigger.
+                            new_hfr = rec_ev.get("hfr_min")
+                            if new_hfr is not None:
+                                self._reference_hfr = float(new_hfr)
+                        elif rec_ev.get("phase") == "escalated":
+                            focus_recovered = False
+                    if not focus_recovered:
+                        yield self._event(
+                            state="focus_lost",
+                            summary=("focus recovery exhausted — "
+                                      "aborting target; operator paged"),
+                            needs_human=True,
+                        )
+                        return
 
                 # Dither between frames (skipped after the very last
                 # frame to save time)
