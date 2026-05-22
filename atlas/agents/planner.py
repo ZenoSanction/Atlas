@@ -242,19 +242,36 @@ class Planner(BaseAgent):
         horizon_alt = float(site.horizon_alt_min)
         now = datetime.utcnow()
 
-        # Planner is the ONE consumer that pulls fresh weather. Every
-        # other agent reads from the cache without triggering a network
-        # call. force_refresh=True here ensures the rebuild gets a
-        # current snapshot regardless of when the last pull happened —
-        # this is "we're about to commit hardware to ~8 hours of work,
-        # let's see the actual sky."
+        # Trigger a fresh weather pull as a fire-and-forget background
+        # task. The Planner does NOT wait for it. The rebuild proceeds
+        # against whatever the cache has RIGHT NOW — adaptive TTL
+        # keeps that within 60-90 s during active monitoring, which is
+        # current enough for plan-level decisions. The fresh pull
+        # lands by the next consumer's read (Critic's next standard
+        # loop, ~90 s out, picks it up automatically).
+        #
+        # Principle (operator request 2026-05-21): no agent waits for
+        # IO it can avoid. The plan exists the moment we have data;
+        # making it fresher takes a separate, non-blocking path.
         try:
             from atlas.weather.cache import get_weather_cache
-            await get_weather_cache().get(lat=lat, lon=lon,
-                                              force_refresh=True)
+            cache = get_weather_cache()
+            # Trigger refresh in background — don't await it.
+            asyncio.create_task(
+                cache.get(lat=lat, lon=lon, force_refresh=True),
+                name=f"planner-bgrefresh-{reason}",
+            )
+            # Read what's in cache right now (non-blocking peek).
+            current = cache.peek()
+            if current.age_seconds is not None and current.age_seconds > 300:
+                self.log.info(
+                    "rebuild_plan: cache is %.0fs old; bg-refresh "
+                    "kicked off, building with current data",
+                    current.age_seconds,
+                )
         except Exception as e:
-            self.log.warning("rebuild_plan: weather force-refresh failed "
-                              "(%s) — proceeding with whatever's cached", e)
+            self.log.warning("rebuild_plan: bg weather refresh failed to "
+                              "kick off (%s) — proceeding regardless", e)
 
         # Classify where we are in the 24-hour cycle. The Planner's
         # behaviour is meaningfully different depending on whether

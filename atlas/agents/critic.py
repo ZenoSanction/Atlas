@@ -620,25 +620,31 @@ class Critic(BaseAgent):
         if equip is None:
             return
 
-        # ---- Camera temperature + focuser HFR (NINA) ---------------------
+        # ---- Camera temperature + focuser HFR (from hardware cache) -----
+        # Read from the dashboard's hardware-snapshot cache (10s TTL,
+        # 4s hard-timeout when refreshing) rather than blocking the
+        # fast loop on a fresh NINA call. The cache is already kept
+        # current by API route reads + the Critic's own fast loop in
+        # earlier iterations. If something has gone really wrong with
+        # NINA, the hardware GO/NO-GO gate handles it from a different
+        # code path.
         try:
-            from atlas.hardware.nina import NinaClient
-            async with NinaClient(host=equip.nina_host, port=equip.nina_port,
-                                    timeout=3.0) as nina:
-                cam = await nina.camera_info()
-                temp = cam.get("temperature") if isinstance(cam, dict) else None
-                setpoint = float(equip.cooling_setpoint_c)
-                if temp is not None and abs(float(temp) - setpoint) > 3.0:
-                    await self._raise(AlertSeverity.WARNING, "cooling_drift",
-                                        f"CCD temp {temp:.1f}°C drifted >3°C from setpoint {setpoint:.1f}°C",
-                                        session_id=session_id,
-                                        data={"temperature_c": temp,
-                                                "setpoint_c": setpoint})
-                else:
-                    self._clear("cooling_drift")
-                # Focuser HFR — NINA exposes this if focusing has run
-                # TODO Phase 2: pull last-known HFR from NINA history once
-                # the Advanced API endpoint is wired through nina.py
+            from atlas.api.routes import _HARDWARE_SNAPSHOT_CACHE
+            hw_snap = _HARDWARE_SNAPSHOT_CACHE.get("data") or {}
+            cam = hw_snap.get("camera") or {}
+            temp = cam.get("temperature")
+            setpoint = float(equip.cooling_setpoint_c)
+            if temp is not None and abs(float(temp) - setpoint) > 3.0:
+                await self._raise(
+                    AlertSeverity.WARNING, "cooling_drift",
+                    f"CCD temp {temp:.1f}°C drifted >3°C from "
+                    f"setpoint {setpoint:.1f}°C",
+                    session_id=session_id,
+                    data={"temperature_c": temp,
+                            "setpoint_c": setpoint},
+                )
+            else:
+                self._clear("cooling_drift")
         except Exception as e:
             self.log.debug("NINA fast-loop poll failed: %s", e)
 
