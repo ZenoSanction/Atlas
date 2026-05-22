@@ -53,6 +53,20 @@ async def lifespan(app: FastAPI):
     # Database
     initialise_database()
 
+    # Dirty-shutdown recovery. If ATLAS was killed mid-session (power
+    # blip, OS update, crash), there may be Session rows stuck in
+    # NOMINAL or WARNING without an ended_at. Mark them COMPLETE with
+    # a clear "recovered from crash" reason so the new boot starts
+    # clean and the audit trail shows what happened.
+    try:
+        from atlas.db.recovery import recover_orphan_sessions
+        n = recover_orphan_sessions()
+        if n:
+            log.warning("Dirty-shutdown recovery: closed %d orphan "
+                          "session(s) from previous run.", n)
+    except Exception:
+        log.exception("Dirty-shutdown recovery failed (non-fatal)")
+
     # Agents
     coord = get_coordinator()
     await coord.start_all()
