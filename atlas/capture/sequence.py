@@ -52,7 +52,9 @@ class CaptureSequence:
                  simulation: bool = False,
                  session_id: int | None = None,
                  autofocus_engine=None,
-                 is_mono: bool = False) -> None:
+                 is_mono: bool = False,
+                 astap_client=None,
+                 platesolve_exposure_s: float = 5.0) -> None:
         self._nina = nina
         self._phd2 = phd2
         self._target = target
@@ -74,6 +76,17 @@ class CaptureSequence:
         self._last_af_at: Optional[datetime] = None
         self._last_af_temp_c: Optional[float] = None
         self._reference_hfr: Optional[float] = None
+        # Plate-solve orchestration. None disables solve+sync entirely.
+        # When present, decide() is consulted at the first frame (sync
+        # mount before real imaging), after a meridian flip, after a
+        # guiding-recovery, or on operator-requested solve. Every
+        # decision (fire OR skip) is broadcast for the human.
+        self._astap_client = astap_client
+        self._platesolve_exposure_s = float(platesolve_exposure_s)
+        self._platesolved_for_target = False
+        self._meridian_flip_pending = False
+        self._operator_solve_requested = False
+        self._after_guiding_recovery = False
 
     # ---- public control ---------------------------------------------------
 
@@ -82,6 +95,17 @@ class CaptureSequence:
         cleanly with a `state="aborted"` terminal event."""
         self._abort = True
         self._abort_reason = reason or "abort"
+
+    def request_platesolve(self) -> None:
+        """Operator-initiated plate-solve. The next frame boundary will
+        capture a solve frame, run ASTAP, and sync the mount."""
+        self._operator_solve_requested = True
+
+    def mark_meridian_flip(self) -> None:
+        """Tell the sequence that the mount just crossed the meridian and
+        flipped. The next frame boundary will solve+sync to re-anchor
+        pointing on the new mount orientation."""
+        self._meridian_flip_pending = True
 
     # ---- internals --------------------------------------------------------
 
@@ -229,6 +253,91 @@ class CaptureSequence:
             ),
         }
 
+    async def _maybe_platesolve(self):
+        """Ask the plate-solve decision engine if we should solve+sync
+        right now; fire ASTAP if yes; emit events either way. Every
+        decision (fire OR skip) is broadcast so the human sees what was
+        considered. Skipped silently if no astap_client was provided.
+
+        Triggers (priority order, see platesolve_orchestrator.decide):
+          1. operator_requested  — manual button
+          2. first_frame         — first exposure on this target
+          3. meridian_flip       — pointing may have shifted at the flip
+          4. guiding_recovery    — may have drifted during guide loss
+
+        Only one solve per "occurrence" — flags are consumed on use."""
+        if self._astap_client is None:
+            return
+        from atlas.capture.platesolve_orchestrator import (
+            PlateSolveContext, decide, solve_and_sync,
+        )
+        ctx = PlateSolveContext(
+            is_first_frame_on_target=(not self._platesolved_for_target),
+            after_meridian_flip=self._meridian_flip_pending,
+            after_guiding_recovery=self._after_guiding_recovery,
+            operator_requested=self._operator_solve_requested,
+            target_name=self._target.get("target_name"),
+            target_ra_deg=self._target.get("ra_deg"),
+            target_dec_deg=self._target.get("dec_deg"),
+        )
+        decision = decide(ctx)
+        # Always emit a decision event — human visibility on EVERY
+        # plate-solve decision (fire or skip).
+        if not decision.should_solve:
+            yield {
+                "phase": "platesolve_skipped",
+                "trigger": decision.trigger,
+                "reason": decision.reason,
+                "summary": f"plate-solve skipped — {decision.reason}",
+            }
+            # Consume one-shot flags even on skip so they don't fire
+            # repeatedly. (first_frame stays false until cleared below.)
+            self._meridian_flip_pending = False
+            self._operator_solve_requested = False
+            self._after_guiding_recovery = False
+            return
+        # Fire it
+        yield {
+            "phase": "platesolve_started",
+            "trigger": decision.trigger,
+            "reason": decision.reason,
+            "summary": f"plate-solve firing — {decision.reason}",
+        }
+        target_ra = float(self._target.get("ra_deg") or 0.0)
+        target_dec = float(self._target.get("dec_deg") or 0.0)
+        result = await solve_and_sync(
+            astap_client=self._astap_client,
+            nina_client=self._nina,
+            target_ra_deg=target_ra,
+            target_dec_deg=target_dec,
+            target_name=self._target.get("target_name") or "?",
+            simulation=self._sim,
+            exposure_s=self._platesolve_exposure_s,
+        )
+        # Consume one-shot flags
+        self._platesolved_for_target = True
+        self._meridian_flip_pending = False
+        self._operator_solve_requested = False
+        self._after_guiding_recovery = False
+        yield {
+            "phase": "platesolve_complete",
+            "trigger": decision.trigger,
+            "ok": bool(result.ok),
+            "elapsed_s": result.elapsed_s,
+            "radius_used_deg": result.radius_used_deg,
+            "solved_ra_deg": result.solved_ra_deg,
+            "solved_dec_deg": result.solved_dec_deg,
+            "pointing_error_arcmin": result.pointing_error_arcmin,
+            "error": result.error,
+            "summary": (
+                f"plate-solve OK — pointing error "
+                f"{result.pointing_error_arcmin} arcmin "
+                f"(solved in {result.elapsed_s}s @ {result.radius_used_deg}° radius)"
+                if result.ok
+                else f"plate-solve FAILED — {result.error}"
+            ),
+        }
+
     # ---- main loop --------------------------------------------------------
 
     async def run(self) -> AsyncIterator[dict]:
@@ -242,6 +351,17 @@ class CaptureSequence:
             fw = await self._nina.filterwheel_info()
         except Exception:
             fw = {"current_filter": None}
+
+        # Plate-solve + mount sync BEFORE first autofocus. Reason: AF
+        # picks star fields based on what's currently in the frame. If
+        # the slew was off by a few arcmin (typical GEM), AF may run on
+        # a field that doesn't have the intended target — then the
+        # first real exposure pops up with the target half-clipped.
+        # Solve+sync first, then AF on the centered field.
+        async for ps_ev in self._maybe_platesolve():
+            yield self._event(state=ps_ev["phase"], **{
+                k: v for k, v in ps_ev.items() if k != "phase"
+            })
 
         global_frame = 0
         for set_idx, set_ in enumerate(self._plan):
@@ -298,6 +418,21 @@ class CaptureSequence:
                                       "ending sequence early",
                         )
                         return
+                    # Guiding came back — flag a solve so we can re-anchor
+                    # pointing before the next exposure (we may have
+                    # drifted during the guiding outage).
+                    self._after_guiding_recovery = True
+
+                # Plate-solve gate (operator request / meridian flip /
+                # guiding recovery). First-frame solve is handled before
+                # the filter-set loop; these are the in-flight triggers.
+                if (self._operator_solve_requested
+                      or self._meridian_flip_pending
+                      or self._after_guiding_recovery):
+                    async for ps_ev in self._maybe_platesolve():
+                        yield self._event(state=ps_ev["phase"], **{
+                            k: v for k, v in ps_ev.items() if k != "phase"
+                        })
 
                 # Capture
                 try:

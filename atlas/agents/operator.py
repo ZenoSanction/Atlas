@@ -1317,13 +1317,35 @@ class Operator(BaseAgent):
         from atlas.capture.autofocus import AutofocusDecisionEngine
         af_engine = AutofocusDecisionEngine()
         is_mono = bool(equip and getattr(equip, "camera_type", "OSC") == "MONO")
+
+        # Plate-solve client. If ASTAP isn't configured, pass None and
+        # CaptureSequence will skip all solve+sync decisions silently
+        # (preserving prior behavior). When configured, the orchestrator
+        # solves before the first frame, after meridian flip, after
+        # guiding recovery, and on operator request.
+        astap_client = None
+        if not sim and equip is not None and getattr(equip, "astap_path", None):
+            try:
+                from atlas.hardware.astap import AstapClient
+                astap_client = AstapClient(astap_path=equip.astap_path)
+            except Exception as e:
+                self.log.warning("AstapClient construction failed; plate-solve "
+                                   "disabled for this sequence: %s", e)
+        elif sim:
+            # Simulation mode: pass a sentinel so the sequence's
+            # plate-solve gate fires and exercises the orchestrator
+            # end-to-end (sim path returns synthetic success).
+            from atlas.hardware.astap import AstapClient
+            astap_client = AstapClient(astap_path=None)
+
         seq = CaptureSequence(nina=nina, phd2=phd2, target=target,
                                 exposure_plan=exposure_plan,
                                 dither_every_n_frames=dither_every,
                                 simulation=sim,
                                 session_id=self._current_session_id,
                                 autofocus_engine=af_engine,
-                                is_mono=is_mono)
+                                is_mono=is_mono,
+                                astap_client=astap_client)
         self._current_capture = seq
         self.log_decision("start_capture_sequence",
                             inputs={"target": target.get("target_name"),
