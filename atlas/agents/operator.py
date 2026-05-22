@@ -873,6 +873,24 @@ class Operator(BaseAgent):
             "verdict": VERDICT_NOGO,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        # Page the operator via every configured notification channel.
+        # Critical events always notify — that's the whole point of
+        # the notification system.
+        try:
+            from atlas.notifications import Notification, get_dispatcher
+            await get_dispatcher().dispatch(Notification(
+                severity="critical",
+                title="ATLAS: execution blocked",
+                message=reason,
+                detail=("Plan stays READY; shutdown sequence is running. "
+                          "Verdict will return to GO/CAUTION when conditions "
+                          "clear; the system will resume against the same plan."),
+                source="operator",
+                tags=["storm" if "storm" in reason else "fault",
+                        "execution_block"],
+            ))
+        except Exception:
+            self.log.exception("notification dispatch failed (non-fatal)")
 
     async def _update_verdict_from_weather(self, payload: dict) -> None:
         sev = payload.get("overall_severity", "ok")

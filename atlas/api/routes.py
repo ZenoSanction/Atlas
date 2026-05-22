@@ -958,6 +958,36 @@ async def session_preflight() -> dict:
 # Weather thresholds (Setup tab)
 # ============================================================================
 
+@api_router.get("/setup/notifications/channels")
+async def notification_channels() -> dict:
+    """Per-channel configured status (ntfy / email / webhook /
+    whatever's registered). Setup-tab renders this so the operator
+    sees which channels are ready to fire vs which need
+    credentials."""
+    from atlas.notifications import get_dispatcher
+    return {"channels": get_dispatcher().channel_status()}
+
+
+@api_router.post("/setup/notifications/test")
+async def notification_test() -> dict:
+    """Fire a single test notification through every configured
+    channel. Returns per-channel pass/fail so the operator can
+    verify their routing before relying on it overnight."""
+    from atlas.notifications import Notification, get_dispatcher
+    n = Notification(
+        severity="critical",
+        title="ATLAS test notification",
+        message="If you can read this, alerts are working.",
+        detail="Triggered manually from Setup → Notifications.",
+        source="setup",
+        tags=["test"],
+    )
+    results = await get_dispatcher().dispatch(n)
+    return {"ok": True, "results": results,
+              "channels_tried": len(results),
+              "channels_succeeded": sum(1 for v in results.values() if v)}
+
+
 @api_router.get("/setup/external-tools")
 async def get_external_tools() -> dict:
     """Status of external binaries (ASTAP, Siril, etc.) checked at
