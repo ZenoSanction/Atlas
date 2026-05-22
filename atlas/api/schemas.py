@@ -70,6 +70,12 @@ class EquipmentSchema(BaseModel):
     cooling_setpoint_c: float = -10.0
     warmup_ramp_c_per_min: float = 5.0
     capture_folder: Optional[str] = None
+    # Safe-park position (verified by EmergencyShutdown after park())
+    park_alt_deg: float = 0.0
+    park_az_deg: float = 0.0
+    park_tolerance_deg: float = 2.0
+    # Filter focus-offset reference filter (typically L on mono)
+    filter_offset_reference: str = "L"
 
 
 class CampaignCreate(BaseModel):

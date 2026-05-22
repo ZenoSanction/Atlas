@@ -569,6 +569,18 @@
         </label>
         <label>Meridian past-limit (min)<input name="meridian_past_limit_min" type="number" step="1" value="10"></label>
         <label class="checkbox"><input type="checkbox" name="mount_supports_nonsidereal"> Mount supports non-sidereal tracking</label>
+        <fieldset style="border:1px solid var(--line);padding:8px;margin-top:8px">
+          <legend style="font-size:11px;color:var(--text-dim);text-transform:uppercase">Safe-park position</legend>
+          <p class="hint" style="margin:4px 0 8px">After safe-shutdown parks the mount, ATLAS verifies the reported alt/az matches these values within tolerance. Mismatch triggers retry + escalation. Typical home position: alt 0°, az 180° (south horizon) or alt 90°, az 0° (zenith), depending on mount.</p>
+          <label>Park altitude (°)<input name="park_alt_deg" type="number" step="0.1" value="0.0"></label>
+          <label>Park azimuth (°)<input name="park_az_deg" type="number" step="0.1" value="180.0"></label>
+          <label>Park tolerance (°)<input name="park_tolerance_deg" type="number" step="0.1" value="2.0"></label>
+        </fieldset>
+        <fieldset style="border:1px solid var(--line);padding:8px;margin-top:8px">
+          <legend style="font-size:11px;color:var(--text-dim);text-transform:uppercase">Per-filter focus offsets</legend>
+          <p class="hint" style="margin:4px 0">Reference filter for offset measurements (typically L). The offset table is populated automatically as autofocus runs land for each filter; see the Setup-tab Operator log for "filter offset recorded" entries.</p>
+          <label>Reference filter<input name="filter_offset_reference" type="text" value="L"></label>
+        </fieldset>
         <div class="form-actions">
           <button class="btn-primary" type="submit">Save Equipment</button>
           <span class="form-status"></span>
