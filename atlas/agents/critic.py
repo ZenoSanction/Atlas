@@ -609,6 +609,67 @@ class Critic(BaseAgent):
         equip = ConfigManager.get_equipment()
         session_id = sess.id
 
+        # ---- Disk free space (cheap; runs every fast tick) --------------
+        # If frames_dir's volume drops critically low mid-session, the
+        # capture sequence will fail on the next FITS write. We catch
+        # the trend early and either warn (≤5 GB) or escalate to
+        # critical (≤1 GB). Critical fires through the alert -> verdict
+        # path that the watcher already handles — Operator's
+        # _evaluate_execution_block sees hardware-class criticals and
+        # stops the session before the disk actually fills.
+        try:
+            import shutil
+            from atlas.config import get_settings
+            frames_dir = get_settings().frames_dir
+            if frames_dir is not None:
+                _total, _used, free = shutil.disk_usage(str(frames_dir))
+                free_gb = free / 1_000_000_000.0
+                if free_gb <= 1.0:
+                    await self._raise(
+                        AlertSeverity.CRITICAL, "disk_critical_low",
+                        f"Frames volume has only {free_gb:.2f} GB free "
+                        f"(< 1 GB). Capture will fail soon.",
+                        session_id=session_id,
+                        data={"free_gb": round(free_gb, 2),
+                                "path": str(frames_dir)},
+                    )
+                    # Also route through the execution-block path so
+                    # the Operator's verdict watcher fires the
+                    # SafeShutdownSequence (mount park, camera warm).
+                    # Direct alert alone would only set SHUTDOWN state
+                    # without actually parking the hardware.
+                    await self.send(
+                        AgentName.OPERATOR, AgentMessageKind.STATUS,
+                        payload={
+                            "kind": "critical_advisories",
+                            "review_id": "runtime_disk",
+                            "advisory_count": 1,
+                            "advisories": [{
+                                "kind": "disk", "severity": "critical",
+                                "source": "critic",
+                                "message": (
+                                    f"Frames volume {free_gb:.2f} GB "
+                                    f"free; capture will fail soon."
+                                ),
+                            }],
+                            "summary": "disk runtime critical",
+                        },
+                    )
+                elif free_gb <= 5.0:
+                    await self._raise(
+                        AlertSeverity.WARNING, "disk_low",
+                        f"Frames volume has {free_gb:.1f} GB free "
+                        f"(< 5 GB).",
+                        session_id=session_id,
+                        data={"free_gb": round(free_gb, 1),
+                                "path": str(frames_dir)},
+                    )
+                else:
+                    self._clear("disk_low")
+                    self._clear("disk_critical_low")
+        except Exception:
+            self.log.exception("disk-space check failed")
+
         # ---- Guiding RMS (PHD2 event stream, in both real + sim) --------
         # The Phd2EventStream singleton has been folding GuideStep events
         # into a rolling buffer since boot. We just compute current RMS

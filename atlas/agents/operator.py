@@ -815,6 +815,7 @@ class Operator(BaseAgent):
 
         advisories = payload.get("advisories") or []
         hardware_fault = any(a.get("kind") == "hardware" for a in advisories)
+        disk_critical = any(a.get("kind") == "disk" for a in advisories)
         weather_storm = False
         a = get_state().get_assessment()
         if a is not None:
@@ -830,26 +831,28 @@ class Operator(BaseAgent):
             if wind_mph >= crit_mph:
                 weather_storm = True
 
-        if not (hardware_fault or weather_storm):
+        if not (hardware_fault or weather_storm or disk_critical):
             self.log.info("Critical advisories filed but no execution-"
                             "block conditions met — verdict unchanged.")
             self.log_decision("execution_block_evaluated",
                                 inputs={"advisories": advisories},
                                 outputs={"blocked": False},
-                                rationale="No storm / damage-risk indicators")
+                                rationale="No storm / damage-risk / disk indicators")
             return
 
         # Execution block fires. Flip the verdict to NO-GO. The
         # _verdict_watcher_loop will detect this transition and
         # autonomously fire SafeShutdownSequence + park the session.
         # The plan itself stays READY — operator can still review
-        # what was planned, and when weather clears the watcher
+        # what was planned, and when conditions clear the watcher
         # handles startup + replan against the same plan.
         reasons = []
         if hardware_fault:
             reasons.append("hardware critical")
         if weather_storm:
             reasons.append("storm / extreme wind")
+        if disk_critical:
+            reasons.append("disk space critical")
         reason = " + ".join(reasons)
         new = OperatorVerdict(
             decided_at=datetime.utcnow().isoformat(timespec="seconds") + "Z",
