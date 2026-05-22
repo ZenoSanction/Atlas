@@ -1309,11 +1309,21 @@ class Operator(BaseAgent):
                                 timeout=30.0)
             phd2 = Phd2Client(host=equip.phd2_host, port=equip.phd2_port,
                                 timeout=10.0)
+        # Construct an autofocus engine per workflow. Each workflow
+        # (deepsky, photometry, exoplanet, etc.) configures it
+        # differently — deepsky AFs on filter change, exoplanet locks
+        # focus mid-sequence. For now use sensible defaults; per-
+        # workflow tuning lands when the workflow modules fill in.
+        from atlas.capture.autofocus import AutofocusDecisionEngine
+        af_engine = AutofocusDecisionEngine()
+        is_mono = bool(equip and getattr(equip, "camera_type", "OSC") == "MONO")
         seq = CaptureSequence(nina=nina, phd2=phd2, target=target,
                                 exposure_plan=exposure_plan,
                                 dither_every_n_frames=dither_every,
                                 simulation=sim,
-                                session_id=self._current_session_id)
+                                session_id=self._current_session_id,
+                                autofocus_engine=af_engine,
+                                is_mono=is_mono)
         self._current_capture = seq
         self.log_decision("start_capture_sequence",
                             inputs={"target": target.get("target_name"),

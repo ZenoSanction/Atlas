@@ -33,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Optional
 
 from atlas.logging_setup import get_logger
 
@@ -50,7 +50,9 @@ class CaptureSequence:
     def __init__(self, *, nina, phd2, target: dict, exposure_plan: list[dict],
                  dither_every_n_frames: int = 1,
                  simulation: bool = False,
-                 session_id: int | None = None) -> None:
+                 session_id: int | None = None,
+                 autofocus_engine=None,
+                 is_mono: bool = False) -> None:
         self._nina = nina
         self._phd2 = phd2
         self._target = target
@@ -63,6 +65,15 @@ class CaptureSequence:
         self.frames_total = sum(int(s.get("count") or 0) for s in self._plan)
         self.frames_done = 0
         self.started_at: float | None = None
+        # Autofocus orchestration. None disables AF entirely (legacy).
+        # When provided, the engine is consulted before each new filter
+        # set + opportunistically between frames if HFR drifts.
+        self._af_engine = autofocus_engine
+        self._is_mono = bool(is_mono)
+        self._last_filter: Optional[str] = None
+        self._last_af_at: Optional[datetime] = None
+        self._last_af_temp_c: Optional[float] = None
+        self._reference_hfr: Optional[float] = None
 
     # ---- public control ---------------------------------------------------
 
@@ -146,6 +157,78 @@ class CaptureSequence:
         except Exception as e:
             log.warning("dither failed (continuing): %s", e)
 
+    async def _maybe_autofocus(self, *, session_started: bool,
+                                  filter_changed: bool,
+                                  current_filter: Optional[str],
+                                  current_hfr: Optional[float] = None,
+                                  ):
+        """Ask the autofocus engine whether to refocus right now; if
+        yes, run it and emit the event. Skipped when no engine is
+        attached. Every decision (fire OR skip) yields a progress
+        event so the human sees what was considered."""
+        if self._af_engine is None:
+            return
+        from atlas.capture.autofocus import (
+            AutofocusContext, run_autofocus,
+        )
+        # Best-effort ambient/CCD temp from cached hardware snapshot
+        current_temp_c: Optional[float] = None
+        try:
+            from atlas.api.routes import _HARDWARE_SNAPSHOT_CACHE
+            cam = (_HARDWARE_SNAPSHOT_CACHE.get("data") or {}).get("camera") or {}
+            t = cam.get("temperature")
+            if t is not None:
+                current_temp_c = float(t)
+        except Exception:
+            pass
+        ctx = AutofocusContext(
+            session_started=session_started,
+            filter_changed=filter_changed,
+            current_filter=current_filter,
+            current_temp_c=current_temp_c,
+            last_af_temp_c=self._last_af_temp_c,
+            last_af_at=self._last_af_at,
+            current_hfr=current_hfr,
+            reference_hfr=self._reference_hfr,
+            is_mono=self._is_mono,
+        )
+        decision = self._af_engine.should_fire(ctx)
+        # Always emit a decision event — human visibility on EVERY
+        # autofocus decision (fire or skip), per operator instruction.
+        if not decision.should_fire:
+            yield {
+                "phase": "autofocus_skipped",
+                "trigger": decision.trigger,
+                "reason": decision.reason,
+                "skip_because": decision.skip_because,
+                "summary": (f"autofocus skipped — {decision.skip_because}"),
+            }
+            return
+        # Fire it
+        yield {
+            "phase": "autofocus_started",
+            "trigger": decision.trigger,
+            "reason": decision.reason,
+            "summary": f"autofocus firing — {decision.reason}",
+        }
+        result = await run_autofocus(self._nina, simulation=self._sim)
+        self._last_af_at = datetime.utcnow()
+        self._last_af_temp_c = current_temp_c
+        if result.get("ok") and result.get("hfr_min") is not None:
+            self._reference_hfr = float(result["hfr_min"])
+        yield {
+            "phase": "autofocus_complete",
+            "trigger": decision.trigger,
+            "ok": bool(result.get("ok")),
+            "hfr_min": result.get("hfr_min"),
+            "elapsed_s": result.get("elapsed_s"),
+            "summary": (
+                f"autofocus done — HFR={result.get('hfr_min')} "
+                f"in {result.get('elapsed_s')}s" if result.get("ok")
+                else f"autofocus FAILED — {result.get('error', '?')}"
+            ),
+        }
+
     # ---- main loop --------------------------------------------------------
 
     async def run(self) -> AsyncIterator[dict]:
@@ -169,7 +252,24 @@ class CaptureSequence:
             count = int(set_.get("count") or 0)
             if count <= 0:
                 continue
+            filter_changed = (self._last_filter is not None
+                                and self._last_filter != filt)
             fw = await self._change_filter_if_needed(filt, fw)
+
+            # Autofocus check at the boundary of each filter set: session
+            # start fires unconditionally; filter change fires on mono;
+            # temp/time/HFR thresholds checked too. Every decision
+            # logged + broadcast so human sees what was considered.
+            async for af_ev in self._maybe_autofocus(
+                session_started=(set_idx == 0),
+                filter_changed=filter_changed,
+                current_filter=filt,
+            ):
+                yield self._event(state=af_ev["phase"], **{
+                    k: v for k, v in af_ev.items() if k != "phase"
+                })
+            self._last_filter = filt
+
             yield self._event(
                 state="filter_set_start",
                 summary=f"set {set_idx+1}/{len(self._plan)}: "
