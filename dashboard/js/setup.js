@@ -387,7 +387,7 @@ async function renderEquipmentForm(api) {
     delete data.filters_csv;
     for (const k of ["sensor_pixel_size_um","focal_length_mm","aperture_mm",
                       "nina_port","phd2_port","cooling_setpoint_c",
-                      "warmup_ramp_c_per_min"]) {
+                      "warmup_ramp_c_per_min","meridian_past_limit_min"]) {
       if (data[k] !== "" && data[k] !== undefined) data[k] = Number(data[k]);
     }
     try {

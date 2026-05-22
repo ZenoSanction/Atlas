@@ -71,6 +71,15 @@ class ScheduledSlot:
     dwell_min: float
     truncated_from_min: Optional[float] = None  # if dwell got cut short
     visibility: Optional[VisibilityWindow] = None
+    # Meridian-crossing time, if the target transits during this slot.
+    # Capture-sequence will pause briefly here for a GEM/wedged_fork
+    # mount to perform the physical flip + re-acquire guiding + sync.
+    # None if no crossing falls within (start_utc, end_utc).
+    meridian_crossing_utc: Optional[datetime] = None
+    # Whether the configured mount needs a physical flip at the
+    # crossing. Mirrors the EquipmentProfile.mount_type policy so
+    # downstream code doesn't have to re-derive it.
+    flip_required: bool = False
 
     @property
     def end_utc(self) -> datetime:
@@ -150,6 +159,7 @@ def schedule_targets(
     preferred_dwell_fn: Callable[[dict], float] | None = None,
     fit_strategy: str = "depth",
     now_utc: datetime | None = None,
+    mount_type: str = "gem",
 ) -> ScheduleResult:
     """Time-aware greedy scheduler. See module docstring.
 
@@ -266,6 +276,21 @@ def schedule_targets(
         dwell = min(preferred, max_here)
         truncated_from = preferred if dwell < preferred else None
 
+        # Annotate meridian crossing if this slot straddles it.
+        slot_end = cursor + timedelta(minutes=dwell)
+        flip_mounts = {"gem", "wedged_fork"}
+        mc_utc: Optional[datetime] = None
+        try:
+            from atlas.astronomy.visibility import compute_meridian_crossing
+            ra_deg = float(chosen_t.get("ra_deg") or 0.0)
+            mc_candidate = compute_meridian_crossing(
+                ra_deg, lon, after_utc=cursor, search_hours=24,
+            )
+            if mc_candidate and cursor < mc_candidate < slot_end:
+                mc_utc = mc_candidate
+        except Exception:
+            mc_utc = None
+
         result.slots.append(ScheduledSlot(
             target=chosen_t,
             start_utc=cursor,
@@ -273,6 +298,8 @@ def schedule_targets(
             truncated_from_min=(round(truncated_from, 1)
                                   if truncated_from else None),
             visibility=chosen_vw,
+            meridian_crossing_utc=mc_utc,
+            flip_required=bool(mc_utc and mount_type in flip_mounts),
         ))
         result.scheduled_total_min += dwell
         cursor = cursor + timedelta(minutes=dwell)

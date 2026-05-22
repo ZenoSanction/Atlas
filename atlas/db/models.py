@@ -161,6 +161,17 @@ class EquipmentProfile(Base):
     roof_mode: Mapped[str] = mapped_column(String(16), default="manual")  # nina | custom | manual
     roof_driver_module: Mapped[Optional[str]] = mapped_column(String(256))
     mount_supports_nonsidereal: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Mount type, governs meridian-flip handling. Values:
+    #   gem            German equatorial — flips at meridian (~30-60s)
+    #   wedged_fork    Fork on equatorial wedge — also flips
+    #   fork           Alt-az fork — tracks straight through, no flip
+    #   direct_drive   Harmonic-drive (RST/AM5/etc.) — usually no flip
+    #   other          Operator decides per-session
+    mount_type: Mapped[str] = mapped_column(String(16), default="gem")
+    # How long past the meridian the mount can keep tracking before
+    # mechanical limits force the flip. Most amateur GEMs allow 5-30
+    # minutes; set to your specific mount's spec.
+    meridian_past_limit_min: Mapped[float] = mapped_column(Float, default=10.0)
     cooling_setpoint_c: Mapped[float] = mapped_column(Float, default=-10.0)
     warmup_ramp_c_per_min: Mapped[float] = mapped_column(Float, default=5.0)
     # Where the capture app (NINA / SharpCap) writes FITS files. The

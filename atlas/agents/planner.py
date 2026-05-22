@@ -529,6 +529,8 @@ class Planner(BaseAgent):
             # the full original night. A mid-night rebuild shows the
             # smaller number — that's what the operator cares about.
             window_min = window["remaining_hours"] * 60.0
+            equip = ConfigManager.get_equipment()
+            mount_type = getattr(equip, "mount_type", "gem") if equip else "gem"
             schedule_obj = schedule_targets(
                 full,
                 lat=lat, lon=lon, horizon_alt=horizon_alt,
@@ -537,6 +539,7 @@ class Planner(BaseAgent):
                 min_dwell_minutes=MIN_DWELL_MINUTES,
                 fit_strategy="depth",
                 now_utc=now,
+                mount_type=mount_type,
             )
             for slot in schedule_obj.slots:
                 t = dict(slot.target)
@@ -545,6 +548,10 @@ class Planner(BaseAgent):
                 t["scheduled_for_min"] = slot.dwell_min
                 if slot.truncated_from_min:
                     t["scheduled_truncated_from_min"] = slot.truncated_from_min
+                if slot.meridian_crossing_utc:
+                    t["meridian_crossing_utc"] = (
+                        slot.meridian_crossing_utc.isoformat(timespec="seconds") + "Z")
+                    t["flip_required"] = slot.flip_required
                 if slot.visibility:
                     t["visible_from_utc"] = slot.visibility.visible_from.isoformat(timespec="seconds") + "Z"
                     t["visible_until_utc"] = slot.visibility.visible_until.isoformat(timespec="seconds") + "Z"

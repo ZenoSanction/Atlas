@@ -29,6 +29,8 @@ def _apply_simple_migrations(engine) -> None:
     additive_columns = [
         ("equipment_profile", "capture_folder", "VARCHAR(512)", "NULL"),
         ("system_flags", "auto_start_sessions", "BOOLEAN", "0"),
+        ("equipment_profile", "mount_type", "VARCHAR(16)", "'gem'"),
+        ("equipment_profile", "meridian_past_limit_min", "FLOAT", "10.0"),
     ]
     from sqlalchemy import text
     with engine.begin() as conn:

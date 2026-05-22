@@ -227,6 +227,76 @@ def angular_separation(ra1_deg: float, dec1_deg: float,
     return math.degrees(2 * math.asin(min(1.0, math.sqrt(a))))
 
 
+def compute_meridian_crossing(ra_deg: float, longitude_deg: float,
+                                 after_utc: datetime,
+                                 search_hours: int = 24,
+                                 ) -> datetime | None:
+    """Return the next time the target crosses the local meridian after
+    ``after_utc``. The meridian is the great circle from celestial pole
+    through zenith — a target crosses it once per sidereal day (23h 56m).
+
+    A target is on the meridian when its hour angle is zero, i.e. when
+    the local sidereal time equals the target's right ascension.
+
+    Mount-handling note: ``compute_meridian_crossing`` is pure
+    astronomy and does NOT know what kind of mount is observing.
+    Whether a flip is *required* at this crossing depends on the
+    mount type stored on EquipmentProfile.mount_type:
+
+      gem            German equatorial — needs the flip
+      wedged_fork    Fork on equatorial wedge — needs the flip
+      fork           Alt-az fork — no flip, tracks straight through
+      direct_drive   Harmonic-drive (RST/AM5/etc.) — usually no flip
+      other          Operator decides
+
+    Returns None if no crossing happens within ``search_hours``
+    (effectively never for a real target on a real day, but defensive)."""
+    from datetime import timedelta
+    # Hour angle = LST - RA. Zero when LST == RA. Walk forward in
+    # short steps; once HA crosses from negative to positive (or
+    # equivalently 359→0) we've just transitted. Refine with binary
+    # search.
+    end = after_utc + timedelta(hours=search_hours)
+    step = timedelta(minutes=5)
+    cursor = after_utc
+    prev_ha = _hour_angle(ra_deg, longitude_deg, cursor)
+    cursor += step
+    while cursor < end:
+        ha = _hour_angle(ra_deg, longitude_deg, cursor)
+        # Crossed zero ascending (HA went from negative to positive)?
+        # Handle the wrap at +/-180 carefully.
+        if prev_ha < 0 and ha >= 0 and abs(prev_ha) < 90 and abs(ha) < 90:
+            return _refine_meridian(ra_deg, longitude_deg,
+                                       cursor - step, cursor)
+        prev_ha = ha
+        cursor += step
+    return None
+
+
+def _hour_angle(ra_deg: float, longitude_deg: float,
+                  when_utc: datetime) -> float:
+    """Hour angle in degrees, normalised to [-180, +180]."""
+    lst = local_sidereal_time(when_utc, longitude_deg)
+    ha = (lst - ra_deg + 540.0) % 360.0 - 180.0
+    return ha
+
+
+def _refine_meridian(ra_deg: float, longitude_deg: float,
+                       lo: datetime, hi: datetime) -> datetime:
+    """Binary search the meridian crossing within ~1-second precision."""
+    from datetime import timedelta
+    for _ in range(20):
+        mid = lo + (hi - lo) / 2
+        ha = _hour_angle(ra_deg, longitude_deg, mid)
+        if ha < 0:
+            lo = mid
+        else:
+            hi = mid
+        if (hi - lo).total_seconds() < 1.0:
+            break
+    return lo + (hi - lo) / 2
+
+
 def night_window(latitude_deg: float, longitude_deg: float,
                   reference_utc: datetime | None = None,
                   altitude_deg: float = -12.0,

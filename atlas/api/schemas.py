@@ -65,8 +65,11 @@ class EquipmentSchema(BaseModel):
     roof_mode: str = "manual"
     roof_driver_module: Optional[str] = None
     mount_supports_nonsidereal: bool = False
+    mount_type: str = "gem"   # gem | wedged_fork | fork | direct_drive | other
+    meridian_past_limit_min: float = 10.0
     cooling_setpoint_c: float = -10.0
     warmup_ramp_c_per_min: float = 5.0
+    capture_folder: Optional[str] = None
 
 
 class CampaignCreate(BaseModel):

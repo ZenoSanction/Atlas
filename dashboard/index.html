@@ -549,6 +549,16 @@
             <option value="custom">Custom driver</option>
           </select>
         </label>
+        <label>Mount type
+          <select name="mount_type">
+            <option value="gem">German equatorial (GEM) — needs meridian flip</option>
+            <option value="wedged_fork">Fork on equatorial wedge — needs meridian flip</option>
+            <option value="fork">Alt-az fork — no flip, tracks through</option>
+            <option value="direct_drive">Direct-drive / harmonic (RST, AM5, etc.) — no flip</option>
+            <option value="other">Other / manual decision per session</option>
+          </select>
+        </label>
+        <label>Meridian past-limit (min)<input name="meridian_past_limit_min" type="number" step="1" value="10"></label>
         <label class="checkbox"><input type="checkbox" name="mount_supports_nonsidereal"> Mount supports non-sidereal tracking</label>
         <div class="form-actions">
           <button class="btn-primary" type="submit">Save Equipment</button>
