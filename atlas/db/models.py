@@ -174,6 +174,18 @@ class EquipmentProfile(Base):
     meridian_past_limit_min: Mapped[float] = mapped_column(Float, default=10.0)
     cooling_setpoint_c: Mapped[float] = mapped_column(Float, default=-10.0)
     warmup_ramp_c_per_min: Mapped[float] = mapped_column(Float, default=5.0)
+    # Per-filter focuser-step offsets vs the reference filter. Empty
+    # dict on a fresh install; populated by FilterOffsetTable.record_af()
+    # as autofocus runs land for each filter. Once populated, a filter
+    # change can use the offset directly and skip a full AF cycle.
+    filter_offsets: Mapped[Optional[dict]] = mapped_column(JSON)
+    filter_offset_reference: Mapped[str] = mapped_column(String(16), default="L")
+    # Safe-park mount position (alt, az in degrees). Set per-site so
+    # the safe-shutdown sequence and its verifier know where the mount
+    # should be after parking.
+    park_alt_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    park_az_deg: Mapped[float] = mapped_column(Float, default=0.0)
+    park_tolerance_deg: Mapped[float] = mapped_column(Float, default=2.0)
     # Where the capture app (NINA / SharpCap) writes FITS files. The
     # Archivist's watch-folder ingest polls this every 2 minutes.
     capture_folder: Mapped[Optional[str]] = mapped_column(String(512))

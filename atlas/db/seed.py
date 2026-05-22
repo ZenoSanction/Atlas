@@ -31,6 +31,16 @@ def _apply_simple_migrations(engine) -> None:
         ("system_flags", "auto_start_sessions", "BOOLEAN", "0"),
         ("equipment_profile", "mount_type", "VARCHAR(16)", "'gem'"),
         ("equipment_profile", "meridian_past_limit_min", "FLOAT", "10.0"),
+        # Per-filter focuser-step offsets relative to L (or whatever the
+        # operator picks as the reference filter). Stored as JSON dict:
+        # {"R": -12, "G": -8, "B": +5, "Ha": +220, ...}
+        ("equipment_profile", "filter_offsets", "TEXT", "NULL"),
+        ("equipment_profile", "filter_offset_reference", "VARCHAR(16)", "'L'"),
+        # Mount park position the safe-shutdown sequence targets. The
+        # verifier compares reported alt/az after park to these values.
+        ("equipment_profile", "park_alt_deg", "FLOAT", "0.0"),
+        ("equipment_profile", "park_az_deg", "FLOAT", "0.0"),
+        ("equipment_profile", "park_tolerance_deg", "FLOAT", "2.0"),
     ]
     from sqlalchemy import text
     with engine.begin() as conn:

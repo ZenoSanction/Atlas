@@ -25,8 +25,16 @@ class FakeNina:
                  "temperature": -10.0, "cooling": True}
 
     async def telescope_info(self) -> dict:
+        # Sim mount reports its current alt/az too — park_verify uses
+        # this. Default state (alt=0, az=180) matches typical "south
+        # at the horizon" home position; tests can adjust ._sim_alt /
+        # ._sim_az to drive verification scenarios.
         return {"connected": True, "name": "Simulated Telescope",
-                 "ra": 0.0, "dec": 0.0, "tracking": True, "parked": False}
+                 "ra": 0.0, "dec": 0.0,
+                 "altitude": getattr(self, "_sim_alt", 0.0),
+                 "azimuth": getattr(self, "_sim_az", 180.0),
+                 "tracking": True,
+                 "parked": getattr(self, "_sim_parked", False)}
 
     async def focuser_info(self) -> dict:
         return {"connected": True, "position": 15000, "max_position": 30000}
@@ -60,9 +68,17 @@ class FakeNina:
         return {"ok": True, "ra": ra_hours, "dec": dec_deg}
 
     async def park(self) -> Any:
+        # Mark sim state so telescope_info() reflects the parked
+        # position. Tests can override ._sim_alt / ._sim_az before
+        # calling park to simulate a misbehaving mount.
+        if not hasattr(self, "_sim_parked") or not self._sim_parked:
+            self._sim_alt = getattr(self, "_sim_park_alt", 0.0)
+            self._sim_az = getattr(self, "_sim_park_az", 180.0)
+        self._sim_parked = True
         return {"ok": True, "parked": True}
 
     async def unpark(self) -> Any:
+        self._sim_parked = False
         return {"ok": True, "parked": False}
 
     async def dome_open(self) -> Any:

@@ -36,7 +36,33 @@ class EmergencyShutdown:
                 log.exception("shutdown step FAILED: %s", name)
 
         await step("sequence_stop", self._nina.sequence_stop())
-        await step("park_mount", self._nina.park())
+        # Park + verify in one operation. Verification math compares
+        # the mount's reported alt/az against the configured safe
+        # position; mismatch triggers retries up to N times, then
+        # surfaces in the audit + escalates via notification dispatcher
+        # at the Operator layer.
+        from atlas.safety.park_verify import (
+            load_park_target, park_and_verify,
+        )
+        alt, az, tol = load_park_target()
+        verify = await park_and_verify(
+            nina=self._nina, expected_alt_deg=alt,
+            expected_az_deg=az, tolerance_deg=tol,
+        )
+        audit["steps"].append({
+            "name": "park_mount",
+            "ok": verify.verified,
+            "verify": verify.to_jsonable(),
+            "error": (None if verify.verified else verify.reason),
+        })
+        if verify.verified:
+            log.info("shutdown step OK: park_mount (verified at "
+                       "alt=%.2f az=%.2f, offset %.2f deg)",
+                       verify.reported_alt_deg, verify.reported_az_deg,
+                       verify.angular_offset_deg or 0.0)
+        else:
+            log.error("shutdown step FAILED: park_mount — %s",
+                        verify.reason)
         await step("dome_close", self._nina.dome_close())
         await step("camera_warmup", self._nina.camera_warmup())
         # TODO Phase 2: dew heater off, focuser power, etc.
