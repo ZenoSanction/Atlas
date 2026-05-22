@@ -450,6 +450,46 @@ function renderWorkflow(review) {
     </div>`;
   }
 
+  // Window the plan covers + current day phase + countdown. Read
+  // straight from the plan dict — both fields are populated by the
+  // clock-aware _rebuild_plan path.
+  const plan = review.plan || {};
+  const win = plan.window || null;
+  const dp = plan.day_phase || null;
+  let windowLine = "";
+  if (win && win.dusk_utc && win.dawn_utc) {
+    const isInProgress = !!win.is_imaging_window_now;
+    const start = win.effective_start_utc || win.dusk_utc;
+    const remHrs = win.remaining_hours != null
+      ? `${win.remaining_hours}h remaining`
+      : `${win.hours}h total`;
+    const label = isInProgress
+      ? `Tonight's dark window (in progress):`
+      : `Tonight's dark window:`;
+    windowLine = `<div class="exec-state">
+      ${label}
+      <span class="plan-state">${fmtClock(start)} &rarr; ${fmtClock(win.dawn_utc)}</span>
+      <span class="muted">${remHrs}</span>
+    </div>`;
+  }
+  let phaseLine = "";
+  if (dp && dp.phase) {
+    const phaseClean = dp.phase.replace(/_/g, " ").toUpperCase();
+    const phaseCls = dp.is_imaging_window ? "ok"
+                    : dp.phase === "day" ? "" : "warn";
+    const nextLabel = dp.next_phase
+      ? dp.next_phase.replace(/_/g, " ")
+      : "next phase";
+    const inMin = dp.minutes_until_next_phase != null
+      ? `${Math.round(dp.minutes_until_next_phase)} min`
+      : "?";
+    phaseLine = `<div class="exec-state">
+      Day phase:
+      <span class="plan-state ${phaseCls}">${esc(phaseClean)}</span>
+      <span class="muted">sun ${dp.sun_altitude_deg}&deg; · ${esc(nextLabel)} in ${inMin}</span>
+    </div>`;
+  }
+
   stages.innerHTML = `
     <div class="plan-summary">
       ${stateBadge}
@@ -461,6 +501,8 @@ function renderWorkflow(review) {
             ? `<span class="muted">no advisories</span>` : ""}
       </div>
     </div>
+    ${windowLine}
+    ${phaseLine}
     ${execLine}
     ${monitorLine}
   `;

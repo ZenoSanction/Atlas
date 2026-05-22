@@ -1179,6 +1179,43 @@ footer .muted { color: var(--text-dim); }
   flex-wrap: wrap;
 }
 
+/* ============================================================================
+   Protection-sequence panel (Tonight tab)
+   ============================================================================ */
+
+.protection-panel { margin-bottom: 16px; display: flex; flex-direction: column; gap: 10px; }
+.protection-panel.hidden { display: none; }
+
+.prot-card {
+  border: 1.5px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  background: rgba(0,0,0,0.25);
+}
+.prot-card.prot-shutdown { border-left: 4px solid #b91c1c; }
+.prot-card.prot-startup  { border-left: 4px solid #10b981; }
+.prot-card header {
+  display: flex; gap: 12px; align-items: center; margin-bottom: 10px;
+  font-size: 14px;
+}
+.prot-steps {
+  display: flex; flex-direction: column; gap: 4px;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+}
+.prot-step {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 3px 8px; border-left: 2px solid transparent;
+}
+.prot-step.ok    { border-left-color: #10b981; }
+.prot-step.warn  { border-left-color: #f59e0b; }
+.prot-step.crit  { border-left-color: #b91c1c;
+                     background: rgba(127,29,29,0.10); }
+.prot-step.muted { color: var(--text-dim); }
+.prot-icon  { font-weight: 700; width: 14px; text-align: center; }
+.prot-name  { min-width: 140px; }
+.prot-elapsed { min-width: 50px; text-align: right; }
+
 .advisory-group { margin-bottom: 10px; }
 .advisory-group h4 {
   font-size: 11px; text-transform: uppercase;

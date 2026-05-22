@@ -51,6 +51,13 @@
 <main>
   <!-- TONIGHT — MISSION CONTROL -->
   <section class="panel" id="tab-tonight">
+    <!-- Protection-sequence live panel. Hidden until a shutdown or
+         startup sequence is running; lights up with per-step progress
+         as the Operator broadcasts the events. Operator sees exactly
+         what's happening at the bench during a storm without having
+         to read the log. -->
+    <div id="protection-panel" class="protection-panel hidden"></div>
+
     <!-- Hardware Controls — only visible while manual control is engaged.
          The MANUAL banner stays across every tab; this panel gives direct
          hardware command buttons + the audit trail. -->
