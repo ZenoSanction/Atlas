@@ -161,16 +161,17 @@ class Oracle(BaseAgent):
         )
         from datetime import datetime as _dt, timedelta
 
-        review = SessionPlanState.from_jsonable(review_dict)
+        review_id = review_dict.get("review_id")
+        plan = review_dict.get("plan") or {}
         self.set_task(
-            f"filing revisit advisories for plan {review.review_id}",
+            f"filing revisit advisories for plan {review_id}",
             state="working",
         )
 
-        targets = review.plan.get("visible_targets") or []
+        targets = plan.get("visible_targets") or []
         cutoff_recent = _dt.utcnow() - timedelta(days=30)
         now_iso = _dt.utcnow().isoformat(timespec="seconds") + "Z"
-        n_suggestions = 0
+        my_advisories: list[Advisory] = []
 
         with _db_sess() as s:
             for t in targets:
@@ -184,13 +185,12 @@ class Oracle(BaseAgent):
                             .filter_by(target_id=tgt.id, state="active")
                             .first())
                 if active:
-                    review.add_advisory(Advisory(
+                    my_advisories.append(Advisory(
                         kind="oracle", severity="info",
                         message=(f"{name}: active '{active.kind}' research "
                                    "thread; cadence may be due."),
                         source="oracle", at=now_iso, target_name=name,
                     ))
-                    n_suggestions += 1
                     continue
                 n_meas_30d = (s.query(Measurement)
                                 .filter(Measurement.target_id == tgt.id,
@@ -201,24 +201,35 @@ class Oracle(BaseAgent):
                                             Frame.captured_at >= cutoff_recent)
                                   .count())
                 if n_meas_30d > 0 and n_frames_30d < 30:
-                    review.add_advisory(Advisory(
+                    my_advisories.append(Advisory(
                         kind="oracle", severity="info",
                         message=(f"{name}: {n_frames_30d} frame(s) / "
                                    f"{n_meas_30d} measurement(s) in last 30 days "
                                    "— consider extending integration."),
                         source="oracle", at=now_iso, target_name=name,
                     ))
-                    n_suggestions += 1
 
-        get_state().set_session_review(review.to_jsonable())
+        # Atomic append — Critic may also be filing advisories on the
+        # same plan; the lock-guarded append in shared state lets both
+        # land without overwriting each other.
+        from dataclasses import asdict
+        n_suggestions = len(my_advisories)
+        accepted = get_state().append_advisories(
+            review_id,
+            [asdict(a) for a in my_advisories],
+        )
+        if not accepted:
+            self.log.info("plan %s already rotated; oracle advisories discarded",
+                          review_id)
         self.log_decision("oracle_plan_advisories",
-                            inputs={"review_id": review.review_id,
+                            inputs={"review_id": review_id,
                                       "targets_checked": len(targets)},
-                            outputs={"suggestion_count": n_suggestions},
+                            outputs={"suggestion_count": n_suggestions,
+                                       "accepted": accepted},
                             rationale=(f"Filed {n_suggestions} revisit/extension "
                                          "advisory(ies) against the plan"))
         self.set_task(
-            f"plan {review.review_id}: {n_suggestions} revisit advisor"
+            f"plan {review_id}: {n_suggestions} revisit advisor"
             f"{'ies' if n_suggestions != 1 else 'y'} filed",
             state="idle",
         )

@@ -297,12 +297,17 @@ class Critic(BaseAgent):
     async def _file_plan_advisories(self, review_dict: dict) -> None:
         """File weather + moon + hardware advisories against a plan.
 
-        Pure advisory: this method *appends* notes to the plan and
-        notifies the Operator of any criticals so the Operator can
-        evaluate hard-stop conditions (storm, equipment damage). It
-        does NOT gate the plan — the plan was already published
-        READY by the Planner. Operator decides whether to actually
-        cancel; everything else is informational.
+        ZERO BLOCKING. The Critic acts on whatever data it already
+        has in shared state at the moment the Planner hands it the
+        plan — it does not wait for a fresh weather pull, a fresh
+        hardware snapshot, or anything else. If the data is stale or
+        missing, it says so via an info-level advisory so the
+        operator can judge whether to act on it. Speed > freshness
+        precision: when something is about to break, we don't make
+        it worse by sitting on a check until the next poll cycle.
+
+        Adds advisories asynchronously; never gates the plan. The
+        plan is already READY — this is purely additive context.
         """
         from atlas.agents.session_workflow import (
             SessionPlanState, Advisory,
@@ -312,19 +317,60 @@ class Critic(BaseAgent):
         )
         from datetime import datetime as _dt
 
-        review = SessionPlanState.from_jsonable(review_dict)
+        # Build a LIST of advisories (don't touch the SessionPlanState
+        # directly). At the end we hand the list to
+        # get_state().append_advisories(review_id, list) which is
+        # atomic — Critic and Oracle can file concurrently against
+        # the same plan without overwriting each other.
+        review_id = review_dict.get("review_id")
+        plan = review_dict.get("plan") or {}
+        self.log.info("filing advisories for plan %s", review_id)
         self.set_task(
-            f"filing advisories for plan {review.review_id}",
+            f"filing advisories for plan {review_id}",
             state="working",
         )
 
         now_iso = _dt.utcnow().isoformat(timespec="seconds") + "Z"
+        now_dt = _dt.utcnow()
         criticals: list[Advisory] = []
+        my_advisories: list[Advisory] = []
+        def _add(adv: Advisory) -> None:
+            my_advisories.append(adv)
 
-        # 1. Weather — read from shared state (Critic's standard_loop
-        #    already keeps this fresh from WeatherCache).
+        # 1. Weather — read from shared state at this instant. No
+        #    refresh, no wait. If nothing is there yet (cold boot,
+        #    first plan), surface that as an info advisory so the
+        #    operator knows the absence is real, not silent.
         a = get_state().get_assessment()
         if a is not None:
+            self.log.info("advisory pass: assessment has %d checks, "
+                          "severities=%s, overall=%s",
+                          len(a.checks),
+                          [c.severity for c in a.checks],
+                          a.overall_severity)
+        if a is None:
+            _add(Advisory(
+                kind="weather", severity="info",
+                message=("no weather assessment yet — Critic standard "
+                          "loop hasn't completed first pass. Advisory "
+                          "will fill in within ~90 s."),
+                source="critic", at=now_iso,
+            ))
+        else:
+            assessed_age_s: float | None = None
+            try:
+                assessed_dt = _dt.fromisoformat(a.assessed_at.rstrip("Z"))
+                assessed_age_s = (now_dt - assessed_dt).total_seconds()
+            except Exception:
+                pass
+            if assessed_age_s is not None and assessed_age_s > 300:
+                _add(Advisory(
+                    kind="weather", severity="info",
+                    message=(f"acting on weather assessment "
+                              f"{assessed_age_s/60:.1f} min old; refresh "
+                              "scheduled on next cache TTL boundary."),
+                    source="critic", at=now_iso,
+                ))
             for c in a.checks:
                 if c.severity in ("warning", "critical"):
                     adv = Advisory(
@@ -335,7 +381,7 @@ class Critic(BaseAgent):
                                                 if c.metric == "dew_margin"
                                                 else None),
                     )
-                    review.add_advisory(adv)
+                    _add(adv)
                     if c.severity == "critical":
                         criticals.append(adv)
 
@@ -354,7 +400,7 @@ class Critic(BaseAgent):
 
             if illum is not None and moon_alt is not None:
                 if moon_alt > 0 and illum > 0.30:
-                    targets = review.plan.get("visible_targets") or []
+                    targets = plan.get("visible_targets") or []
                     close = []
                     for t in targets:
                         if t.get("ra_deg") is None or t.get("dec_deg") is None:
@@ -367,11 +413,8 @@ class Critic(BaseAgent):
                             close.append((t["target_name"], sep))
                     if close:
                         names = ", ".join(f"{n} ({s:.0f}°)" for n, s in close[:5])
-                        # Moon proximity is always advisory — never a
-                        # hard-stop. Severity reflects how disruptive
-                        # it is for imaging, not equipment safety.
-                        sev = "warning" if illum < 0.7 else "warning"
-                        review.add_advisory(Advisory(
+                        sev = "warning"
+                        _add(Advisory(
                             kind="moon", severity=sev,
                             message=(f"Moon {illum*100:.0f}% illum, "
                                        f"alt {moon_alt:.0f}°. "
@@ -379,9 +422,6 @@ class Critic(BaseAgent):
                             source="critic", at=now_iso,
                             suggested_constraint="avoid_moon",
                         ))
-                    # If moon is up + bright but no close targets, that's
-                    # a non-event; we skip the noisy "no impact" advisory
-                    # the old pipeline emitted.
 
         # 3. Hardware — reuse the cached snapshot from routes
         try:
@@ -396,23 +436,30 @@ class Critic(BaseAgent):
                     message=f"Disconnected: {', '.join(offline)}",
                     source="critic", at=now_iso,
                 )
-                review.add_advisory(adv)
+                _add(adv)
                 criticals.append(adv)
         except Exception:
             pass
 
-        # Persist the augmented plan so the dashboard renders advisories
-        get_state().set_session_review(review.to_jsonable())
+        # Atomic append — survives concurrent writes from Oracle's
+        # parallel advisory pass against the same plan.
+        from dataclasses import asdict
+        accepted = get_state().append_advisories(
+            review_id,
+            [asdict(a) for a in my_advisories],
+        )
+        if not accepted:
+            self.log.info("plan %s already rotated; advisories discarded",
+                          review_id)
 
         # Notify the Operator ONLY for critical advisories — those are
-        # the ones that might warrant a hard-stop. Warnings + info just
-        # surface on the dashboard.
+        # the ones that might warrant a hard-stop.
         if criticals:
             await self.send(
                 AgentName.OPERATOR, AgentMessageKind.STATUS,
                 payload={
                     "kind": "critical_advisories",
-                    "review_id": review.review_id,
+                    "review_id": review_id,
                     "advisory_count": len(criticals),
                     "advisories": [{
                         "kind": a.kind, "severity": a.severity,
@@ -420,14 +467,17 @@ class Critic(BaseAgent):
                     } for a in criticals],
                     "summary": (f"{len(criticals)} critical "
                                   f"advisor{'ies' if len(criticals) > 1 else 'y'} "
-                                  f"on plan {review.review_id}"),
+                                  f"on plan {review_id}"),
                 },
             )
-        counts = review.severity_counts()
+        sev_counts = {"info": 0, "warning": 0, "critical": 0}
+        for adv in my_advisories:
+            if adv.severity in sev_counts:
+                sev_counts[adv.severity] += 1
         self.set_task(
-            f"plan {review.review_id} reviewed: "
-            f"{counts['critical']} crit / {counts['warning']} warn / "
-            f"{counts['info']} info",
+            f"plan {review_id} reviewed: "
+            f"{sev_counts['critical']} crit / {sev_counts['warning']} warn / "
+            f"{sev_counts['info']} info",
             state="idle",
         )
 

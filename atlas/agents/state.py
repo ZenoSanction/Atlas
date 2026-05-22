@@ -271,6 +271,51 @@ class _ObservatoryState:
         with self._lock:
             return self._session_review
 
+    def append_advisories(self, review_id: str,
+                            advisories: list[dict]) -> bool:
+        """Atomically append advisories to the live session_review.
+
+        Multiple agents (Critic, Oracle) file advisories concurrently
+        against the same plan. Without atomic append they race —
+        each agent reads the bare plan, adds its own, writes back,
+        and the slower writer overwrites the faster one. This method
+        holds the lock for the full read-modify-write so both
+        agents' findings survive.
+
+        Only modifies the live review if its review_id matches.
+        Returns True if the append happened, False if the live
+        review has rotated to a newer plan (in which case the
+        caller's advisories are stale and discarded)."""
+        with self._lock:
+            current = self._session_review
+            if current is None:
+                return False
+            if current.get("review_id") != review_id:
+                return False
+            adv_list = current.get("advisories") or []
+            adv_list.extend(advisories)
+            current["advisories"] = adv_list
+            # Recompute the severity counts the dashboard reads.
+            counts = {"info": 0, "warning": 0, "critical": 0}
+            for a in adv_list:
+                s = a.get("severity")
+                if s in counts:
+                    counts[s] += 1
+            current["advisory_counts"] = counts
+            # Add history entries for each new advisory so the
+            # audit trail captures both agents' contributions.
+            history = current.get("history") or []
+            for a in advisories:
+                history.append({
+                    "kind": "advisory",
+                    "at": a.get("at"),
+                    "source": a.get("source"),
+                    "severity": a.get("severity"),
+                    "message": (a.get("message") or "")[:160],
+                })
+            current["history"] = history
+            return True
+
     # Per-agent inbox + outbox (sticky relay visibility) --------------------
     def push_inbox(self, agent: str, item: dict, limit: int = 8) -> None:
         with self._lock:
