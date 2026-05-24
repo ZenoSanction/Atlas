@@ -168,6 +168,81 @@ class Planner(BaseAgent):
     # finalise after the fact — the plan was already final when it was
     # built.
 
+    async def _publish_empty_plan_with_advisory(self, *,
+                                                       reason: str,
+                                                       advisory_kind: str,
+                                                       advisory_severity: str,
+                                                       advisory_msg: str) -> None:
+        """Publish a minimal READY plan with one inline advisory.
+
+        Used when the Planner can't compute visibility (no site config,
+        etc.) but still must produce a plan so the dashboard never sits
+        with "no plan". Per operator principle ("I always want a session
+        planned and created no matter the warnings or no-gos") this is
+        the catch-all that keeps the workflow moving even on hard
+        configuration errors — the human sees the advisory and knows
+        exactly what to fix."""
+        from atlas.agents.session_workflow import (
+            Advisory, SessionPlanState, new_review_id, STATE_READY,
+        )
+        from datetime import datetime as _dt
+        now_str = _dt.utcnow().isoformat(timespec="seconds") + "Z"
+        plan = {
+            "built_at": now_str,
+            "reason": reason,
+            "active_campaigns": 0,
+            "visible_targets": [],
+            "considered": [],
+            "considered_count": 0,
+            "unscheduled": [],
+            "scheduled_total_min": 0.0,
+            "dark_window_min": None,
+            "overruns_dark_window": False,
+            "fit_strategy": "depth",
+            "skipped_below_horizon": 0,
+            "skipped_no_coords": 0,
+            "horizon_alt_min_deg": None,
+            "window": None,
+            "day_phase": None,
+            "fallback_to_catalog": False,
+            "applied_constraints": [],
+            "blocked_reason": advisory_msg,
+        }
+        get_state().set_tonight_plan(plan)
+        review = SessionPlanState(
+            review_id=new_review_id(),
+            plan=plan,
+            started_at=now_str,
+            state=STATE_READY,
+        )
+        review.add_advisory(Advisory(
+            kind=advisory_kind, severity=advisory_severity,
+            message=advisory_msg, source="planner", at=now_str,
+        ))
+        get_state().set_session_review(review.to_jsonable())
+        try:
+            await self.bus.broadcast_event({
+                "type": "plan_update",
+                "sender": "planner",
+                "kind": "plan_rebuild",
+                "visible": 0,
+                "considered": 0,
+                "active_campaigns": 0,
+                "fallback_to_catalog": False,
+                "scheduled_total_min": 0.0,
+                "dark_window_min": None,
+                "overruns_dark_window": False,
+                "reason": reason,
+                "blocked_reason": advisory_msg,
+                "sent_at": now_str,
+            })
+        except Exception:
+            pass
+        self.set_task(f"plan published with {advisory_severity} advisory: "
+                        f"{advisory_msg[:50]}",
+                        state="waiting")
+        self.log.info("Published empty plan with advisory: %s", advisory_msg)
+
     async def _cancel_session(self, *, reason: str,
                                 from_review: dict | None = None) -> None:
         """Terminate the current workflow with a cancellation. Used when:
@@ -230,11 +305,22 @@ class Planner(BaseAgent):
         self.set_task(f"rebuilding plan ({reason})", state="working")
         site = ConfigManager.get_site()
         if site is None:
-            # Site config missing — can't plan anything. End the session
-            # rather than silently doing nothing.
-            self.log.warning("rebuild_plan: no site config; cancelling session")
-            await self._cancel_session(
-                reason="No observatory site configured. Open Setup → Site to fix.")
+            # Site config missing — we can't compute visibility, but per
+            # the operator's principle ("I always want a session planned
+            # and created no matter the warnings or no-gos") we still
+            # publish a READY plan with a clear advisory rather than
+            # cancelling. The dashboard always shows a plan exists; the
+            # human sees exactly why it's empty.
+            self.log.warning("rebuild_plan: no site config; publishing "
+                              "empty plan with site-missing advisory")
+            await self._publish_empty_plan_with_advisory(
+                reason=reason,
+                advisory_kind="config_missing",
+                advisory_severity="critical",
+                advisory_msg=("No observatory site configured. "
+                                "Open Setup → Site to set latitude / longitude / "
+                                "horizon, then trigger a replan."),
+            )
             return
 
         lat = float(site.latitude)
@@ -625,11 +711,13 @@ class Planner(BaseAgent):
         self.set_task(summary + "; next sweep in ~30 min", state="waiting")
         self.log.info(summary)
 
-        # If the plan ended up empty — no active campaigns produced
-        # visible targets, the seasonal catalog also returned nothing —
-        # there's no point in relaying to the Critic. End the session
-        # here per the operator's workflow ("the planner either ends
-        # planning for the session, or if possible he re-plans").
+        # Empty-plan advisory: if no visible targets, attach a clear
+        # explanation but STILL publish the plan as READY. Per the
+        # operator's principle ("I always want a session planned and
+        # created no matter the warnings or no-gos"), the Planner
+        # never cancels a session on its own — that's an explicit
+        # operator action via the cancel_session tool only.
+        empty_plan_advisory: dict | None = None
         if not full:
             constraint_note = ""
             if applied_constraints:
@@ -639,16 +727,23 @@ class Planner(BaseAgent):
                               f"Active campaigns: {len(campaigns)}, "
                               f"skipped below horizon: {skipped_below_horizon}, "
                               f"skipped no coords: {skipped_no_coords}.")
-            await self._cancel_session(reason=empty_reason)
-            return
+            empty_plan_advisory = {
+                "kind": "empty_plan",
+                "severity": "warning",
+                "message": empty_reason,
+                "source": "planner",
+            }
+            self.log.info("rebuild_plan: empty target list — publishing "
+                            "READY plan with empty_plan advisory")
 
         # Plan is READY the moment it's built. No multi-stage gated
         # approval pipeline — the operator wants the plan immediately,
         # with checks running asynchronously as advisories.
         try:
             from atlas.agents.session_workflow import (
-                SessionPlanState, new_review_id, STATE_READY,
+                Advisory, SessionPlanState, new_review_id, STATE_READY,
             )
+            from datetime import datetime as _dt
             top_names = [t["target_name"] for t in scheduled[:5]]
             review = SessionPlanState(
                 review_id=new_review_id(),
@@ -656,6 +751,17 @@ class Planner(BaseAgent):
                 started_at=plan["built_at"],
                 state=STATE_READY,
             )
+            # Attach the empty-plan advisory inline so the dashboard
+            # shows it with the very first READY publish (don't wait
+            # for Critic/Oracle to add their own).
+            if empty_plan_advisory is not None:
+                review.add_advisory(Advisory(
+                    kind=empty_plan_advisory["kind"],
+                    severity=empty_plan_advisory["severity"],
+                    message=empty_plan_advisory["message"],
+                    source=empty_plan_advisory["source"],
+                    at=_dt.utcnow().isoformat(timespec="seconds") + "Z",
+                ))
             # Publish READY immediately so the dashboard's Plan tab can
             # render. Critic + Oracle will append advisories afterward.
             get_state().set_session_review(review.to_jsonable())
