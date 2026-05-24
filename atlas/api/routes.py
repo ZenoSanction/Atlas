@@ -1230,6 +1230,48 @@ async def plan_tonight() -> dict:
     return {"plan": plan}
 
 
+@api_router.get("/plan/diagnose")
+async def plan_diagnose() -> dict:
+    """Observability endpoint for "why is the Plan tab empty?"
+
+    Reports whether the Planner agent is running, whether it has
+    published a plan since boot, the last-rebuild timestamp, and the
+    session-review state. If the dashboard shows no plan, hit this
+    endpoint first — it tells you exactly which stage failed."""
+    from atlas.agents.coordinator import get_coordinator
+    from atlas.agents.state import get_state
+    from atlas.db.models import AgentName
+    coord = get_coordinator()
+    status = coord.status()
+    try:
+        planner = coord.get(AgentName.PLANNER)
+        planner_initial_done = bool(getattr(planner, "_initial_done", False))
+        last_rebuild_t = float(getattr(planner, "_last_rebuild", 0.0))
+    except Exception:
+        planner_initial_done = False
+        last_rebuild_t = 0.0
+    state = get_state()
+    plan = state.get_tonight_plan()
+    review = state.get_session_review() or {}
+    return {
+        "planner_running": bool(status.get("planner", {}).get("running")),
+        "planner_safe_mode": bool(status.get("planner", {}).get("safe_mode")),
+        "planner_initial_rebuild_done": planner_initial_done,
+        "last_rebuild_monotonic": last_rebuild_t,
+        "tonight_plan_present": plan is not None,
+        "tonight_plan_built_at": (plan or {}).get("built_at"),
+        "tonight_plan_visible_count":
+            len((plan or {}).get("visible_targets") or []),
+        "tonight_plan_active_campaigns":
+            (plan or {}).get("active_campaigns"),
+        "tonight_plan_blocked_reason":
+            (plan or {}).get("blocked_reason"),
+        "session_review_state": review.get("state"),
+        "session_review_advisory_count": len(review.get("advisories") or []),
+        "session_review_advisories": (review.get("advisories") or [])[:5],
+    }
+
+
 # ============================================================================
 # Agent activity (post-session + research summaries)
 # ============================================================================

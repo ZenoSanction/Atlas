@@ -73,11 +73,30 @@ class Planner(BaseAgent):
         self.set_task("planner online — building first nightly plan",
                       state="working")
 
-        # Force an initial rebuild on startup so the Plan tab has data
+        # Force an initial rebuild on startup so the Plan tab has data.
+        # Bulletproof: ANY exception still publishes a fallback empty
+        # plan with the error as an advisory, so the dashboard never
+        # sits with "no plan."
         try:
             await self._rebuild_plan(reason="startup")
-        except Exception:
-            self.log.exception("Initial plan rebuild failed")
+        except Exception as e:
+            self.log.exception("Initial plan rebuild failed — publishing "
+                                 "fallback empty plan with the error as an "
+                                 "advisory so the Plan tab is never empty")
+            try:
+                await self._publish_empty_plan_with_advisory(
+                    reason="startup_failed",
+                    advisory_kind="planner_error",
+                    advisory_severity="critical",
+                    advisory_msg=(f"Plan rebuild crashed on startup: "
+                                    f"{type(e).__name__}: {e}. "
+                                    f"Check the Planner log for the full trace, "
+                                    f"then trigger a manual replan."),
+                )
+            except Exception:
+                self.log.exception("Fallback empty-plan publish ALSO failed "
+                                     "— this is a serious bug; agent will "
+                                     "continue but the Plan tab will be empty")
         self._initial_done = True
         self._last_rebuild = asyncio.get_event_loop().time()
 
