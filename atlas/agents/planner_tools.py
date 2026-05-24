@@ -84,6 +84,56 @@ async def _seasonal_showcase(p: dict) -> dict:
     return {"month": month, "count": len(entries), "entries": entries}
 
 
+async def _rebuild_plan(p: dict) -> dict:
+    """Trigger the Planner to (re)build the plan right now and publish it
+    to the Plan tab. This is the *write* counterpart to get_tonight_plan."""
+    reason = (p.get("reason") or "operator_chat_request").strip() or "operator_chat_request"
+    try:
+        from atlas.agents.coordinator import get_coordinator
+        from atlas.db.models import AgentName
+        planner = get_coordinator().get(AgentName.PLANNER)
+    except Exception as e:
+        return {"error": f"Planner agent not available: {e}"}
+    # Drive the same rebuild path the periodic loop uses; identical
+    # bulletproofing applies (any exception still publishes a
+    # fallback empty plan with the error as an advisory).
+    try:
+        await planner._rebuild_plan(reason=reason)
+    except Exception as e:
+        try:
+            await planner._publish_empty_plan_with_advisory(
+                reason=f"chat_tool_failed:{reason}",
+                advisory_kind="planner_error",
+                advisory_severity="critical",
+                advisory_msg=(f"Chat-tool-triggered rebuild crashed: "
+                                f"{type(e).__name__}: {e}. Fallback empty "
+                                f"plan published so the Plan tab is never empty."),
+            )
+        except Exception:
+            return {"ok": False,
+                      "error": f"Rebuild crashed AND fallback publish "
+                                  f"failed: {type(e).__name__}: {e}"}
+        return {"ok": False, "error": f"Rebuild crashed: {type(e).__name__}: {e}",
+                  "fallback_published": True}
+    # Read back what got published so the LLM can summarize it
+    from atlas.agents.state import get_state
+    plan = get_state().get_tonight_plan() or {}
+    review = get_state().get_session_review() or {}
+    return {
+        "ok": True,
+        "rebuilt": True,
+        "reason_used": reason,
+        "plan_built_at": plan.get("built_at"),
+        "active_campaigns": plan.get("active_campaigns"),
+        "visible_targets": len(plan.get("visible_targets") or []),
+        "considered_count": plan.get("considered_count"),
+        "review_state": review.get("state"),
+        "advisory_count": len(review.get("advisories") or []),
+        "message": ("Plan rebuilt and published to the Plan tab. "
+                      "Dashboard's Plan tab will reflect this immediately."),
+    }
+
+
 async def _cancel_session(p: dict) -> dict:
     """Look up the Planner agent at call time so this tool can live in the
     module-level PLANNER_TOOLS list (matching the other tools' pattern)
@@ -109,9 +159,25 @@ PLANNER_TOOLS: list[ToolSpec] = [
     ToolSpec("get_tonight_plan",
              "Get the Planner's current tonight plan: visible targets, "
              "active campaigns count, dark-window times, fallback status. "
-             "This is the same data the dashboard's Plan tab shows.",
+             "This is the same data the dashboard's Plan tab shows. "
+             "READ-ONLY — use rebuild_plan to actually (re)build and "
+             "publish a plan to the Plan tab.",
              {"type": "object", "properties": {}},
              _get_tonight_plan),
+    ToolSpec("rebuild_plan",
+             "Rebuild the nightly plan NOW and publish it to the Plan tab. "
+             "This is the write counterpart to get_tonight_plan. Use when "
+             "the operator asks you to refresh / regenerate / publish a "
+             "plan, when campaigns have changed, or when you want to "
+             "incorporate new revisit candidates. ALWAYS publishes a plan "
+             "even on error (fallback empty plan with the error as an "
+             "advisory). Returns the rebuilt plan's summary stats.",
+             {"type": "object",
+              "properties": {
+                  "reason": {"type": "string",
+                              "description": "Short audit reason for this rebuild (e.g. 'operator chat request', 'new campaign added'). Optional."},
+              }},
+             _rebuild_plan),
     ToolSpec("get_night_window",
              "Get tonight's astronomical dark window (sun below -12°) at "
              "the configured site. Returns dusk_utc, dawn_utc, and hours.",
