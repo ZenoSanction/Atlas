@@ -141,6 +141,14 @@ class _ObservatoryState:
         # Inter-agent message ring buffer for the live flow column
         self._message_flow: list[dict] = []
         self._max_messages = 80
+        # Per-message lifecycle status (delivered → processing →
+        # done/failed). Keyed by Message.id. Capped at ~200 entries
+        # via FIFO eviction on insert. The dashboard renders this
+        # as a pill next to each message-flow row so the operator
+        # can see WHERE a message got stuck.
+        self._message_status: dict[str, dict] = {}
+        self._message_status_order: list[str] = []
+        self._max_message_status = 200
         # Latest comprehensive session-readiness pre-flight assessment.
         # The Operator runs this every 2 min and publishes the result here;
         # the dashboard's Session Readiness panel + the API both read it.
@@ -257,6 +265,57 @@ class _ObservatoryState:
         with self._lock:
             self._message_flow.insert(0, message)
             self._message_flow = self._message_flow[:self._max_messages]
+
+    # Per-message lifecycle tracking ---------------------------------------
+    def set_message_status(self, message_id: str, status: str,
+                              **details) -> None:
+        """Update a message's lifecycle status.
+
+        Status values used by the bus + agents:
+          delivered  — bus put it on the recipient's queue
+          processing — recipient's recv() returned it; handler started
+          done       — handler returned normally
+          failed     — handler raised an exception (error= field carries reason)
+
+        Cap-and-evict: when the dict grows past _max_message_status,
+        drop the oldest entry to keep memory bounded."""
+        if not message_id:
+            return
+        from datetime import datetime as _dt
+        with self._lock:
+            existing = self._message_status.get(message_id) or {}
+            existing.update(details)
+            existing["status"] = status
+            existing["updated_at"] = _dt.utcnow().isoformat(timespec="seconds") + "Z"
+            history = existing.get("history") or []
+            history.append({
+                "status": status,
+                "at": existing["updated_at"],
+            })
+            existing["history"] = history[-10:]   # cap timeline depth
+            self._message_status[message_id] = existing
+            if message_id in self._message_status_order:
+                self._message_status_order.remove(message_id)
+            self._message_status_order.append(message_id)
+            # Evict oldest
+            while len(self._message_status_order) > self._max_message_status:
+                oldest = self._message_status_order.pop(0)
+                self._message_status.pop(oldest, None)
+
+    def get_message_status(self, message_id: str) -> dict | None:
+        with self._lock:
+            return dict(self._message_status.get(message_id) or {}) or None
+
+    def get_message_status_map(self, ids: list[str]) -> dict[str, dict]:
+        """Bulk lookup — used by the message-flow API to enrich every
+        flow row in one pass without N separate dict accesses."""
+        out: dict[str, dict] = {}
+        with self._lock:
+            for mid in ids:
+                v = self._message_status.get(mid)
+                if v is not None:
+                    out[mid] = dict(v)
+        return out
 
     def get_message_flow(self, limit: int = 80) -> list[dict]:
         with self._lock:

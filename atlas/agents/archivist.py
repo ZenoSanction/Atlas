@@ -60,14 +60,20 @@ class Archivist(BaseAgent):
                     msg = await self.recv()
                 except (asyncio.CancelledError, RuntimeError):
                     break
-                if msg.kind == AgentMessageKind.POST_SESSION:
-                    self.set_task(f"processing session {msg.session_id}",
-                                  state="working")
-                    await self._process_session(msg)
-                    self.set_task("session archived — standing by",
-                                  state="idle")
-                else:
-                    await self.handle_relayed_message(msg)
+                try:
+                    if msg.kind == AgentMessageKind.POST_SESSION:
+                        self.set_task(f"processing session {msg.session_id}",
+                                      state="working")
+                        await self._process_session(msg)
+                        self.set_task("session archived — standing by",
+                                      state="idle")
+                    else:
+                        await self.handle_relayed_message(msg)
+                    self._mark_msg_handled(msg, ok=True)
+                except Exception as e:
+                    self.log.exception("Archivist failed handling message")
+                    self._mark_msg_handled(msg, ok=False,
+                                              error=f"{type(e).__name__}: {e}")
         finally:
             heartbeat_task.cancel()
             try:

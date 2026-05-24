@@ -1363,8 +1363,41 @@ async def mission_control() -> dict:
         "manual_control": mc.to_jsonable(),
         "weather_monitor": weather_monitor,
         "agents": agents,
-        "message_flow": st.get_message_flow(limit=40),
+        "message_flow": _enrich_message_flow_with_status(
+            st.get_message_flow(limit=40), st),
     }
+
+
+def _enrich_message_flow_with_status(flow: list[dict], st) -> list[dict]:
+    """Annotate each message-flow row with its lifecycle status.
+
+    Each row keeps its existing sender / recipient / kind / payload /
+    sent_at fields and gets a new `lifecycle` block:
+      {status: "delivered"|"processing"|"done"|"failed",
+       updated_at: ISO, error: optional}
+
+    The dashboard renders this as a pill so the operator can see
+    WHERE a message got stuck. Pure-read; never modifies state."""
+    ids = [m.get("id") for m in flow if m.get("id")]
+    if not ids:
+        return flow
+    status_map = st.get_message_status_map(ids)
+    out: list[dict] = []
+    for m in flow:
+        mid = m.get("id")
+        s = status_map.get(mid) if mid else None
+        if s:
+            row = dict(m)
+            row["lifecycle"] = {
+                "status": s.get("status"),
+                "updated_at": s.get("updated_at"),
+                "error": s.get("error"),
+                "processed_by": s.get("processed_by"),
+            }
+            out.append(row)
+        else:
+            out.append(m)
+    return out
 
 
 @api_router.get("/agents/{agent_name}/state")

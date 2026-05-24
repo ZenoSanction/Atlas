@@ -151,15 +151,33 @@ export async function refreshMissionControl(api) {
   if (flow) {
     const items = mc.message_flow || [];
     flow.innerHTML = items.length
-      ? items.map(m => `
+      ? items.map(m => {
+          const lc = m.lifecycle || {};
+          const status = (lc.status || "sent").toLowerCase();
+          const lcCls = {
+            delivered:  "lc-delivered",
+            processing: "lc-processing",
+            done:       "lc-done",
+            failed:     "lc-failed",
+          }[status] || "lc-unknown";
+          const lcLabel = {
+            delivered:  "delivered",
+            processing: "processing…",
+            done:       "done",
+            failed:     "failed",
+          }[status] || status;
+          const errTip = lc.error ? ` title="${esc(lc.error)}"` : "";
+          return `
           <div class="flow-item">
             <span class="ts">${fmtClock(m.sent_at)}</span>
             <span class="who">${esc(m.sender || "system")}</span>
             →
             <span class="who">${esc(m.recipient || "—")}</span>
             <span class="kind">[${esc(m.kind || "")}]</span>
+            <span class="lc-pill ${lcCls}"${errTip}>${esc(lcLabel)}</span>
             <span class="flow-snippet">${esc(payloadSnippet(m.payload))}</span>
-          </div>`).join("")
+          </div>`;
+        }).join("")
       : '<div class="empty">no messages yet</div>';
   }
 }

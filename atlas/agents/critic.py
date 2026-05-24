@@ -267,8 +267,11 @@ class Critic(BaseAgent):
                 break
             try:
                 await self._handle_relay(msg)
-            except Exception:
+                self._mark_msg_handled(msg, ok=True)
+            except Exception as e:
                 self.log.exception("Critic relay handler failed")
+                self._mark_msg_handled(msg, ok=False,
+                                          error=f"{type(e).__name__}: {e}")
 
     async def _handle_relay(self, msg) -> None:
         """Inbound relay handler. Surfaces the message + dispatches:

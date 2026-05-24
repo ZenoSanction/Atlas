@@ -68,78 +68,87 @@ class Oracle(BaseAgent):
                     msg = await self.recv()
                 except (asyncio.CancelledError, RuntimeError):
                     break
-                if msg.kind == AgentMessageKind.NEW_DATA:
-                    self.set_task(
-                        f"new data received — session {msg.payload.get('session_id')}",
-                        state="working")
-                    await self._handle_new_data(msg)
-                    self.set_task("research pass complete — standing by",
-                                  state="idle")
-                elif (msg.kind == AgentMessageKind.STATUS
-                      and (msg.payload or {}).get("kind") == "plan_review"
-                      and (msg.payload or {}).get("phase") == "oracle"
-                      and (msg.payload or {}).get("review")):
-                    # Stage 4 — Oracle auto-opens the plan, evaluates
-                    # each target against the knowledge-thread + frame
-                    # history for revisit / extended-integration
-                    # suggestions, then returns the chain to the Planner.
-                    payload = msg.payload
-                    plan_preview = (payload.get("review") or {}).get("plan") or {}
-                    n = len(plan_preview.get("visible_targets") or [])
-                    self.set_task(
-                        f"Stage 4/5: Oracle auto-reviewing plan "
-                        f"({n} target(s)) — revisit + integration",
-                        state="working",
-                    )
-                    try:
-                        from datetime import datetime as _dt
-                        await self.bus.broadcast_event({
-                            "type": "review_chain_stage",
-                            "sender": "oracle",
-                            "stage": "4/5",
-                            "agent": "oracle",
-                            "phase": "oracle",
-                            "review_id": payload.get("review_id"),
-                            "n_targets": n,
-                            "sent_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
-                        })
-                    except Exception:
-                        pass
-                    await self._file_revisit_advisories(payload["review"])
-                    try:
-                        from atlas.agents.state import get_state
-                        get_state().set_review_phase(
-                            "finalizing", review_id=payload.get("review_id"))
-                        await self.send(
-                            AgentName.PLANNER, AgentMessageKind.STATUS,
-                            payload={
-                                "summary": ("Oracle review-chain stage "
-                                              "complete — chain returning "
-                                              "to Planner for FINAL "
-                                              "publication."),
-                                "kind": "plan_review",
-                                "phase": "finalize",
-                                "review_id": payload.get("review_id"),
-                                "review": payload.get("review"),
-                            },
-                        )
-                    except Exception:
-                        self.log.exception("Failed to send chain back "
-                                              "to Planner finalize stage")
-                elif (msg.kind == AgentMessageKind.STATUS
-                      and (msg.payload or {}).get("kind") == "plan_advisory_request"
-                      and (msg.payload or {}).get("review")):
-                    # Legacy parallel-fanout path (no chain) — still
-                    # supported. File advisories, don't forward.
-                    await self._file_revisit_advisories(msg.payload["review"])
-                else:
-                    await self.handle_relayed_message(msg)
+                try:
+                    await self._dispatch_msg(msg)
+                    self._mark_msg_handled(msg, ok=True)
+                except Exception as e:
+                    self.log.exception("Oracle dispatch failed")
+                    self._mark_msg_handled(msg, ok=False,
+                                              error=f"{type(e).__name__}: {e}")
         finally:
             periodic_task.cancel()
             try:
                 await periodic_task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    async def _dispatch_msg(self, msg) -> None:
+        """Inner dispatch — keeps the try/except in the outer loop
+        simple so lifecycle status (done/failed) is uniformly applied."""
+        if msg.kind == AgentMessageKind.NEW_DATA:
+            self.set_task(
+                f"new data received — session {msg.payload.get('session_id')}",
+                state="working")
+            await self._handle_new_data(msg)
+            self.set_task("research pass complete — standing by",
+                              state="idle")
+            return
+        if (msg.kind == AgentMessageKind.STATUS
+              and (msg.payload or {}).get("kind") == "plan_review"
+              and (msg.payload or {}).get("phase") == "oracle"
+              and (msg.payload or {}).get("review")):
+            # Stage 4 — Oracle auto-opens the plan, evaluates each
+            # target against the knowledge-thread + frame history for
+            # revisit / extended-integration suggestions, then returns
+            # the chain to the Planner.
+            payload = msg.payload
+            plan_preview = (payload.get("review") or {}).get("plan") or {}
+            n = len(plan_preview.get("visible_targets") or [])
+            self.set_task(
+                f"Stage 4/5: Oracle auto-reviewing plan "
+                f"({n} target(s)) — revisit + integration",
+                state="working",
+            )
+            try:
+                from datetime import datetime as _dt
+                await self.bus.broadcast_event({
+                    "type": "review_chain_stage",
+                    "sender": "oracle", "stage": "4/5", "agent": "oracle",
+                    "phase": "oracle",
+                    "review_id": payload.get("review_id"),
+                    "n_targets": n,
+                    "sent_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+                })
+            except Exception:
+                pass
+            await self._file_revisit_advisories(payload["review"])
+            try:
+                from atlas.agents.state import get_state
+                get_state().set_review_phase(
+                    "finalizing", review_id=payload.get("review_id"))
+                await self.send(
+                    AgentName.PLANNER, AgentMessageKind.STATUS,
+                    payload={
+                        "summary": ("Oracle review-chain stage complete — "
+                                      "chain returning to Planner for FINAL "
+                                      "publication."),
+                        "kind": "plan_review",
+                        "phase": "finalize",
+                        "review_id": payload.get("review_id"),
+                        "review": payload.get("review"),
+                    },
+                )
+            except Exception:
+                self.log.exception("Failed to send chain back to Planner "
+                                      "finalize stage")
+            return
+        if (msg.kind == AgentMessageKind.STATUS
+              and (msg.payload or {}).get("kind") == "plan_advisory_request"
+              and (msg.payload or {}).get("review")):
+            # Legacy parallel-fanout path (no chain) — still supported.
+            await self._file_revisit_advisories(msg.payload["review"])
+            return
+        await self.handle_relayed_message(msg)
 
     async def _periodic_research_loop(self) -> None:
         """Sleep-and-research idle scan. Sleeps the full interval

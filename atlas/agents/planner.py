@@ -146,31 +146,36 @@ class Planner(BaseAgent):
                 except (asyncio.CancelledError, RuntimeError):
                     break
 
-                if msg.kind == AgentMessageKind.REVISION_REQUEST:
-                    await self._handle_revision(msg)
-                elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
-                    # Oracle (or another agent) proposes a target. Log + rebuild.
-                    self.set_task(
-                        f"received candidate target — {(msg.payload or {}).get('summary', '')[:60]}",
-                        state="working")
-                    self.log_decision("candidate_received",
-                                        inputs={"sender": str(msg.sender),
-                                                  "payload": msg.payload},
-                                        rationale="Phase-1 stub: log + rebuild plan",
-                                        session_id=msg.session_id)
-                    try:
-                        await self._rebuild_plan(reason="candidate_target")
-                    except Exception:
-                        self.log.exception("Plan rebuild on candidate failed")
-                elif (msg.kind == AgentMessageKind.STATUS
-                        and (msg.payload or {}).get("kind") == "plan_review"
-                        and (msg.payload or {}).get("phase") == "finalize"):
-                    # Stage 5 — chain returns from Oracle. Republish
-                    # the plan as FINAL with all accumulated advisories
-                    # incorporated. The Plan tab updates within a tick.
-                    await self._finalize_review_chain(msg.payload)
-                else:
-                    await self.handle_relayed_message(msg)
+                try:
+                    if msg.kind == AgentMessageKind.REVISION_REQUEST:
+                        await self._handle_revision(msg)
+                    elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
+                        # Oracle (or another agent) proposes a target.
+                        self.set_task(
+                            f"received candidate target — {(msg.payload or {}).get('summary', '')[:60]}",
+                            state="working")
+                        self.log_decision("candidate_received",
+                                            inputs={"sender": str(msg.sender),
+                                                      "payload": msg.payload},
+                                            rationale="Phase-1 stub: log + rebuild plan",
+                                            session_id=msg.session_id)
+                        try:
+                            await self._rebuild_plan(reason="candidate_target")
+                        except Exception:
+                            self.log.exception("Plan rebuild on candidate failed")
+                    elif (msg.kind == AgentMessageKind.STATUS
+                            and (msg.payload or {}).get("kind") == "plan_review"
+                            and (msg.payload or {}).get("phase") == "finalize"):
+                        # Stage 5 — chain returns from Oracle. Republish
+                        # the plan as FINAL.
+                        await self._finalize_review_chain(msg.payload)
+                    else:
+                        await self.handle_relayed_message(msg)
+                    self._mark_msg_handled(msg, ok=True)
+                except Exception as e:
+                    self.log.exception("Planner failed handling message")
+                    self._mark_msg_handled(msg, ok=False,
+                                              error=f"{type(e).__name__}: {e}")
         finally:
             periodic_task.cancel()
             try:

@@ -111,9 +111,12 @@ class Operator(BaseAgent):
                     sender = msg.sender.value if hasattr(msg.sender, "value") else str(msg.sender)
                     self.set_task(f"processing {kind} from {sender}", state="working")
                     await self._handle(msg)
+                    self._mark_msg_handled(msg, ok=True)
                     self.set_task("standing by — last action handled", state="idle")
-                except Exception:
+                except Exception as e:
                     self.log.exception("Operator failed handling message: %s", msg.kind)
+                    self._mark_msg_handled(msg, ok=False,
+                                              error=f"{type(e).__name__}: {e}")
                     self.set_task("error handling last message — see log",
                                   state="idle")
         finally:

@@ -17,6 +17,7 @@ subscribers get garbage-collected instead of silently leaking memory.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Any, AsyncIterator, Optional
@@ -51,9 +52,15 @@ class Message:
     payload: dict = field(default_factory=dict)
     session_id: Optional[int] = None
     sent_at: datetime = field(default_factory=datetime.utcnow)
+    # Short unique id so the dashboard can track each message's
+    # delivery lifecycle (delivered → processing → done/failed).
+    # 12 hex chars = ~48 bits, enough uniqueness for the ~40-entry
+    # message-flow ring buffer without bloating event payloads.
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def to_jsonable(self) -> dict:
         return {
+            "id": self.id,
             "sender": self.sender.value if hasattr(self.sender, "value") else str(self.sender),
             "recipient": self.recipient.value if hasattr(self.recipient, "value") else str(self.recipient),
             "kind": self.kind.value if hasattr(self.kind, "value") else str(self.kind),
@@ -98,6 +105,14 @@ class AgentBus:
             st = get_state()
             jsonable = msg.to_jsonable()
             st.push_message_flow(jsonable)
+            # Mark "delivered" — message is on the recipient's queue.
+            # The recipient's BaseAgent.recv loop will move it to
+            # "processing" when it pulls + "done"/"failed" after the
+            # handler runs.
+            st.set_message_status(msg.id, "delivered",
+                                     sender=jsonable["sender"],
+                                     recipient=jsonable["recipient"],
+                                     kind=jsonable["kind"])
             item = {
                 "sender": jsonable["sender"],
                 "recipient": jsonable["recipient"],

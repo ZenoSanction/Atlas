@@ -395,13 +395,57 @@ class BaseAgent(ABC):
         ))
 
     async def recv(self) -> Message:
-        return await self.bus.recv(self.name)
+        msg = await self.bus.recv(self.name)
+        # Lifecycle tracking: bus.send marked this "delivered" when it
+        # hit the queue; now that the recipient has actually pulled
+        # it off, mark "processing". The agent's main loop calls
+        # self._mark_msg_handled(msg, ok=True/False) after the handler
+        # to advance to "done" or "failed".
+        try:
+            from atlas.agents.state import get_state
+            mid = getattr(msg, "id", None)
+            if mid:
+                get_state().set_message_status(
+                    mid, "processing",
+                    processed_by=self.name.value if hasattr(self.name, "value") else str(self.name),
+                )
+        except Exception:
+            pass
+        return msg
 
     async def recv_with_timeout(self, timeout_s: float) -> Optional[Message]:
         try:
-            return await asyncio.wait_for(self.bus.recv(self.name), timeout=timeout_s)
+            msg = await asyncio.wait_for(self.bus.recv(self.name), timeout=timeout_s)
         except asyncio.TimeoutError:
             return None
+        try:
+            from atlas.agents.state import get_state
+            mid = getattr(msg, "id", None)
+            if mid:
+                get_state().set_message_status(
+                    mid, "processing",
+                    processed_by=self.name.value if hasattr(self.name, "value") else str(self.name),
+                )
+        except Exception:
+            pass
+        return msg
+
+    def _mark_msg_handled(self, msg, ok: bool = True,
+                              error: str | None = None) -> None:
+        """Call after a handler finishes. Sets status to 'done' or
+        'failed' so the dashboard's message-flow pill turns green/red."""
+        try:
+            from atlas.agents.state import get_state
+            mid = getattr(msg, "id", None)
+            if not mid:
+                return
+            if ok:
+                get_state().set_message_status(mid, "done")
+            else:
+                get_state().set_message_status(mid, "failed",
+                                                  error=(error or "")[:160])
+        except Exception:
+            pass
 
     # --- decisions ----------------------------------------------------------
 

@@ -560,6 +560,23 @@ footer .muted { color: var(--text-dim); }
   font-style: italic;
   font-weight: normal;
 }
+/* Lifecycle pill next to each message-flow row. Shows the message's
+   actual delivery state (delivered → processing → done/failed) so the
+   operator can see exactly where in the chain something got stuck. */
+.message-flow .lc-pill {
+  display: inline-block; margin-left: 6px;
+  padding: 1px 6px; border-radius: 8px;
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  border: 1px solid var(--line);
+}
+.message-flow .lc-pill.lc-delivered  { color: #cbd5e1; border-color: #475569; }
+.message-flow .lc-pill.lc-processing { color: #fbbf24; border-color: #f59e0b;
+                                        background: rgba(245, 158, 11, 0.10); }
+.message-flow .lc-pill.lc-done       { color: #4ade80; border-color: #16a34a;
+                                        background: rgba(22, 163, 74, 0.10); }
+.message-flow .lc-pill.lc-failed     { color: #f87171; border-color: #b91c1c;
+                                        background: rgba(127, 29, 29, 0.15); }
+.message-flow .lc-pill.lc-unknown    { color: var(--text-dim); }
 .message-flow .empty { color: var(--text-dim); font-style: italic; padding: 4px; }
 
 /* Session Readiness panel — sits between verdict banner and lanes */
