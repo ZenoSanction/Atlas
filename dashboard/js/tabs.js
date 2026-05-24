@@ -1,40 +1,48 @@
 // Tab switcher.
 //
-// Active tab is persisted to localStorage so a page refresh / hard
-// reload keeps the operator on whichever tab they were viewing.
-// Falls back to the default tab ("tonight") on first visit or if the
-// saved tab doesn't exist anymore.
+// Initial tab visibility is handled BEFORE this module runs:
+//   * Inline script in <head> reads localStorage and sets
+//     <html data-active-tab="…">
+//   * CSS in atlas.css uses that attribute to show only the matching
+//     panel; every other panel is display:none from first paint.
+//
+// So this module only needs to:
+//   * Wire click handlers
+//   * On click, update <html data-active-tab> + localStorage + active
+//     button class + call the tab's handler
+//   * On init, mark the active button + call the active tab's handler
+//     so the initial data fetch happens
+//
+// No JS-driven panel show/hide. No snap-back. Refresh stays on the
+// same tab cleanly with no flash through Tonight.
 
 const STORAGE_KEY = "atlas.activeTab";
 const DEFAULT_TAB = "tonight";
 
-function _setActive(name, handlers) {
+function _activateButton(name) {
   const tabs = document.querySelectorAll("#tabs .tab");
-  const panels = document.querySelectorAll("main .panel");
-  let matched = false;
-  tabs.forEach((t) => {
-    const isMe = t.dataset.tab === name;
-    if (isMe) matched = true;
-    t.classList.toggle("active", isMe);
-  });
-  panels.forEach((p) => p.classList.toggle("hidden", p.id !== `tab-${name}`));
-  if (matched) {
+  tabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+}
+
+function _persist(name) {
+  try {
+    localStorage.setItem(STORAGE_KEY, name);
+  } catch (_) {
+    // localStorage disabled (private browsing, etc.) — no-op
+  }
+}
+
+function _setActive(name, handlers) {
+  document.documentElement.setAttribute("data-active-tab", name);
+  _persist(name);
+  _activateButton(name);
+  if (handlers && handlers[name]) {
     try {
-      localStorage.setItem(STORAGE_KEY, name);
-    } catch (_) {
-      // localStorage may be disabled (private browsing, etc.) —
-      // fall through; the click-to-switch still works for the
-      // current session.
-    }
-    if (handlers && handlers[name]) {
-      try {
-        handlers[name](window.atlas?.api);
-      } catch (e) {
-        console.error(`tab handler ${name} threw:`, e);
-      }
+      handlers[name](window.atlas?.api);
+    } catch (e) {
+      console.error(`tab handler ${name} threw:`, e);
     }
   }
-  return matched;
 }
 
 export function initTabs(handlers) {
@@ -45,17 +53,25 @@ export function initTabs(handlers) {
     });
   });
 
-  // Restore last-active tab on initial load.
-  let want = DEFAULT_TAB;
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) want = saved;
-  } catch (_) {
-    // ignore
+  // Initial: the inline <head> script already set the correct
+  // data-active-tab + CSS already painted the right panel. We just
+  // need to mark the active button and call the tab's handler so
+  // data loads.
+  let active = document.documentElement.getAttribute("data-active-tab")
+                || DEFAULT_TAB;
+  // Verify the active tab actually exists as a button; if not, fall
+  // back. (Defensive — covers the edge case where localStorage holds
+  // a stale tab name from an older build.)
+  if (!document.querySelector(`#tabs .tab[data-tab="${active}"]`)) {
+    active = DEFAULT_TAB;
+    document.documentElement.setAttribute("data-active-tab", active);
   }
-  // _setActive returns false if the saved tab no longer exists
-  // (e.g. removed in a build) — fall back to default.
-  if (!_setActive(want, handlers) && want !== DEFAULT_TAB) {
-    _setActive(DEFAULT_TAB, handlers);
+  _activateButton(active);
+  if (handlers && handlers[active]) {
+    try {
+      handlers[active](window.atlas?.api);
+    } catch (e) {
+      console.error(`initial tab handler ${active} threw:`, e);
+    }
   }
 }

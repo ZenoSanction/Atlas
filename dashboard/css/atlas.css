@@ -103,6 +103,25 @@ main {
 
 .panel.hidden { display: none; }
 
+/* ---- Tab visibility driven by <html data-active-tab="…"> -------------
+   The inline script in <head> sets this attribute from localStorage
+   BEFORE the body paints. CSS hides every panel except the matching
+   one, so the page renders on the saved tab from the first frame —
+   no flash through Tonight, no JS-driven snap-back required.
+   Default (no/unknown attribute) falls back to Tonight. */
+main > .panel { display: none; }
+html[data-active-tab="tonight"]  main > #tab-tonight,
+html[data-active-tab="weather"]  main > #tab-weather,
+html[data-active-tab="plan"]     main > #tab-plan,
+html[data-active-tab="science"]  main > #tab-science,
+html[data-active-tab="history"]  main > #tab-history,
+html[data-active-tab="atlas"]    main > #tab-atlas,
+html[data-active-tab="setup"]    main > #tab-setup {
+  display: block;
+}
+/* Hard fallback: if no data-active-tab is set, show Tonight. */
+html:not([data-active-tab]) main > #tab-tonight { display: block; }
+
 h2 {
   margin: 0 0 16px 0;
   font-weight: 600;

@@ -4,6 +4,24 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ATLAS Dashboard</title>
+<!--
+  Inline tab-restore: runs BEFORE the body paints so the saved tab is
+  visible from the very first frame. No flash through Tonight. The
+  CSS rules in atlas.css consume the data-active-tab attribute and
+  show only the matching panel — no JS-driven snap-back required.
+-->
+<script>
+(function() {
+  var VALID = {
+    "tonight": 1, "weather": 1, "plan": 1, "science": 1,
+    "history": 1, "atlas": 1, "setup": 1,
+  };
+  var tab = "tonight";
+  try { tab = localStorage.getItem("atlas.activeTab") || "tonight"; } catch (_) {}
+  if (!VALID[tab]) tab = "tonight";
+  document.documentElement.setAttribute("data-active-tab", tab);
+})();
+</script>
 <link rel="stylesheet" href="/static/css/atlas.css">
 </head>
 <body>
@@ -343,7 +361,7 @@
   </section>
 
   <!-- WEATHER -->
-  <section class="panel hidden" id="tab-weather">
+  <section class="panel" id="tab-weather">
     <div class="row-spread">
       <h2>Weather</h2>
       <div>
@@ -378,7 +396,7 @@
   </section>
 
   <!-- PLAN -->
-  <section class="panel hidden" id="tab-plan">
+  <section class="panel" id="tab-plan">
     <div class="row-spread">
       <h2>Tonight's Targets</h2>
       <span id="plan-built" class="muted">—</span>
@@ -403,14 +421,14 @@
   </section>
 
   <!-- SCIENCE -->
-  <section class="panel hidden" id="tab-science">
+  <section class="panel" id="tab-science">
     <h2>Submission Queue</h2>
     <p class="hint">Every measurement queues here for your approval before it goes to MPC / AAVSO / TNS / NASA Exoplanet Watch.</p>
     <div id="submissions-list" class="list">Loading…</div>
   </section>
 
   <!-- HISTORY -->
-  <section class="panel hidden" id="tab-history">
+  <section class="panel" id="tab-history">
     <h2>Session History</h2>
     <div id="sessions-list" class="list">Loading…</div>
   </section>
@@ -441,7 +459,7 @@
   </div>
 
   <!-- ATLAS CHAT -->
-  <section class="panel hidden" id="tab-atlas">
+  <section class="panel" id="tab-atlas">
     <h2>ATLAS Chat</h2>
     <div id="chat-history" class="chat"></div>
     <form id="chat-form" class="chat-form">
@@ -452,7 +470,7 @@
   </section>
 
   <!-- SETUP -->
-  <section class="panel hidden" id="tab-setup">
+  <section class="panel" id="tab-setup">
     <h2>Setup</h2>
     <div id="setup-status" class="setup-status">Loading…</div>
 
