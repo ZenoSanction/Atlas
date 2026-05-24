@@ -1224,10 +1224,20 @@ async def save_weather_thresholds(body: dict) -> dict:
 async def plan_tonight() -> dict:
     """The Planner's latest visible-target list. Refreshed every 30 min and
     on REVISION_REQUEST from the Operator. Returns null when no plan exists
-    yet (e.g., no active campaigns, no site config)."""
+    yet (e.g., no active campaigns, no site config).
+
+    Also returns the session_review's advisories so the Plan tab can
+    surface the Planner's "why is this empty?" explanation inline,
+    not hidden in the verdict banner."""
     from atlas.agents.state import get_state
-    plan = get_state().get_tonight_plan()
-    return {"plan": plan}
+    st = get_state()
+    plan = st.get_tonight_plan()
+    review = st.get_session_review() or {}
+    return {
+        "plan": plan,
+        "review_state": review.get("state"),
+        "review_advisories": review.get("advisories") or [],
+    }
 
 
 @api_router.get("/plan/diagnose")

@@ -1258,10 +1258,17 @@ footer .muted { color: var(--text-dim); }
 .advisory-warning  { border-left-color: #f59e0b; }
 .advisory-critical { border-left-color: #b91c1c;
                       background: rgba(127,29,29,0.10); }
+/* Same colouring driven by the data-sev attribute we set on Plan-tab
+   advisories (no class-name swap needed). */
+.advisory[data-sev="info"]     { border-left-color: #38bdf8; }
+.advisory[data-sev="warning"]  { border-left-color: #f59e0b; }
+.advisory[data-sev="critical"] { border-left-color: #b91c1c;
+                                   background: rgba(127,29,29,0.10); }
 .advisory .adv-kind {
   font-weight: 600; text-transform: uppercase;
   font-size: 10px; color: var(--text-dim);
 }
+.advisory .adv-msg { color: var(--text); flex: 1; min-width: 200px; }
 .advisory .adv-sev { font-size: 10px; color: var(--text-dim); }
 
 

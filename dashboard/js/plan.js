@@ -18,17 +18,68 @@ async function renderTonightTargets(api) {
   try {
     const r = await api("/plan/tonight");
     const plan = r.plan;
+    const advisories = r.review_advisories || [];
+    const reviewState = r.review_state || "(none)";
+
+    // No plan in state at all — should never happen now that the
+    // Planner always publishes (startup, periodic, revision all
+    // wrapped). Keep the message as a last-ditch fallback.
     if (!plan) {
-      out.innerHTML = `<div class="empty">No plan yet. The Planner builds one on startup and every 30 minutes; if you've just installed, give it a moment. Need an active campaign with targets that have RA/Dec.</div>`;
+      out.innerHTML = `<div class="empty">No plan in shared state.
+        The Planner publishes on startup and every 30 minutes — if you've
+        just started ATLAS, give it a few seconds. Otherwise check
+        <a href="/api/plan/diagnose" target="_blank">/api/plan/diagnose</a>.
+      </div>`;
       stamp.textContent = "";
       return;
     }
+
     stamp.textContent = `built ${plan.built_at} (${plan.reason})`;
     const visible = plan.visible_targets || [];
-    if (visible.length === 0) {
-      out.innerHTML = `<div class="empty">
-        Active campaigns: ${plan.active_campaigns}. Skipped (below horizon ${plan.horizon_alt_min_deg}°): ${plan.skipped_below_horizon}. Skipped (no coords): ${plan.skipped_no_coords}. Nothing visible right now.
+
+    // Advisory strip — always shown when there's anything to say
+    // (empty_plan, planner_error, weather warnings, etc.).
+    let advisoryStrip = "";
+    if (advisories.length) {
+      const rows = advisories.map((a) => {
+        const sev = (a.severity || "info").toLowerCase();
+        const cls = sev === "critical" ? "warn-pill"
+                  : sev === "warning"  ? "muted-pill"
+                  : "ok-pill";
+        return `<div class="advisory" data-sev="${esc(sev)}">
+            <span class="${cls}">${esc(sev.toUpperCase())}</span>
+            <span class="adv-kind">${esc(a.kind || "")}</span>
+            <span class="adv-msg">${esc(a.message || "")}</span>
+            <span class="adv-sev muted">— ${esc(a.source || "")}</span>
+          </div>`;
+      }).join("");
+      advisoryStrip = `<div class="advisories" style="margin-bottom:12px">
+        <div class="hint" style="margin-bottom:6px"><b>Plan advisories
+        (${advisories.length}) · review state: ${esc(reviewState)}</b></div>
+        ${rows}
       </div>`;
+    }
+
+    // Empty visible list — surface that the plan was built but
+    // there's nothing to image right now. Show advisories + the
+    // considered-but-skipped counts so the operator sees WHY.
+    if (visible.length === 0) {
+      const blocked = plan.blocked_reason
+        ? `<div class="hint" style="margin-bottom:8px"><b>Reason:</b> ${esc(plan.blocked_reason)}</div>`
+        : "";
+      const counts = `<div class="hint">
+        Active campaigns: <b>${plan.active_campaigns ?? 0}</b> ·
+        Considered: <b>${plan.considered_count ?? 0}</b> ·
+        Skipped below horizon: <b>${plan.skipped_below_horizon ?? 0}</b> ·
+        Skipped (no coords): <b>${plan.skipped_no_coords ?? 0}</b>
+      </div>`;
+      out.innerHTML = advisoryStrip + blocked + counts +
+        `<div class="empty" style="margin-top:10px">
+          Plan is built and READY but no targets are visible / scheduled
+          right now. The Planner will rebuild on the next tick. Add or
+          enable campaigns to give it something to schedule, or check
+          horizon limits.
+        </div>`;
       return;
     }
 
@@ -107,9 +158,11 @@ async function renderTonightTargets(api) {
         </ul>
       </details>` : "";
 
-    out.innerHTML = policyStrip + head + rows + "</tbody></table>" + overflowSection;
+    out.innerHTML = advisoryStrip + policyStrip + head + rows + "</tbody></table>" + overflowSection;
   } catch (e) {
-    out.innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+    out.innerHTML = `<div class="empty">Error loading plan: ${esc(e.message)}
+      <br>Check <a href="/api/plan/diagnose" target="_blank">/api/plan/diagnose</a>
+      to see the Planner's status.</div>`;
   }
 }
 
