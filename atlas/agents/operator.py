@@ -549,9 +549,14 @@ class Operator(BaseAgent):
                 "autonomous": True,
                 "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             })
+            # Session started: Archivist needs to know so it can prep
+            # the watch-folder + start filtering ingest. Other agents
+            # see this via the dashboard's bus broadcast — no need to
+            # send copies.
             await self._notify_agents_of_decision(
                 kind="session_started",
                 summary=f"Autonomous session #{sid} started ({'sim' if sim else 'live'})",
+                to=(AgentName.ARCHIVIST,),
                 session_id=sid, simulation=sim, autonomous=True,
             )
 
@@ -576,9 +581,13 @@ class Operator(BaseAgent):
                 "reason": "dawn",
                 "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             })
+            # Session stopped: Archivist already gets a POST_SESSION
+            # message (separately, above), and the dashboard sees the
+            # bus broadcast. No additional sibling relay needed.
             await self._notify_agents_of_decision(
                 kind="session_stopped",
                 summary=f"Autonomous session #{sid} stopped at dawn",
+                to=(),
                 session_id=sid, autonomous=True, reason="dawn",
             )
             self._current_session_id = None
@@ -883,12 +892,18 @@ class Operator(BaseAgent):
             "verdict": VERDICT_NOGO,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        # Execution block is an Operator-internal decision — the dashboard
+        # already sees it via the bus broadcast above. No sibling agent
+        # needs a STATUS copy: the Planner KEEPS PLANNING (plan creation
+        # is independent of execution), Critic is the SOURCE of the
+        # block, Oracle keeps researching, Archivist has nothing to do
+        # until frames land. Sending to=() means bus-event only, zero
+        # relay noise.
         await self._notify_agents_of_decision(
             kind="execution_block",
             summary=f"Execution blocked: {reason}",
-            reason=reason,
-            verdict=VERDICT_NOGO,
-            advisories=advisories,
+            to=(),
+            reason=reason, verdict=VERDICT_NOGO, advisories=advisories,
         )
         # Page the operator via every configured notification channel.
         # Critical events always notify — that's the whole point of
@@ -938,13 +953,17 @@ class Operator(BaseAgent):
                 "previous": prev.verdict if prev else None,
                 "sent_at": new.decided_at,
             })
-            # Also relay to sibling agents so their per-agent feeds
-            # show the Operator's decision and any future cross-agent
-            # logic has a hook to react.
+            # Verdict change: dashboard sees this via the bus broadcast
+            # above. NO sibling relay. The verdict gates EXECUTION only;
+            # plan creation is independent. Sending a verdict_change
+            # message to the Planner made it look like the Planner was
+            # waiting on weather before creating a plan, which is the
+            # opposite of how this is supposed to work. Bus-event only.
             await self._notify_agents_of_decision(
                 kind="verdict_change",
                 summary=(f"Verdict {prev.verdict if prev else '(none)'} -> "
                           f"{verdict}: {reason}"),
+                to=(),
                 verdict=verdict,
                 previous=prev.verdict if prev else None,
                 reason=reason,
@@ -1030,25 +1049,26 @@ class Operator(BaseAgent):
         )
 
     async def _notify_agents_of_decision(self, *, kind: str, summary: str,
-                                                 to: tuple[AgentName, ...] = (
-                                                     AgentName.PLANNER,
-                                                     AgentName.CRITIC,
-                                                     AgentName.ORACLE,
-                                                     AgentName.ARCHIVIST,
-                                                 ),
+                                                 to: tuple[AgentName, ...] = (),
                                                  **details) -> None:
-        """Fan out a STATUS message to sibling agents whenever the
-        Operator makes a decision they should know about.
+        """Targeted STATUS relay to specific sibling agents.
 
-        The bus.broadcast_event path goes to the dashboard's WebSocket
-        subscribers. THIS path puts a copy on each agent's recv queue
-        so per-agent message feeds + audit trails see the Operator's
-        actions, and so any cross-agent reaction logic has a stable
-        hook to attach to.
+        IMPORTANT: ``to`` defaults to () — no fan-out by default. Every
+        call site must say exactly who needs to know. Earlier this
+        defaulted to all four siblings, which made the dashboard look
+        like every agent was repeating the same warning when really
+        only the operator was making one decision.
+
+        The dashboard's WebSocket bus already shows every decision
+        as a broadcast_event with the source = "operator". Sending
+        STATUS to a sibling on top of that should only happen when
+        that sibling actually needs to react. The bus event is for
+        the human; THIS path is for cross-agent reaction logic.
 
         Failures here never raise — siblings are best-effort
-        informational. (We log a warning so the Operator log captures
-        it if a queue is jammed.)"""
+        informational."""
+        if not to:
+            return  # explicit empty list = bus-event only, no relay
         payload = {"kind": kind, "summary": summary, **details}
         for agent in to:
             try:
@@ -1553,9 +1573,12 @@ class Operator(BaseAgent):
             "simulation": simulation,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        # Archivist needs to know — prepares the watch-folder ingest
+        # filter for this session_id. Other agents see the bus event.
         await self._notify_agents_of_decision(
             kind="session_started",
             summary=f"Session #{sid} started ({'sim' if simulation else 'live'})",
+            to=(AgentName.ARCHIVIST,),
             session_id=sid, simulation=simulation, autonomous=False,
         )
         self.log.info("Session #%d started (simulation=%s)", sid, simulation)
@@ -1602,9 +1625,13 @@ class Operator(BaseAgent):
             "reason": reason,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        # Archivist already got a POST_SESSION message above; bus
+        # broadcast covers the dashboard. No additional sibling relay
+        # needed — empty to=() means bus-event only.
         await self._notify_agents_of_decision(
             kind="session_stopped",
             summary=f"Session #{sid} stopped: {reason[:80]}",
+            to=(),
             session_id=sid, reason=reason, autonomous=False,
         )
         self.log.info("Session #%d stopped: %s", sid, reason)

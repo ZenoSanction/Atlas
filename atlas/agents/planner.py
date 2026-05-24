@@ -1,6 +1,35 @@
 """Planner agent — builds the nightly target list.
 
-Phase 1 behaviour (this file):
+CORE PRINCIPLE (operator-stated, 2026-05-24):
+    ALWAYS the session plan is created. ALWAYS.
+    Just because there is a hold on execution does not mean to not
+    create a plan. The plan could be used the next night that is
+    clear for a session. The plan if never created never gets used.
+    If a plan is only created when it is a GO situation, then there
+    is no reason to have a planner. Everything starts with the plan.
+
+Implementation guarantee: every entry point into the Planner's plan
+production (startup, periodic, REVISION_REQUEST, CANDIDATE_TARGET,
+hand-bound tools) is wrapped so that EVEN ON EXCEPTION the
+tonight_plan + session_review slots are populated with at least an
+empty plan + an advisory explaining why it's empty. No weather, no
+verdict, no execution block, no missing-site condition can leave the
+Plan tab empty.
+
+Plan production is fully independent of:
+  - OperatorVerdict (GO / CAUTION / NO-GO)
+  - Execution-block state
+  - Cloud forecast advisories
+  - Weather data freshness
+  - Whether a session is currently running
+
+The plan reflects WHAT WOULD BE IDEAL TO IMAGE TONIGHT given the
+site + active campaigns. Whether tonight is observable is a separate
+decision tracked by OperatorVerdict and gated by the verdict watcher.
+The plan persists across multi-night campaigns; tomorrow's plan
+builds on tonight's accumulated frames via the continuity module.
+
+Phase 1 behaviour:
   - On startup and every 30 minutes, walk every ACTIVE campaign, look at its
     targets, compute current alt/az + airmass from the configured site, and
     build a sorted list of currently-visible candidates.
@@ -155,8 +184,23 @@ class Planner(BaseAgent):
             if now - self._last_rebuild >= PLAN_REBUILD_INTERVAL_S:
                 try:
                     await self._rebuild_plan(reason="periodic")
-                except Exception:
-                    self.log.exception("Periodic plan rebuild failed")
+                except Exception as e:
+                    self.log.exception("Periodic plan rebuild failed — "
+                                          "publishing fallback empty plan")
+                    try:
+                        await self._publish_empty_plan_with_advisory(
+                            reason="periodic_rebuild_failed",
+                            advisory_kind="planner_error",
+                            advisory_severity="warning",
+                            advisory_msg=(f"Periodic plan rebuild crashed: "
+                                            f"{type(e).__name__}: {e}. "
+                                            f"Existing plan (if any) was "
+                                            f"replaced with this placeholder. "
+                                            f"Check the Planner log."),
+                        )
+                    except Exception:
+                        self.log.exception("Periodic fallback publish ALSO "
+                                              "failed")
                 self._last_rebuild = asyncio.get_event_loop().time()
             self._publish_next_tick(asyncio.get_event_loop().time())
             # Sleep until just past the next theoretical rebuild boundary.
@@ -174,7 +218,29 @@ class Planner(BaseAgent):
 
     async def _handle_revision(self, msg) -> None:
         self.log.info("Revision requested by %s", msg.sender)
-        await self._rebuild_plan(reason=f"revision_request:{msg.sender}")
+        # Bulletproof: ANY exception still publishes a fallback empty
+        # plan with the error as an advisory. The Plan tab MUST NEVER
+        # sit empty after a revision request — that's the operator
+        # principle: "Always the session plan is created!!!! Always!!!!"
+        try:
+            await self._rebuild_plan(reason=f"revision_request:{msg.sender}")
+        except Exception as e:
+            self.log.exception("Revision rebuild crashed — publishing "
+                                 "fallback empty plan with the error as "
+                                 "an advisory")
+            try:
+                await self._publish_empty_plan_with_advisory(
+                    reason=f"revision_request_failed:{msg.sender}",
+                    advisory_kind="planner_error",
+                    advisory_severity="critical",
+                    advisory_msg=(f"Revision rebuild crashed: "
+                                    f"{type(e).__name__}: {e}. "
+                                    f"Plan tab kept populated with this "
+                                    f"empty-plan placeholder so the workflow "
+                                    f"never stalls. Check the Planner log."),
+                )
+            except Exception:
+                self.log.exception("Fallback empty-plan publish ALSO failed")
         self.log_decision("plan_revised", inputs={"details": msg.payload},
                             rationale="Rebuilt plan on revision request",
                             session_id=msg.session_id)
