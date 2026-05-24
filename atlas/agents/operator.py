@@ -549,6 +549,11 @@ class Operator(BaseAgent):
                 "autonomous": True,
                 "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             })
+            await self._notify_agents_of_decision(
+                kind="session_started",
+                summary=f"Autonomous session #{sid} started ({'sim' if sim else 'live'})",
+                session_id=sid, simulation=sim, autonomous=True,
+            )
 
             # 3. Walk the plan's scheduled slots in time order
             await self._walk_plan_slots(review, sid)
@@ -571,6 +576,11 @@ class Operator(BaseAgent):
                 "reason": "dawn",
                 "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             })
+            await self._notify_agents_of_decision(
+                kind="session_stopped",
+                summary=f"Autonomous session #{sid} stopped at dawn",
+                session_id=sid, autonomous=True, reason="dawn",
+            )
             self._current_session_id = None
 
             # 5. SafeShutdownSequence (park mount, warm camera, close roof)
@@ -873,6 +883,13 @@ class Operator(BaseAgent):
             "verdict": VERDICT_NOGO,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        await self._notify_agents_of_decision(
+            kind="execution_block",
+            summary=f"Execution blocked: {reason}",
+            reason=reason,
+            verdict=VERDICT_NOGO,
+            advisories=advisories,
+        )
         # Page the operator via every configured notification channel.
         # Critical events always notify — that's the whole point of
         # the notification system.
@@ -921,6 +938,18 @@ class Operator(BaseAgent):
                 "previous": prev.verdict if prev else None,
                 "sent_at": new.decided_at,
             })
+            # Also relay to sibling agents so their per-agent feeds
+            # show the Operator's decision and any future cross-agent
+            # logic has a hook to react.
+            await self._notify_agents_of_decision(
+                kind="verdict_change",
+                summary=(f"Verdict {prev.verdict if prev else '(none)'} -> "
+                          f"{verdict}: {reason}"),
+                verdict=verdict,
+                previous=prev.verdict if prev else None,
+                reason=reason,
+                decided_at=new.decided_at,
+            )
 
     async def _handle_alert(self, msg) -> None:
         severity = AlertSeverity(msg.payload.get("severity", "info"))
@@ -999,6 +1028,40 @@ class Operator(BaseAgent):
                       "details": msg.payload},
             session_id=self._current_session_id,
         )
+
+    async def _notify_agents_of_decision(self, *, kind: str, summary: str,
+                                                 to: tuple[AgentName, ...] = (
+                                                     AgentName.PLANNER,
+                                                     AgentName.CRITIC,
+                                                     AgentName.ORACLE,
+                                                     AgentName.ARCHIVIST,
+                                                 ),
+                                                 **details) -> None:
+        """Fan out a STATUS message to sibling agents whenever the
+        Operator makes a decision they should know about.
+
+        The bus.broadcast_event path goes to the dashboard's WebSocket
+        subscribers. THIS path puts a copy on each agent's recv queue
+        so per-agent message feeds + audit trails see the Operator's
+        actions, and so any cross-agent reaction logic has a stable
+        hook to attach to.
+
+        Failures here never raise — siblings are best-effort
+        informational. (We log a warning so the Operator log captures
+        it if a queue is jammed.)"""
+        payload = {"kind": kind, "summary": summary, **details}
+        for agent in to:
+            try:
+                await self.send(
+                    agent, AgentMessageKind.STATUS,
+                    payload=payload,
+                    session_id=self._current_session_id,
+                )
+            except Exception as e:
+                self.log.warning(
+                    "Failed to relay '%s' status to %s: %s",
+                    kind, agent.value if hasattr(agent, "value") else agent, e,
+                )
 
     async def _handle_human_command(self, msg) -> None:
         """Dashboard-originated commands. Always execute. Dispatched by
@@ -1490,6 +1553,11 @@ class Operator(BaseAgent):
             "simulation": simulation,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        await self._notify_agents_of_decision(
+            kind="session_started",
+            summary=f"Session #{sid} started ({'sim' if simulation else 'live'})",
+            session_id=sid, simulation=simulation, autonomous=False,
+        )
         self.log.info("Session #%d started (simulation=%s)", sid, simulation)
 
     async def _cmd_stop_session(self, params: dict) -> None:
@@ -1534,6 +1602,11 @@ class Operator(BaseAgent):
             "reason": reason,
             "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         })
+        await self._notify_agents_of_decision(
+            kind="session_stopped",
+            summary=f"Session #{sid} stopped: {reason[:80]}",
+            session_id=sid, reason=reason, autonomous=False,
+        )
         self.log.info("Session #%d stopped: %s", sid, reason)
 
     async def _periodic_check(self) -> None:
