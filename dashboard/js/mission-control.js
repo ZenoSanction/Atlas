@@ -144,7 +144,9 @@ export async function refreshMissionControl(api) {
     }
   }
 
-  // Message flow
+  // Message flow — sender → recipient [kind] + an abbreviated preview
+  // of the payload so the operator sees what each message actually
+  // says, not just that something was sent.
   const flow = document.getElementById("message-flow");
   if (flow) {
     const items = mc.message_flow || [];
@@ -156,9 +158,53 @@ export async function refreshMissionControl(api) {
             →
             <span class="who">${esc(m.recipient || "—")}</span>
             <span class="kind">[${esc(m.kind || "")}]</span>
+            <span class="flow-snippet">${esc(payloadSnippet(m.payload))}</span>
           </div>`).join("")
       : '<div class="empty">no messages yet</div>';
   }
+}
+
+// Abbreviated payload preview for the message-flow rows. Picks the
+// most informative field available, then truncates. Order of preference:
+//
+//   summary           — most agents already write a one-line summary
+//   reason            — verdict changes, blocks
+//   message           — alerts
+//   target_name       — candidate-target hand-offs
+//   kind              — explicit sub-kind ("plan_advisory_request" etc.)
+//   first 60 chars of JSON for everything else
+//
+// Cap length so the row stays single-line; a fuller view can come from
+// the AgentMessage DB row later.
+function payloadSnippet(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = payload[k];
+      if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
+    }
+    return "";
+  };
+  let s = pick("summary", "reason", "message", "target_name");
+  if (!s) {
+    const subKind = pick("kind");
+    if (subKind) {
+      // Combine sub-kind with the next-most-informative field if present
+      const extra = pick("verdict", "session_id", "advisory_count",
+                            "frames_done", "filter");
+      s = extra ? `${subKind}: ${extra}` : subKind;
+    }
+  }
+  if (!s) {
+    try {
+      s = JSON.stringify(payload).slice(0, 80);
+    } catch {
+      s = "";
+    }
+  }
+  // Truncate single-line preview
+  s = s.replace(/\s+/g, " ").trim();
+  return s.length > 120 ? s.slice(0, 117) + "…" : s;
 }
 
 function setField(lane, field, value) {

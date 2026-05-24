@@ -150,18 +150,33 @@ class WeatherCache:
 
     async def get(self, *, lat: float, lon: float,
                     force_refresh: bool = False,
-                    forecast_hours: int = 12) -> WeatherCacheState:
+                    forecast_hours: int = 36) -> WeatherCacheState:
         """Return a cache state, refreshing in-place if stale or forced.
 
         Locks during refresh so concurrent callers don't double-hit
         Open-Meteo. If the network call fails, the previous cache
-        (even if stale) is returned with a warning logged."""
-        if not force_refresh and not self.is_stale():
+        (even if stale) is returned with a warning logged.
+
+        forecast_hours defaults to 36 so a same-day daytime query
+        always covers tonight's coming astronomical-dark window
+        (typically 4-10 hours away, plus 8 hours of dark). 12 was
+        too short — dashboards asking "show tonight's forecast" at
+        noon would see only the first hour or two of dark.
+
+        Auto-extend behavior: if a caller requests *more* hours than
+        the cache currently holds, treat that as effectively stale
+        and refresh — otherwise a hot 12h cache would persistently
+        starve a 36h request."""
+        cached = self._forecast_hours or []
+        wants_more = len(cached) < int(forecast_hours)
+        if not force_refresh and not self.is_stale() and not wants_more:
             return self.peek()
         async with self._lock:
             # Re-check inside the lock — another coroutine may have
             # refreshed while we were waiting on the lock.
-            if not force_refresh and not self.is_stale():
+            cached = self._forecast_hours or []
+            wants_more_inside = len(cached) < int(forecast_hours)
+            if not force_refresh and not self.is_stale() and not wants_more_inside:
                 return self.peek()
             try:
                 client = OpenMeteoClient(latitude=lat, longitude=lon)
