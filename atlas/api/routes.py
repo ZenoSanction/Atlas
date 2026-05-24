@@ -1233,10 +1233,17 @@ async def plan_tonight() -> dict:
     st = get_state()
     plan = st.get_tonight_plan()
     review = st.get_session_review() or {}
+    phase = st.get_review_phase()
     return {
         "plan": plan,
         "review_state": review.get("state"),
         "review_advisories": review.get("advisories") or [],
+        # The dashboard renders a "review chain in flight" badge
+        # using these fields. phase ∈ {"draft", "critic", "operator",
+        # "oracle", "finalizing", "final", "stalled"}.
+        "review_phase": phase.get("phase"),
+        "review_phase_review_id": phase.get("review_id"),
+        "review_phase_updated_at": phase.get("updated_at"),
     }
 
 

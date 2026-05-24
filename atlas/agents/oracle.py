@@ -76,11 +76,41 @@ class Oracle(BaseAgent):
                     self.set_task("research pass complete — standing by",
                                   state="idle")
                 elif (msg.kind == AgentMessageKind.STATUS
+                      and (msg.payload or {}).get("kind") == "plan_review"
+                      and (msg.payload or {}).get("phase") == "oracle"
+                      and (msg.payload or {}).get("review")):
+                    # Stage 4 of the review chain. File revisit + extended-
+                    # integration suggestions then send the chain BACK
+                    # to the Planner with phase="finalize" so the Planner
+                    # can incorporate suggestions into the FINAL plan
+                    # and republish.
+                    payload = msg.payload
+                    await self._file_revisit_advisories(payload["review"])
+                    try:
+                        from atlas.agents.state import get_state
+                        get_state().set_review_phase(
+                            "finalizing", review_id=payload.get("review_id"))
+                        await self.send(
+                            AgentName.PLANNER, AgentMessageKind.STATUS,
+                            payload={
+                                "summary": ("Oracle review-chain stage "
+                                              "complete — chain returning "
+                                              "to Planner for FINAL "
+                                              "publication."),
+                                "kind": "plan_review",
+                                "phase": "finalize",
+                                "review_id": payload.get("review_id"),
+                                "review": payload.get("review"),
+                            },
+                        )
+                    except Exception:
+                        self.log.exception("Failed to send chain back "
+                                              "to Planner finalize stage")
+                elif (msg.kind == AgentMessageKind.STATUS
                       and (msg.payload or {}).get("kind") == "plan_advisory_request"
                       and (msg.payload or {}).get("review")):
-                    # Plan was just built; file revisit + extended-
-                    # integration advisories. Advisory only — does NOT
-                    # gate the plan.
+                    # Legacy parallel-fanout path (no chain) — still
+                    # supported. File advisories, don't forward.
                     await self._file_revisit_advisories(msg.payload["review"])
                 else:
                     await self.handle_relayed_message(msg)

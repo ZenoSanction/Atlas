@@ -34,7 +34,21 @@ async function renderTonightTargets(api) {
       return;
     }
 
-    stamp.textContent = `built ${plan.built_at} (${plan.reason})`;
+    const phase = (r.review_phase || "final").toLowerCase();
+    const phaseLabels = {
+      draft: "DRAFT — chain starting",
+      critic: "Critic reviewing…",
+      operator: "Operator reviewing…",
+      oracle: "Oracle suggesting revisits…",
+      finalizing: "Planner finalizing…",
+      final: "FINAL — ready for human examination",
+      stalled: "chain STALLED — see Planner log",
+    };
+    const phaseCls = {
+      final: "ok-pill", stalled: "warn-pill",
+    }[phase] || "muted-pill";
+    const phaseBadge = `<span class="${phaseCls}">${esc(phaseLabels[phase] || phase)}</span>`;
+    stamp.innerHTML = `built ${esc(plan.built_at)} (${esc(plan.reason)}) · ${phaseBadge}`;
     const visible = plan.visible_targets || [];
 
     // Advisory strip — always shown when there's anything to say

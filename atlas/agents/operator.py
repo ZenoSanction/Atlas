@@ -789,6 +789,9 @@ class Operator(BaseAgent):
           kind=weather_assessment   → fold into the GO/CAUTION/NO-GO verdict
           kind=critical_advisories  → evaluate whether to block execution
                                        (does NOT touch the plan itself)
+          kind=plan_review(operator) → review chain stage 3: append
+                                         Operator-context advisories then
+                                         forward to Oracle (stage 4)
           (everything else)         → debug-log + ignore (advisories show up
                                        on the dashboard via shared state, not
                                        through the Operator's queue anymore)
@@ -801,7 +804,72 @@ class Operator(BaseAgent):
         if kind == "critical_advisories" and payload.get("advisories"):
             await self._evaluate_execution_block(payload)
             return
+        if (kind == "plan_review"
+              and payload.get("phase") == "operator"
+              and payload.get("review")):
+            await self._review_chain_operator_stage(payload)
+            return
         self.log.debug("Operator ignoring status kind=%s", kind)
+
+    async def _review_chain_operator_stage(self, payload: dict) -> None:
+        """Stage 3 of the Planner→Critic→Operator→Oracle→Planner chain.
+
+        The Operator appends its own advisory (current verdict + manual
+        flag + execution-block state context) so the Planner's final
+        rebuild has everything: weather (Critic), execution context
+        (Operator), revisit suggestions (Oracle, next stage).
+        Then forwards to Oracle."""
+        from atlas.agents.state import (
+            VERDICT_GO, get_state,
+        )
+        from datetime import datetime as _dt
+        review_id = payload.get("review_id") or ""
+        # Build Operator's context advisory
+        verdict = get_state().get_verdict()
+        manual = get_state().is_manual()
+        notes: list[str] = []
+        if verdict is not None and verdict.verdict != VERDICT_GO:
+            notes.append(f"current verdict {verdict.verdict}: {verdict.reason}")
+        if manual:
+            notes.append("manual control engaged")
+        if not notes:
+            notes.append("no execution gates active")
+        op_advisory = {
+            "kind": "operator_context",
+            "severity": "info",
+            "message": ("Operator review-chain check — "
+                          + "; ".join(notes)
+                          + ". Plan creation proceeds independent of "
+                            "execution gates."),
+            "source": "operator",
+            "at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        try:
+            get_state().append_advisories(review_id, [op_advisory])
+        except Exception:
+            self.log.exception("Operator advisory append failed; "
+                                  "continuing chain")
+        # Forward to Oracle (stage 4)
+        try:
+            get_state().set_review_phase("oracle", review_id=review_id)
+            await self.send(
+                AgentName.ORACLE, AgentMessageKind.STATUS,
+                payload={
+                    "summary": ("Operator review-chain stage complete — "
+                                  "forwarding to Oracle for revisit + "
+                                  "extended-integration suggestions."),
+                    "kind": "plan_review",
+                    "phase": "oracle",
+                    "review_id": review_id,
+                    "review": payload.get("review"),
+                },
+            )
+        except Exception:
+            self.log.exception("Failed to forward review chain to Oracle stage")
+            try:
+                get_state().set_review_phase("stalled", review_id=review_id)
+            except Exception:
+                pass
 
     async def _evaluate_execution_block(self, payload: dict) -> None:
         """Decide whether incoming critical advisories warrant blocking

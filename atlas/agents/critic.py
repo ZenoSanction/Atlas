@@ -273,14 +273,46 @@ class Critic(BaseAgent):
     async def _handle_relay(self, msg) -> None:
         """Inbound relay handler. Surfaces the message + dispatches:
 
-          kind=plan_advisory_request  → file weather/moon/hardware
-                                         advisories against the plan
-          kind=revision_request       → on-demand weather refresh
-          kind=status (no kind tag)   → on-demand weather refresh
+          kind=plan_review (phase=critic) → file advisories, FORWARD
+                                              to Operator (sequential
+                                              review chain stage 2)
+          kind=plan_advisory_request      → legacy parallel-fanout path
+                                              (still supported)
+          kind=revision_request           → on-demand weather refresh
+          kind=status (no kind tag)       → on-demand weather refresh
         """
         await self.handle_relayed_message(msg)
         payload = msg.payload or {}
 
+        # Sequential review chain (operator-specified): file advisories
+        # then forward to Operator with phase="operator".
+        if (payload.get("kind") == "plan_review"
+              and payload.get("phase") == "critic"
+              and payload.get("review")):
+            await self._file_plan_advisories(payload["review"])
+            try:
+                from atlas.agents.state import get_state
+                get_state().set_review_phase(
+                    "operator", review_id=payload.get("review_id"))
+                from atlas.db.models import AgentMessageKind, AgentName
+                await self.send(
+                    AgentName.OPERATOR, AgentMessageKind.STATUS,
+                    payload={
+                        "summary": (f"Critic review complete — "
+                                      f"forwarding to Operator stage."),
+                        "kind": "plan_review",
+                        "phase": "operator",
+                        "review_id": payload.get("review_id"),
+                        "review": payload.get("review"),
+                    },
+                )
+            except Exception:
+                self.log.exception("Failed to forward review chain to "
+                                      "Operator stage")
+            return
+
+        # Legacy parallel-fanout path (still functional for any
+        # non-chain advisory request that comes in)
         if (payload.get("kind") == "plan_advisory_request"
               and payload.get("review")):
             await self._file_plan_advisories(payload["review"])

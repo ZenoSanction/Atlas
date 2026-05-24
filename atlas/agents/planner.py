@@ -162,6 +162,13 @@ class Planner(BaseAgent):
                         await self._rebuild_plan(reason="candidate_target")
                     except Exception:
                         self.log.exception("Plan rebuild on candidate failed")
+                elif (msg.kind == AgentMessageKind.STATUS
+                        and (msg.payload or {}).get("kind") == "plan_review"
+                        and (msg.payload or {}).get("phase") == "finalize"):
+                    # Stage 5 — chain returns from Oracle. Republish
+                    # the plan as FINAL with all accumulated advisories
+                    # incorporated. The Plan tab updates within a tick.
+                    await self._finalize_review_chain(msg.payload)
                 else:
                     await self.handle_relayed_message(msg)
         finally:
@@ -215,6 +222,61 @@ class Planner(BaseAgent):
             next_tick_at=nxt.isoformat(timespec="seconds") + "Z",
             next_tick_kind="rebuild",
         )
+
+    async def _finalize_review_chain(self, payload: dict) -> None:
+        """Stage 5 — Oracle returned the chain to us. Republish the
+        plan as FINAL.
+
+        All agents have already attached advisories during the chain
+        (Critic: weather/moon/hardware; Operator: verdict context;
+        Oracle: revisit + extended-integration suggestions). The
+        session_review in state already carries them. Our job here:
+
+          1. Re-fetch the live session_review so we see every advisory
+          2. Mark review_phase = "final" so the dashboard stops showing
+             "chain in progress" and shows "final published"
+          3. Broadcast a `plan_finalized` bus event so the Plan tab
+             refetches and renders the final state
+
+        We do NOT rebuild the target list at this stage — Oracle's
+        suggestions are advisories the operator reads, then if the
+        operator wants to incorporate them via the chat ("add M51 to
+        tonight"), the Planner does a full new rebuild which kicks
+        off a fresh chain. This keeps the chain idempotent: one
+        rebuild → one chain → one final publication. Operator-
+        directed changes restart the cycle."""
+        review_id = payload.get("review_id") or ""
+        try:
+            get_state().set_review_phase("final", review_id=review_id)
+        except Exception:
+            pass
+        try:
+            review = get_state().get_session_review() or {}
+            n_advisories = len(review.get("advisories") or [])
+            self.set_task(
+                f"plan FINAL — {n_advisories} advisor"
+                f"{'ies' if n_advisories != 1 else 'y'} "
+                f"from review chain; ready for human examination",
+                state="idle",
+            )
+            self.log_decision(
+                "review_chain_finalized",
+                inputs={"review_id": review_id,
+                          "advisories": n_advisories},
+                rationale=("Planner→Critic→Operator→Oracle→Planner "
+                              "chain complete; plan published as FINAL "
+                              "to the Plan tab."),
+            )
+            await self.bus.broadcast_event({
+                "type": "plan_finalized",
+                "sender": "planner",
+                "review_id": review_id,
+                "advisory_count": n_advisories,
+                "sent_at": payload.get("sent_at"),
+            })
+        except Exception:
+            self.log.exception("Finalize step had a non-fatal error; "
+                                  "review_phase set, plan still in state")
 
     async def _handle_revision(self, msg) -> None:
         self.log.info("Revision requested by %s", msg.sender)
@@ -847,41 +909,43 @@ class Planner(BaseAgent):
                     source=empty_plan_advisory["source"],
                     at=_dt.utcnow().isoformat(timespec="seconds") + "Z",
                 ))
-            # Publish READY immediately so the dashboard's Plan tab can
-            # render. Critic + Oracle will append advisories afterward.
+            # Publish DRAFT immediately so the dashboard's Plan tab is
+            # never empty. The review chain will produce a FINAL plan
+            # that overwrites this draft when complete.
+            #
+            # Review chain (operator-specified, 2026-05-24):
+            #   Planner DRAFT
+            #     → Critic (weather/moon/hardware advisories)
+            #     → Operator (verdict context, no-go notes)
+            #     → Oracle (revisit + extended-integration suggestions)
+            #     → Planner FINAL (incorporates all suggestions,
+            #                       re-publishes the plan)
+            # The Plan tab shows DRAFT while the chain is in flight,
+            # then FINAL when the Planner finishes. Operator can
+            # direct changes via chat at any time; the Planner
+            # re-runs the chain from the start.
             get_state().set_session_review(review.to_jsonable())
-            # Fire-and-forget advisory requests in parallel. Critic
-            # checks weather + moon + hardware; Oracle checks for
-            # revisit candidates + extended-integration suggestions.
-            # Each agent appends its findings to the plan's advisories
-            # via its own handler — the Planner doesn't wait.
+            get_state().set_review_phase("critic", review_id=review.review_id)
             await self.send(
                 AgentName.CRITIC, AgentMessageKind.STATUS,
                 payload={
-                    "summary": (f"Plan rebuilt ({reason}) — {len(scheduled)} "
-                                  f"target(s). Top: "
+                    "summary": (f"Plan DRAFT built ({reason}) — "
+                                  f"{len(scheduled)} target(s). Top: "
                                   f"{', '.join(top_names) if top_names else '(none)'}. "
-                                  "Advisory review please."),
-                    "kind": "plan_advisory_request",
-                    "review_id": review.review_id,
-                    "review": review.to_jsonable(),
-                    "from_chat": False,
-                },
-            )
-            await self.send(
-                AgentName.ORACLE, AgentMessageKind.STATUS,
-                payload={
-                    "summary": (f"Plan rebuilt ({reason}). "
-                                  "Advisory check for revisit + extended-integration "
-                                  "candidates."),
-                    "kind": "plan_advisory_request",
+                                  "Begin review chain (Critic stage)."),
+                    "kind": "plan_review",
+                    "phase": "critic",
                     "review_id": review.review_id,
                     "review": review.to_jsonable(),
                     "from_chat": False,
                 },
             )
         except Exception:
-            self.log.exception("Failed to request advisory reviews")
+            self.log.exception("Failed to initiate review chain")
+            try:
+                get_state().set_review_phase("stalled")
+            except Exception:
+                pass
 
     async def safe_mode_step(self) -> None:
         # Planner doesn't talk to Claude in this phase, so safe mode is a no-op.

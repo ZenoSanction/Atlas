@@ -149,6 +149,15 @@ class _ObservatoryState:
         # plan → critic → operator → oracle → operator → planner pipeline.
         # The dashboard's Session Workflow panel reads this.
         self._session_review: dict | None = None
+        # Current review-chain phase. Tracks the Planner→Critic→Operator
+        # →Oracle→Planner relay so the dashboard can show "Critic
+        # reviewing…", "Oracle suggesting revisits…", etc. and the
+        # human can see the plan is being actively worked on.
+        # Values: "draft" | "critic" | "operator" | "oracle" |
+        #         "finalizing" | "final" | "stalled"
+        self._review_phase: str = "final"
+        self._review_phase_review_id: str | None = None
+        self._review_phase_updated_at: str | None = None
         # Human "take control" override. When engaged the Operator agent
         # halts autonomous dispatch; the dashboard's Hardware Controls
         # panel becomes the only way work happens.
@@ -263,6 +272,25 @@ class _ObservatoryState:
             return self._preflight
 
     # Session-planning workflow (multi-phase pipeline) ----------------------
+    def set_review_phase(self, phase: str, *, review_id: str | None = None) -> None:
+        """Update the current review-chain phase. The dashboard polls
+        this so the Plan tab can show 'Critic reviewing…' / 'Oracle
+        suggesting…' etc. while the chain is in flight."""
+        from datetime import datetime as _dt
+        with self._lock:
+            self._review_phase = phase
+            if review_id is not None:
+                self._review_phase_review_id = review_id
+            self._review_phase_updated_at = _dt.utcnow().isoformat(timespec="seconds") + "Z"
+
+    def get_review_phase(self) -> dict:
+        with self._lock:
+            return {
+                "phase": self._review_phase,
+                "review_id": self._review_phase_review_id,
+                "updated_at": self._review_phase_updated_at,
+            }
+
     def set_session_review(self, review: dict) -> None:
         with self._lock:
             self._session_review = review
