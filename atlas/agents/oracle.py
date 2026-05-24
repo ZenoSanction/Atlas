@@ -79,12 +79,32 @@ class Oracle(BaseAgent):
                       and (msg.payload or {}).get("kind") == "plan_review"
                       and (msg.payload or {}).get("phase") == "oracle"
                       and (msg.payload or {}).get("review")):
-                    # Stage 4 of the review chain. File revisit + extended-
-                    # integration suggestions then send the chain BACK
-                    # to the Planner with phase="finalize" so the Planner
-                    # can incorporate suggestions into the FINAL plan
-                    # and republish.
+                    # Stage 4 — Oracle auto-opens the plan, evaluates
+                    # each target against the knowledge-thread + frame
+                    # history for revisit / extended-integration
+                    # suggestions, then returns the chain to the Planner.
                     payload = msg.payload
+                    plan_preview = (payload.get("review") or {}).get("plan") or {}
+                    n = len(plan_preview.get("visible_targets") or [])
+                    self.set_task(
+                        f"Stage 4/5: Oracle auto-reviewing plan "
+                        f"({n} target(s)) — revisit + integration",
+                        state="working",
+                    )
+                    try:
+                        from datetime import datetime as _dt
+                        await self.bus.broadcast_event({
+                            "type": "review_chain_stage",
+                            "sender": "oracle",
+                            "stage": "4/5",
+                            "agent": "oracle",
+                            "phase": "oracle",
+                            "review_id": payload.get("review_id"),
+                            "n_targets": n,
+                            "sent_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+                        })
+                    except Exception:
+                        pass
                     await self._file_revisit_advisories(payload["review"])
                     try:
                         from atlas.agents.state import get_state

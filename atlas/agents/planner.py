@@ -254,11 +254,26 @@ class Planner(BaseAgent):
             review = get_state().get_session_review() or {}
             n_advisories = len(review.get("advisories") or [])
             self.set_task(
-                f"plan FINAL — {n_advisories} advisor"
+                f"Stage 5/5: Planner FINAL — {n_advisories} advisor"
                 f"{'ies' if n_advisories != 1 else 'y'} "
-                f"from review chain; ready for human examination",
+                f"from review chain; PUBLISHED to Plan tab for human "
+                f"examination",
                 state="idle",
             )
+            try:
+                from datetime import datetime as _dt
+                await self.bus.broadcast_event({
+                    "type": "review_chain_stage",
+                    "sender": "planner",
+                    "stage": "5/5",
+                    "agent": "planner",
+                    "phase": "final",
+                    "review_id": review_id,
+                    "n_advisories": n_advisories,
+                    "sent_at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+                })
+            except Exception:
+                pass
             self.log_decision(
                 "review_chain_finalized",
                 inputs={"review_id": review_id,
@@ -926,6 +941,24 @@ class Planner(BaseAgent):
             # re-runs the chain from the start.
             get_state().set_session_review(review.to_jsonable())
             get_state().set_review_phase("critic", review_id=review.review_id)
+            self.set_task(
+                f"Stage 1/5: Planner published DRAFT ({len(scheduled)} "
+                f"target(s)) — chain auto-starting to Critic",
+                state="working",
+            )
+            try:
+                await self.bus.broadcast_event({
+                    "type": "review_chain_stage",
+                    "sender": "planner",
+                    "stage": "1/5",
+                    "agent": "planner",
+                    "phase": "draft",
+                    "review_id": review.review_id,
+                    "n_targets": len(scheduled),
+                    "sent_at": plan["built_at"],
+                })
+            except Exception:
+                pass
             await self.send(
                 AgentName.CRITIC, AgentMessageKind.STATUS,
                 payload={

@@ -285,11 +285,35 @@ class Critic(BaseAgent):
         payload = msg.payload or {}
 
         # Sequential review chain (operator-specified): file advisories
-        # then forward to Operator with phase="operator".
+        # then forward to Operator with phase="operator". The Critic
+        # does NOT need to be asked to do this — it reads the plan out
+        # of the payload, runs its weather/moon/hardware/cloud checks,
+        # and hands off automatically.
         if (payload.get("kind") == "plan_review"
               and payload.get("phase") == "critic"
               and payload.get("review")):
-            await self._file_plan_advisories(payload["review"])
+            review = payload["review"]
+            plan = (review or {}).get("plan") or {}
+            n_targets = len(plan.get("visible_targets") or [])
+            self.set_task(
+                f"Stage 2/5: Critic auto-reviewing plan "
+                f"({n_targets} target(s)) — weather + moon + hardware",
+                state="working",
+            )
+            try:
+                await self.bus.broadcast_event({
+                    "type": "review_chain_stage",
+                    "sender": "critic",
+                    "stage": "2/5",
+                    "agent": "critic",
+                    "phase": "critic",
+                    "review_id": payload.get("review_id"),
+                    "n_targets": n_targets,
+                    "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                })
+            except Exception:
+                pass
+            await self._file_plan_advisories(review)
             try:
                 from atlas.agents.state import get_state
                 get_state().set_review_phase(
@@ -298,8 +322,9 @@ class Critic(BaseAgent):
                 await self.send(
                     AgentName.OPERATOR, AgentMessageKind.STATUS,
                     payload={
-                        "summary": (f"Critic review complete — "
-                                      f"forwarding to Operator stage."),
+                        "summary": (f"Stage 2 complete — Critic auto-"
+                                      f"reviewed {n_targets} target(s); "
+                                      "handing off to Operator."),
                         "kind": "plan_review",
                         "phase": "operator",
                         "review_id": payload.get("review_id"),

@@ -814,14 +814,40 @@ class Operator(BaseAgent):
     async def _review_chain_operator_stage(self, payload: dict) -> None:
         """Stage 3 of the Planner→Critic→Operator→Oracle→Planner chain.
 
-        The Operator reviews the plan + the current execution context
-        (verdict, manual flag) and appends an advisory that EXPLICITLY
-        SUMMARIZES THE TARGETS so the operator (human) can see exactly
-        what the Operator agent reviewed. Without the target summary,
-        the Operator's advisory looked like empty "noted" filler —
-        the user correctly called that out.
+        Runs automatically — the Operator does NOT need to be asked.
+        On receiving the plan_review STATUS, the Operator reads the
+        plan out of the payload, runs its verification (target
+        summary, dark-window fit, execution-gate state) and forwards
+        to Oracle.
 
-        Then forwards to Oracle."""
+        Verification covers:
+          * Target list summary + counts
+          * Dark-window fit (X/Y min scheduled / dark)
+          * Current verdict + manual-flag state (execution context)
+        """
+        # Visible stage broadcast so the dashboard's message-flow
+        # shows "Stage 3: Operator auto-reviewing plan…" landing on
+        # the bus before the work happens.
+        try:
+            plan_preview = (payload.get("review") or {}).get("plan") or {}
+            n = len(plan_preview.get("visible_targets") or [])
+            self.set_task(
+                f"Stage 3/5: Operator auto-reviewing plan "
+                f"({n} target(s)) — fit + execution context",
+                state="working",
+            )
+            await self.bus.broadcast_event({
+                "type": "review_chain_stage",
+                "sender": "operator",
+                "stage": "3/5",
+                "agent": "operator",
+                "phase": "operator",
+                "review_id": payload.get("review_id"),
+                "n_targets": n,
+                "sent_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            })
+        except Exception:
+            pass
         from atlas.agents.state import (
             VERDICT_GO, get_state,
         )
