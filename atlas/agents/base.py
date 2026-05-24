@@ -63,6 +63,14 @@ class BaseAgent(ABC):
         from atlas.agents.relay_tools import make_relay_tools
         for spec in make_relay_tools(self):
             self.register_tool(spec)
+        # Every agent also gets get_current_plan so any of them can
+        # answer "what's the plan?" from chat. Previously only the
+        # Planner had this — Operator/Critic/Oracle would correctly
+        # report "I don't have the plan to evaluate" when asked,
+        # which made the review chain look useless from chat.
+        from atlas.agents.shared_tools import all_shared_tools
+        for spec in all_shared_tools():
+            self.register_tool(spec)
         # Live mission-control state initialised idle. Subclasses call
         # self.set_task(...) when they begin a phase of work.
         from atlas.agents.state import get_state as _get_state

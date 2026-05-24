@@ -814,33 +814,51 @@ class Operator(BaseAgent):
     async def _review_chain_operator_stage(self, payload: dict) -> None:
         """Stage 3 of the Planner→Critic→Operator→Oracle→Planner chain.
 
-        The Operator appends its own advisory (current verdict + manual
-        flag + execution-block state context) so the Planner's final
-        rebuild has everything: weather (Critic), execution context
-        (Operator), revisit suggestions (Oracle, next stage).
+        The Operator reviews the plan + the current execution context
+        (verdict, manual flag) and appends an advisory that EXPLICITLY
+        SUMMARIZES THE TARGETS so the operator (human) can see exactly
+        what the Operator agent reviewed. Without the target summary,
+        the Operator's advisory looked like empty "noted" filler —
+        the user correctly called that out.
+
         Then forwards to Oracle."""
         from atlas.agents.state import (
             VERDICT_GO, get_state,
         )
         from datetime import datetime as _dt
         review_id = payload.get("review_id") or ""
-        # Build Operator's context advisory
+        review = payload.get("review") or {}
+        plan = review.get("plan") or {}
+        targets = plan.get("visible_targets") or []
+        target_summary = (
+            ", ".join(t.get("target_name", "?") for t in targets[:6])
+            + (f" (+{len(targets) - 6} more)" if len(targets) > 6 else "")
+        ) if targets else "(no scheduled targets)"
+        scheduled_min = plan.get("scheduled_total_min")
+        dark_min = plan.get("dark_window_min")
+        fit_note = (f"{scheduled_min:.0f}/{dark_min:.0f} min dark filled"
+                      if (scheduled_min is not None and dark_min)
+                      else "fit unknown")
+
+        # Operator's execution-context note
         verdict = get_state().get_verdict()
         manual = get_state().is_manual()
-        notes: list[str] = []
+        gates: list[str] = []
         if verdict is not None and verdict.verdict != VERDICT_GO:
-            notes.append(f"current verdict {verdict.verdict}: {verdict.reason}")
+            gates.append(f"verdict {verdict.verdict}: {verdict.reason}")
         if manual:
-            notes.append("manual control engaged")
-        if not notes:
-            notes.append("no execution gates active")
+            gates.append("manual control engaged")
+        gate_note = ("execution gates: " + "; ".join(gates)
+                        if gates else "no execution gates active")
+
         op_advisory = {
-            "kind": "operator_context",
+            "kind": "operator_review",
             "severity": "info",
-            "message": ("Operator review-chain check — "
-                          + "; ".join(notes)
-                          + ". Plan creation proceeds independent of "
-                            "execution gates."),
+            "message": (f"Operator reviewed plan: {len(targets)} target(s) "
+                          f"scheduled ({target_summary}); {fit_note}. "
+                          f"{gate_note}. Plan creation proceeds independent "
+                          f"of execution gates — plan can be used tonight if "
+                          f"conditions clear, or carried to a future night."),
             "source": "operator",
             "at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
         }
