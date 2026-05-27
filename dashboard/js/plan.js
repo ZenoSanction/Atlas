@@ -60,7 +60,7 @@ async function renderTonightTargets(api) {
         const cls = sev === "critical" ? "warn-pill"
                   : sev === "warning"  ? "muted-pill"
                   : "ok-pill";
-        return `<div class="advisory" data-sev="${esc(sev)}" data-kind="${esc(a.kind || "")}">
+        return `<div class="advisory" data-sev="${esc(sev)}">
             <span class="${cls}">${esc(sev.toUpperCase())}</span>
             <span class="adv-kind">${esc(a.kind || "")}</span>
             <span class="adv-msg">${esc(a.message || "")}</span>

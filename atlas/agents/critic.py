@@ -516,54 +516,6 @@ class Critic(BaseAgent):
         except Exception:
             self.log.exception("cloudover-forecast check failed")
 
-        # ---- LLM cognition: ask the Critic LLM to add interpretive
-        # judgement on top of the deterministic findings above. The
-        # operator-stated principle: agents must be intelligent, not
-        # drones — they need to understand the mission and add
-        # judgement, not just run checks.
-        from atlas.config import get_settings as _gs
-        if _gs().llm_chain_review_enabled:
-            try:
-                llm_text = await self.think_about_plan(
-                    role_prompt=(
-                        "You are the Critic agent reviewing tonight's "
-                        "plan. Your job is sky safety + observability: "
-                        "weather risk, moon proximity, hardware status, "
-                        "cloud-cover forecast. The deterministic checks "
-                        "below have already filed numeric advisories. "
-                        "What's your INTERPRETIVE read? Examples: "
-                        "'Wind is trending up — schedule the eastern "
-                        "targets first while it's still calm', "
-                        "'Two of these targets are within 35° of the "
-                        "moon — that's marginal but workable with H-alpha'."
-                    ),
-                    plan_context={
-                        "targets": [
-                            {"name": t.get("target_name"),
-                              "ra_deg": t.get("ra_deg"),
-                              "dec_deg": t.get("dec_deg"),
-                              "workflow": t.get("workflow"),
-                              "scheduled_for_min": t.get("scheduled_for_min")}
-                            for t in (plan.get("visible_targets") or [])[:10]
-                        ],
-                        "dark_window_min": plan.get("dark_window_min"),
-                        "scheduled_total_min": plan.get("scheduled_total_min"),
-                        "deterministic_advisories": [
-                            {"kind": a.kind, "severity": a.severity,
-                              "message": a.message}
-                            for a in my_advisories
-                        ],
-                    },
-                )
-                _add(Advisory(
-                    kind="llm_review", severity="info",
-                    message=f"[Critic LLM] {llm_text}",
-                    source="critic", at=now_iso,
-                ))
-            except Exception:
-                self.log.exception("Critic LLM review threw; chain "
-                                      "continues with deterministic only")
-
         # Atomic append — survives concurrent writes from Oracle's
         # parallel advisory pass against the same plan.
         from dataclasses import asdict

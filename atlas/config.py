@@ -80,13 +80,6 @@ class Settings(BaseSettings):
     claude_model: str = Field(default="claude-sonnet-4-6")
     claude_max_tokens: int = Field(default=4096)
 
-    # LLM-cognitive review chain. When true, every chain stage (Critic,
-    # Operator, Oracle, Planner-finalize) calls self.think() to add
-    # interpretive judgement on top of the deterministic Python checks.
-    # Costs ~4 LLM calls per plan rebuild (Sonnet). Set to false to
-    # fall back to deterministic-only chain if token budget is tight.
-    llm_chain_review_enabled: bool = Field(default=True)
-
     # Mode ---------------------------------------------------------------------
     simulation_mode: bool = Field(default=False)
 
