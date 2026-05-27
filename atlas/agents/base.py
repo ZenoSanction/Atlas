@@ -430,6 +430,72 @@ class BaseAgent(ABC):
             pass
         return msg
 
+    async def think_about_plan(self, *, role_prompt: str,
+                                       plan_context: dict,
+                                       max_chars: int = 600,
+                                       ) -> str:
+        """LLM-cognitive review hook for the review chain.
+
+        Each chain stage (Critic, Operator, Oracle, Planner finalize)
+        calls this to actually REASON about the plan with its LLM —
+        not just run deterministic Python checks. The LLM is shown:
+          * the role/perspective it should reason from (role_prompt)
+          * the plan + the deterministic findings already accumulated
+            (plan_context, serialized as JSON-ish text)
+        and asked to add interpretive value: domain insight the
+        Python couldn't compute, risks the deterministic checks
+        missed, and questions for the operator if it doesn't
+        understand something.
+
+        persist_history=False — chain reviews don't pollute the
+        chat-tab conversation. The full LLM response is returned as
+        a string; the caller wraps it in an Advisory and forwards.
+
+        On any error (API down, timeout, safe-mode), returns a
+        clearly-marked fallback string so the chain keeps moving —
+        the LLM layer is additive, never blocking."""
+        import json as _json
+        try:
+            ctx_text = _json.dumps(plan_context, indent=2,
+                                       default=str)
+        except Exception:
+            ctx_text = str(plan_context)
+        # Cap context to keep token budget bounded
+        if len(ctx_text) > 4000:
+            ctx_text = ctx_text[:4000] + "\n…(truncated)"
+        prompt = (
+            f"{role_prompt}\n\n"
+            f"## Plan + accumulated context (deterministic checks "
+            f"already done)\n\n"
+            f"```json\n{ctx_text}\n```\n\n"
+            f"## What I need from you\n"
+            f"Add INTERPRETIVE value the deterministic checks above "
+            f"couldn't compute. Don't repeat what's already there.\n\n"
+            f"Cover any of these that apply:\n"
+            f"  * domain insight that needs human judgement\n"
+            f"  * risks / oversights you spot\n"
+            f"  * specific suggestions (target priority, exposure tuning, etc.)\n"
+            f"  * QUESTIONS for the operator if you're uncertain about "
+            f"something — prefix them with 'QUESTION:' on its own line\n\n"
+            f"Be concise — under {max_chars} characters. No preamble; "
+            f"just the substantive points. If everything looks fine, "
+            f"say 'No additional concerns — plan looks coherent.' and "
+            f"stop."
+        )
+        try:
+            response = await self.think(
+                prompt, persist_history=False,
+            )
+            response = (response or "").strip()
+            if len(response) > max_chars + 200:
+                response = response[:max_chars + 200] + "… [truncated]"
+            return response or "(LLM returned empty response)"
+        except Exception as e:
+            self.log.warning("think_about_plan failed (%s): %s",
+                                type(e).__name__, e)
+            return (f"[LLM review unavailable — {type(e).__name__}; "
+                      f"chain continues with deterministic checks only]")
+
     def _mark_msg_handled(self, msg, ok: bool = True,
                               error: str | None = None) -> None:
         """Call after a handler finishes. Sets status to 'done' or

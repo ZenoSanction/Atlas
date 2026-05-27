@@ -268,6 +268,59 @@ class Oracle(BaseAgent):
                         source="oracle", at=now_iso, target_name=name,
                     ))
 
+        # ---- LLM cognition: Oracle interpretation of plan +
+        # accumulated Critic/Operator findings + revisit candidates.
+        # Oracle's domain is multi-night strategy: which targets are
+        # underrepresented in the campaign, which deserve extended
+        # integration, which would benefit from a different filter
+        # mix than tonight's plan offers.
+        from atlas.config import get_settings as _gs
+        if _gs().llm_chain_review_enabled:
+            try:
+                live_review = get_state().get_session_review() or {}
+                prior_advisories = [
+                    {"kind": a.get("kind"), "severity": a.get("severity"),
+                      "source": a.get("source"), "message": a.get("message")}
+                    for a in (live_review.get("advisories") or [])
+                ]
+                llm_text = await self.think_about_plan(
+                    role_prompt=(
+                        "You are the Oracle agent — long-arc research "
+                        "strategist. Your job is multi-night campaign "
+                        "progress, revisit timing, extended-integration "
+                        "candidates. The plan + Critic + Operator "
+                        "findings are below; deterministic revisit "
+                        "checks already filed per-target advisories. "
+                        "What's your STRATEGIC read? Examples: 'M51 has "
+                        "had only 90 min in 3 weeks — the campaign goal "
+                        "is 1200 min; prioritize doubling its dwell', "
+                        "'NGC 1234's active transient thread expected a "
+                        "follow-up by now — request a revisit slot'."
+                    ),
+                    plan_context={
+                        "targets": [
+                            {"name": t.get("target_name"),
+                              "workflow": t.get("workflow"),
+                              "campaign_name": t.get("campaign_name"),
+                              "scheduled_for_min": t.get("scheduled_for_min")}
+                            for t in targets[:10]
+                        ],
+                        "revisit_candidates": [
+                            {"kind": a.kind, "message": a.message}
+                            for a in my_advisories if a.target_name
+                        ],
+                        "prior_advisories": prior_advisories[-15:],
+                    },
+                )
+                my_advisories.append(Advisory(
+                    kind="llm_review", severity="info",
+                    message=f"[Oracle LLM] {llm_text}",
+                    source="oracle", at=now_iso,
+                ))
+            except Exception:
+                self.log.exception("Oracle LLM review threw; chain "
+                                      "continues with deterministic only")
+
         # Atomic append — Critic may also be filing advisories on the
         # same plan; the lock-guarded append in shared state lets both
         # land without overwriting each other.

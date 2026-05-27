@@ -896,6 +896,58 @@ class Operator(BaseAgent):
         except Exception:
             self.log.exception("Operator advisory append failed; "
                                   "continuing chain")
+
+        # ---- LLM cognition: Operator interpretation of plan +
+        # accumulated Critic findings.
+        from atlas.config import get_settings as _gs
+        if _gs().llm_chain_review_enabled:
+            try:
+                live_review = get_state().get_session_review() or {}
+                prior_advisories = [
+                    {"kind": a.get("kind"), "severity": a.get("severity"),
+                      "source": a.get("source"), "message": a.get("message")}
+                    for a in (live_review.get("advisories") or [])
+                ]
+                llm_text = await self.think_about_plan(
+                    role_prompt=(
+                        "You are the Operator agent reviewing tonight's "
+                        "plan before Oracle adds revisit suggestions. "
+                        "Your job is final-authority execution judgement: "
+                        "is this plan EXECUTABLE tonight given current "
+                        "verdict + manual flag + Critic's findings? What "
+                        "would you change about the ORDER, the dwell "
+                        "allocation, or the workflow choices? Plan "
+                        "creation is independent of execution gates — but "
+                        "as Operator you're the one who'll have to start "
+                        "the night, so flag anything that worries you."
+                    ),
+                    plan_context={
+                        "targets": [
+                            {"name": t.get("target_name"),
+                              "workflow": t.get("workflow"),
+                              "campaign_name": t.get("campaign_name"),
+                              "scheduled_for_min": t.get("scheduled_for_min"),
+                              "start_utc": t.get("start_utc"),
+                              "end_utc": t.get("end_utc")}
+                            for t in targets[:10]
+                        ],
+                        "scheduled_min": scheduled_min,
+                        "dark_window_min": dark_min,
+                        "execution_gates": gates,
+                        "verdict": verdict.verdict if verdict else None,
+                        "manual_control": manual,
+                        "prior_advisories": prior_advisories[-15:],
+                    },
+                )
+                get_state().append_advisories(review_id, [{
+                    "kind": "llm_review", "severity": "info",
+                    "message": f"[Operator LLM] {llm_text}",
+                    "source": "operator",
+                    "at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+                }])
+            except Exception:
+                self.log.exception("Operator LLM review threw; chain "
+                                      "continues with deterministic only")
         # Forward to Oracle (stage 4)
         try:
             get_state().set_review_phase("oracle", review_id=review_id)

@@ -1287,6 +1287,19 @@ footer .muted { color: var(--text-dim); }
 }
 .advisory .adv-msg { color: var(--text); flex: 1; min-width: 200px; }
 .advisory .adv-sev { font-size: 10px; color: var(--text-dim); }
+/* LLM-cognitive advisories — distinct visual so the operator can
+   tell at a glance which lines are interpretive judgement from the
+   agent's LLM vs deterministic threshold checks. */
+.advisory[data-kind="llm_review"],
+.advisory[data-kind="planner_synthesis"] {
+  background: rgba(79, 163, 255, 0.06);
+  border-left-color: var(--accent);
+}
+.advisory[data-kind="planner_synthesis"] {
+  background: rgba(212, 169, 59, 0.08);
+  border-left-color: var(--gold, #d4a93b);
+  font-weight: 500;
+}
 
 
 /* ---- Calibration / campaign / morning-report panel styles --------- */

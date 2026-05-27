@@ -255,6 +255,63 @@ class Planner(BaseAgent):
             get_state().set_review_phase("final", review_id=review_id)
         except Exception:
             pass
+
+        # ---- LLM cognition: Planner finalize. The Planner gets the
+        # last word — sees every advisory the chain produced and
+        # offers its synthesis. This is what the human sees first
+        # when they look at the Plan tab's advisory strip.
+        try:
+            from atlas.config import get_settings as _gs
+            if _gs().llm_chain_review_enabled:
+                live_review = get_state().get_session_review() or {}
+                plan = live_review.get("plan") or {}
+                all_advisories = [
+                    {"kind": a.get("kind"), "severity": a.get("severity"),
+                      "source": a.get("source"), "message": a.get("message")}
+                    for a in (live_review.get("advisories") or [])
+                ]
+                llm_text = await self.think_about_plan(
+                    role_prompt=(
+                        "You are the Planner finalizing tonight's plan. "
+                        "The review chain (Critic → Operator → Oracle) "
+                        "has filed everything below. Your job is "
+                        "SYNTHESIS for the human: a 2-3 sentence "
+                        "executive summary of what the plan looks "
+                        "like, what the reviewers worth-noting findings "
+                        "are, and whether you'd RECOMMEND changes "
+                        "(say so explicitly if yes). The human is "
+                        "going to read your summary first and decide "
+                        "whether to dig deeper into the advisories. "
+                        "Be the trustworthy mission-control voice."
+                    ),
+                    plan_context={
+                        "targets": [
+                            {"name": t.get("target_name"),
+                              "workflow": t.get("workflow"),
+                              "campaign_name": t.get("campaign_name"),
+                              "scheduled_for_min": t.get("scheduled_for_min"),
+                              "start_utc": t.get("start_utc"),
+                              "end_utc": t.get("end_utc")}
+                            for t in (plan.get("visible_targets") or [])[:10]
+                        ],
+                        "scheduled_total_min": plan.get("scheduled_total_min"),
+                        "dark_window_min": plan.get("dark_window_min"),
+                        "review_chain_advisories": all_advisories,
+                    },
+                    max_chars=900,   # planner summary can be a bit longer
+                )
+                from datetime import datetime as _dt
+                from atlas.agents.session_workflow import Advisory
+                get_state().append_advisories(review_id, [{
+                    "kind": "planner_synthesis", "severity": "info",
+                    "message": f"[Planner LLM SYNTHESIS] {llm_text}",
+                    "source": "planner",
+                    "at": _dt.utcnow().isoformat(timespec="seconds") + "Z",
+                }])
+        except Exception:
+            self.log.exception("Planner LLM finalize threw; chain still "
+                                  "publishes deterministic FINAL")
+
         try:
             review = get_state().get_session_review() or {}
             n_advisories = len(review.get("advisories") or [])
