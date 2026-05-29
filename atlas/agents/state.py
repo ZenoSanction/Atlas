@@ -166,6 +166,26 @@ class _ObservatoryState:
         self._review_phase: str = "final"
         self._review_phase_review_id: str | None = None
         self._review_phase_updated_at: str | None = None
+        # Hash of the most recently published plan's *material*
+        # fields (target list + dark window + active campaigns). The
+        # Planner checks this before kicking the review chain — if
+        # the hash matches the previous publication, the new plan is
+        # functionally identical and the chain is skipped to save
+        # bus traffic + downstream agent work. Reset on every
+        # explicit operator-driven rebuild so a forced refresh
+        # always re-fires the chain.
+        self._last_plan_hash: str | None = None
+        # asyncio.Event used by the Operator's verdict watcher.
+        # set_verdict() fires it; the watcher awaits on it with a
+        # generous timeout fallback. Replaces the old 15-s polling
+        # loop — ~5,500 fewer wake-ups per day with identical
+        # responsiveness."""
+        import asyncio as _asyncio
+        try:
+            self._verdict_event: _asyncio.Event | None = _asyncio.Event()
+        except RuntimeError:
+            # No running loop at import time — defer creation
+            self._verdict_event = None
         # Human "take control" override. When engaged the Operator agent
         # halts autonomous dispatch; the dashboard's Hardware Controls
         # panel becomes the only way work happens.
@@ -187,15 +207,61 @@ class _ObservatoryState:
     # Operator writes here --------------------------------------------------
     def set_verdict(self, v: OperatorVerdict) -> OperatorVerdict | None:
         """Returns the previous verdict (or None) so callers can detect
-        a change and broadcast accordingly."""
+        a change and broadcast accordingly. Fires the verdict event so
+        the Operator's verdict watcher wakes immediately instead of
+        polling on a 15-s timer."""
         with self._lock:
             prev = self._verdict
             self._verdict = v
-            return prev
+        # Wake any verdict-watcher coroutines without holding the lock.
+        try:
+            ev = self._verdict_event
+            if ev is None:
+                import asyncio as _asyncio
+                self._verdict_event = ev = _asyncio.Event()
+            ev.set()
+        except Exception:
+            pass
+        return prev
 
     def get_verdict(self) -> OperatorVerdict | None:
         with self._lock:
             return self._verdict
+
+    async def wait_verdict_change(self, timeout_s: float = 300.0) -> bool:
+        """Block until set_verdict() fires the event or timeout elapses.
+
+        Returns True if the event fired (verdict changed), False on
+        timeout. Replaces the old 15-s polling cadence — the watcher
+        can sleep indefinitely until a real verdict transition happens,
+        and the 5-min fallback timeout catches the rare case where the
+        event was missed (e.g. import-time race)."""
+        import asyncio as _asyncio
+        if self._verdict_event is None:
+            try:
+                self._verdict_event = _asyncio.Event()
+            except Exception:
+                # No running loop yet — fall back to short sleep
+                await _asyncio.sleep(min(15.0, timeout_s))
+                return False
+        ev = self._verdict_event
+        ev.clear()
+        try:
+            await _asyncio.wait_for(ev.wait(), timeout=timeout_s)
+            return True
+        except _asyncio.TimeoutError:
+            return False
+
+    # Plan-hash skip — Planner writes the hash of the last published
+    # plan's material fields so the next rebuild can skip the chain
+    # entirely if the plan didn't change.
+    def set_last_plan_hash(self, h: str | None) -> None:
+        with self._lock:
+            self._last_plan_hash = h
+
+    def get_last_plan_hash(self) -> str | None:
+        with self._lock:
+            return self._last_plan_hash
 
     # Planner writes here ---------------------------------------------------
     def set_tonight_plan(self, plan: dict) -> None:

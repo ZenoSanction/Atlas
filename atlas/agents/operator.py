@@ -168,10 +168,21 @@ class Operator(BaseAgent):
                 await self._tick_verdict_watcher()
             except Exception:
                 self.log.exception("verdict watcher tick failed")
-            # 15s cadence (was 30s). Transition from CAUTION → NO-GO
-            # now drives a shutdown within ~15s of the Critic noticing,
-            # not 30s+. Cheap loop: reads shared-state only, no IO.
-            await asyncio.sleep(15)
+            # Event-driven wait: state.set_verdict() fires an
+            # asyncio.Event the moment a transition happens, so this
+            # loop wakes within milliseconds of a real change. The
+            # 300-s timeout is a safety fallback (clock-time effects
+            # like "dark window opened" or "hysteresis window expired"
+            # need the loop to wake up even without a verdict change).
+            # Replaces the old 15-s polling cadence — ~5,500 fewer
+            # wake-ups per day with identical responsiveness on real
+            # verdict transitions.
+            try:
+                await get_state().wait_verdict_change(timeout_s=300.0)
+            except Exception:
+                # If wait_verdict_change itself fails, fall back to
+                # the legacy short sleep so the watcher never wedges.
+                await asyncio.sleep(15)
 
     async def _tick_verdict_watcher(self) -> None:
         # Manual override pauses all autonomous recovery
@@ -455,7 +466,20 @@ class Operator(BaseAgent):
                 await self._autonomous_session_tick()
             except Exception:
                 self.log.exception("autonomous-session tick failed")
-            await asyncio.sleep(30)
+            # Adaptive cadence: when verdict is GO (we're potentially
+            # about to fire), tick every 30 s for responsiveness. When
+            # verdict is NO-GO/CAUTION/UNKNOWN/missing (nothing to fire
+            # anyway), tick every 5 min. Saves ~2,300 wake-ups/day
+            # during daytime + storm hours when conditions clearly
+            # don't allow autonomous start.
+            try:
+                v = get_state().get_verdict()
+                if v is not None and v.verdict == VERDICT_GO:
+                    await asyncio.sleep(30)
+                else:
+                    await asyncio.sleep(300)
+            except Exception:
+                await asyncio.sleep(30)
 
     async def _autonomous_session_tick(self) -> None:
         from atlas.db.managers import ConfigManager

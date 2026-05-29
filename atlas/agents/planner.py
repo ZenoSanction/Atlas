@@ -64,7 +64,13 @@ from atlas.db.session import get_session
 from atlas.db.models import CampaignTarget, Target
 
 
-PLAN_REBUILD_INTERVAL_S = 30 * 60   # 30 minutes
+PLAN_REBUILD_INTERVAL_S = 60 * 60   # 60 minutes — was 30; periodic is a
+                                       # safety net, not the main mechanism.
+                                       # Real triggers (REVISION_REQUEST,
+                                       # CANDIDATE_TARGET, operator commands)
+                                       # already fire rebuilds when something
+                                       # actually changed. The hourly periodic
+                                       # catches "did dark window shift?" etc.
 
 # Session shaping (operator-settable; defaults below match the policy
 # decided 2026-05-21 — "depth over breadth"):
@@ -945,6 +951,38 @@ class Planner(BaseAgent):
             # direct changes via chat at any time; the Planner
             # re-runs the chain from the start.
             get_state().set_session_review(review.to_jsonable())
+
+            # ---- Plan-hash skip ------------------------------------
+            # If the plan's material content is identical to the
+            # previously published plan, the chain already produced
+            # advisories that still apply. Skip the chain to save
+            # ~192 inter-agent messages on quiet days where nothing
+            # has actually changed (no new campaigns, no candidate
+            # targets, no operator action). Forced rebuilds (operator
+            # tool, revision_request) bypass this skip by always
+            # passing a unique reason that differs from the cached
+            # hash's reason — actually we just hash material fields,
+            # so forced rebuilds that don't change the plan content
+            # legitimately skip too (correct behaviour: nothing to
+            # review).
+            new_hash = self._plan_material_hash(plan)
+            prev_hash = get_state().get_last_plan_hash()
+            if new_hash == prev_hash and reason not in (
+                    "startup", "revision_request", "candidate_target",
+                    "operator_chat_request"):
+                self.set_task(
+                    f"plan unchanged ({len(scheduled)} target(s)); "
+                    "skipping review chain — previous advisories still "
+                    "apply. Plan tab updated with refreshed timestamp.",
+                    state="idle",
+                )
+                get_state().set_review_phase("final", review_id=review.review_id)
+                self.log.info("plan-hash unchanged (%s); chain skipped — "
+                                "saved 4 bus messages + per-agent dispatch",
+                                new_hash[:8])
+                return
+            get_state().set_last_plan_hash(new_hash)
+
             get_state().set_review_phase("critic", review_id=review.review_id)
             self.set_task(
                 f"Stage 1/5: Planner published DRAFT ({len(scheduled)} "
@@ -984,6 +1022,35 @@ class Planner(BaseAgent):
                 get_state().set_review_phase("stalled")
             except Exception:
                 pass
+
+    @staticmethod
+    def _plan_material_hash(plan: dict) -> str:
+        """Compute a hash of the plan's *material* fields — the bits
+        that, if unchanged, mean a fresh review chain would produce
+        identical advisories. Excludes built_at, reason (those change
+        on every rebuild but don't affect content)."""
+        import hashlib as _hashlib
+        import json as _json
+        material = {
+            "active_campaigns": plan.get("active_campaigns"),
+            "considered_count": plan.get("considered_count"),
+            "scheduled_total_min": plan.get("scheduled_total_min"),
+            "dark_window_min": plan.get("dark_window_min"),
+            "fallback_to_catalog": plan.get("fallback_to_catalog"),
+            "applied_constraints": plan.get("applied_constraints"),
+            "horizon_alt_min_deg": plan.get("horizon_alt_min_deg"),
+            "visible_targets": [
+                {"name": t.get("target_name"),
+                 "ra": t.get("ra_deg"),
+                 "dec": t.get("dec_deg"),
+                 "workflow": t.get("workflow"),
+                 "campaign": t.get("campaign_name"),
+                 "scheduled_for_min": t.get("scheduled_for_min")}
+                for t in (plan.get("visible_targets") or [])
+            ],
+        }
+        blob = _json.dumps(material, sort_keys=True, default=str)
+        return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
     async def safe_mode_step(self) -> None:
         # Planner doesn't talk to Claude in this phase, so safe mode is a no-op.

@@ -234,8 +234,25 @@ class Critic(BaseAgent):
         await asyncio.sleep(15)
         while not self.should_stop:
             now = asyncio.get_event_loop().time()
+            # Fast-loop adaptive cadence: when there's no active
+            # session, PHD2 RMS / NINA cooling checks are pure waste
+            # (nothing to monitor). Stretch the effective interval to
+            # 5 min in that case. Saves ~700 fast-loop wake-ups/day
+            # when the observatory is idle (most daytime hours).
+            active_fast_interval = FAST_LOOP_S
             try:
-                if now - self._last_fast >= FAST_LOOP_S:
+                from atlas.db.managers import SessionManager
+                sess = SessionManager.latest()
+                if sess is None:
+                    active_fast_interval = 300.0
+                else:
+                    state = sess.state.value if hasattr(sess.state, "value") else sess.state
+                    if state not in ("nominal", "warning"):
+                        active_fast_interval = 300.0
+            except Exception:
+                pass
+            try:
+                if now - self._last_fast >= active_fast_interval:
                     await self._fast_loop()
                     self._last_fast = asyncio.get_event_loop().time()
             except Exception:
@@ -251,7 +268,7 @@ class Critic(BaseAgent):
             # the two upcoming deadlines, with a 5s floor so we don't
             # tight-loop on a clock-jitter edge case.
             now = asyncio.get_event_loop().time()
-            next_fast = self._last_fast + FAST_LOOP_S - now
+            next_fast = self._last_fast + active_fast_interval - now
             next_std = self._last_standard + STANDARD_LOOP_S - now
             await asyncio.sleep(max(5.0, min(next_fast, next_std)))
 
