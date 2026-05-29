@@ -91,6 +91,36 @@ GET_CURRENT_PLAN_TOOL = ToolSpec(
 )
 
 
+async def _get_right_now(p: dict) -> dict:
+    """Return the unified live snapshot computed from every state slot.
+
+    This is the doctrine's single source of truth — same data, same
+    view, same answer for ATLAS the LLM, the dashboard, and any other
+    agent. Three layers (situational / procedural / strategic) plus
+    blocked_reason and pending_decisions. See docs/operational_awareness.md.
+
+    Call this when you need to know what's happening RIGHT NOW —
+    don't reason from stale memory.
+    """
+    from atlas.agents.state import get_state
+    return get_state().get_right_now()
+
+
+GET_RIGHT_NOW_TOOL = ToolSpec(
+    "get_right_now",
+    "Read ATLAS's unified live snapshot: what IS (verdict, weather, "
+    "day phase, manual control), what SHOULD be (active slot, action, "
+    "next thing, planned end), what's WORTHWHILE (plan fit, advisories, "
+    "campaign progress), plus any blocked_reason and pending_decisions "
+    "ATLAS is deliberating about. ALWAYS call this before answering "
+    "questions about current state, current target, current verdict, "
+    "what's happening now, or whether to act — don't rely on stale "
+    "context. Returns a single 'summary' field with a one-line digest.",
+    {"type": "object", "properties": {}},
+    _get_right_now,
+)
+
+
 def all_shared_tools() -> list[ToolSpec]:
     """Tools that every agent gets registered automatically."""
-    return [GET_CURRENT_PLAN_TOOL]
+    return [GET_CURRENT_PLAN_TOOL, GET_RIGHT_NOW_TOOL]

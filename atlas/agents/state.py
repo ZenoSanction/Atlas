@@ -125,6 +125,61 @@ class AgentLiveStatus:
         return asdict(self)
 
 
+# ---- Execution snapshot (the new substrate behind "Right Now") --------------
+
+@dataclass
+class ExecutionSnapshot:
+    """What ATLAS is actually doing inside the active slot.
+
+    This is the small new write-target the doctrine calls for. Every
+    other field surfaced by ``get_right_now()`` is *read* from an
+    existing state slot (tonight_plan, session_review, verdict,
+    weather assessment, manual control). Only these execution-level
+    details have nowhere else to live, so they get their own slot.
+
+    Fields are all optional — agents fill them in as work progresses.
+    All-None is a valid state (nothing executing right now).
+    """
+    active_slot: dict | None = None          # {target_name, workflow, start_utc, end_utc}
+    active_action: str | None = None         # "capturing L frame 18/30"
+    active_frame: dict | None = None         # {filter, exposure_s, index, count}
+    slot_progress: dict | None = None        # {elapsed_min, scheduled_min, frames_done, frames_total}
+    next_action: str | None = None           # "slew to NGC 7331 at 02:15"
+    next_action_at: str | None = None        # ISO
+    planned_session_end: str | None = None   # ISO
+    blocked_reason: str | None = None        # if execution is paused, why
+    updated_at: str = ""
+
+    def to_jsonable(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PendingDecision:
+    """A material change ATLAS is deliberating about.
+
+    Doctrine: most autonomous systems are black boxes — they just act.
+    ATLAS narrates its deliberation so the human can intervene with
+    better information, or let ATLAS finish its thinking. Pending
+    decisions appear in Right Now and on the dashboard. The decision
+    has a timeout; on expiry ATLAS picks ``default_action`` (which
+    usually means: don't change anything, OR safe-NO-GO if a real
+    risk has developed).
+    """
+    id: str
+    kind: str                               # pause | resume | drop_slot | truncate | swap | insert | safe_shutdown
+    narration: str                          # human-readable explanation
+    started_at: str                         # ISO
+    decide_by: str                          # ISO timeout
+    default_action: str                     # what happens on timeout
+    evidence: dict = field(default_factory=dict)
+    confidence_layer: str = "rules"         # rules | history | llm | unresolved
+    severity: str = "info"                  # info | warning | critical
+
+    def to_jsonable(self) -> dict:
+        return asdict(self)
+
+
 class _ObservatoryState:
     def __init__(self) -> None:
         self._lock = Lock()
@@ -133,6 +188,11 @@ class _ObservatoryState:
         self._tonight_plan: dict | None = None
         self._archivist_last: dict | None = None
         self._oracle_last: dict | None = None
+        # ---- Execution snapshot + pending decisions (Right Now substrate) ----
+        # These are the only NEW write-targets the doctrine introduces.
+        # Everything else in Right Now is aggregated from existing slots.
+        self._execution: ExecutionSnapshot = ExecutionSnapshot()
+        self._pending_decisions: dict[str, PendingDecision] = {}
         # Per-agent live status. Mission Control reads from here.
         self._agent_status: dict[str, AgentLiveStatus] = {
             n: AgentLiveStatus(name=n)
@@ -545,6 +605,237 @@ class _ObservatoryState:
     def get_manual_actions(self, limit: int = 40) -> list[dict]:
         with self._lock:
             return list(self._manual_actions[:limit])
+
+    # ---- Execution snapshot (procedural layer) ----------------------------
+    def update_execution(self, **fields) -> ExecutionSnapshot:
+        """Patch fields on the execution snapshot. Pass any subset of
+        ExecutionSnapshot's fields. Pass ``field=None`` to clear it.
+
+        Typical callers:
+          - Operator's slot executor sets ``active_slot`` when a slot
+            starts; clears it when the slot ends.
+          - NINA capture-progress callback updates ``active_frame`` +
+            ``active_action`` + ``slot_progress`` per-frame.
+          - Hard-stop sets ``blocked_reason`` when execution pauses.
+        """
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        with self._lock:
+            for k, v in fields.items():
+                if hasattr(self._execution, k):
+                    setattr(self._execution, k, v)
+            self._execution.updated_at = now
+            return self._execution
+
+    def get_execution(self) -> ExecutionSnapshot:
+        with self._lock:
+            return self._execution
+
+    def clear_execution(self) -> None:
+        """Reset to all-None — useful when execution stops cleanly."""
+        with self._lock:
+            self._execution = ExecutionSnapshot(
+                updated_at=datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            )
+
+    # ---- Pending decisions (deliberation narration) -----------------------
+    def post_pending_decision(self, pd: PendingDecision) -> PendingDecision:
+        """Publish a new deliberation. ATLAS calls this when it starts
+        weighing a material change. The dashboard's Pending Decisions
+        panel reads from get_pending_decisions(). If a decision with
+        the same id already exists, it is replaced."""
+        with self._lock:
+            self._pending_decisions[pd.id] = pd
+            return pd
+
+    def resolve_pending_decision(self, decision_id: str,
+                                   resolution: str = "resolved") -> bool:
+        """Remove a pending decision. Called when ATLAS actually picks
+        a verb (pause/swap/etc.) or the human overrides. Returns True
+        if a matching decision was removed."""
+        with self._lock:
+            return self._pending_decisions.pop(decision_id, None) is not None
+
+    def get_pending_decisions(self) -> list[PendingDecision]:
+        with self._lock:
+            return list(self._pending_decisions.values())
+
+    # ---- The unified "Right Now" view -------------------------------------
+    def get_right_now(self) -> dict:
+        """Read-only aggregated snapshot. The single source of truth for
+        ATLAS-the-LLM, the dashboard, and other agents.
+
+        Three layers per the doctrine:
+          - situational: what IS (verdict, weather, day phase, manual)
+          - procedural: what SHOULD be (active slot, action, next thing)
+          - strategic: what's WORTHWHILE (plan fit, advisories, campaigns)
+
+        Plus blocked_reason and pending_decisions for the deliberation
+        narration. All fields are JSON-safe.
+
+        This method does not write anything. It reads existing slots
+        under the lock and composes the view. Safe to call from any
+        thread, including the asyncio event loop."""
+        computed_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        # --- Snapshot under the lock (no IO, no logic here) ----------
+        with self._lock:
+            verdict = self._verdict
+            assessment = self._assessment
+            plan = self._tonight_plan
+            review = self._session_review
+            preflight = self._preflight
+            execution = self._execution
+            manual = self._manual_control
+            pending = list(self._pending_decisions.values())
+            review_phase = {
+                "phase": self._review_phase,
+                "review_id": self._review_phase_review_id,
+                "updated_at": self._review_phase_updated_at,
+            }
+
+        # --- Day phase (cheap, no IO) — best-effort -----------------
+        day_phase_d: dict | None = None
+        minutes_dark_remaining: float | None = None
+        minutes_until_next_phase: float | None = None
+        try:
+            from atlas.db.managers import ConfigManager
+            site = ConfigManager.get_site()
+            if site is not None:
+                lat = float(getattr(site, "latitude", 0.0) or 0.0)
+                lon = float(getattr(site, "longitude", 0.0) or 0.0)
+                if lat or lon:
+                    from atlas.astronomy.day_phase import current_phase
+                    dp = current_phase(lat, lon)
+                    day_phase_d = dp.to_jsonable()
+                    minutes_dark_remaining = dp.minutes_of_dark_remaining
+                    minutes_until_next_phase = dp.minutes_until_next_phase
+        except Exception:
+            day_phase_d = None
+
+        # --- Plan stats ---------------------------------------------
+        visible_targets = (plan or {}).get("visible_targets") or []
+        scheduled_total_min = (plan or {}).get("scheduled_total_min")
+        dark_window_min = (plan or {}).get("dark_window_min")
+        fit_pct: float | None = None
+        if dark_window_min and scheduled_total_min is not None:
+            try:
+                if float(dark_window_min) > 0:
+                    fit_pct = round(
+                        100.0 * float(scheduled_total_min) / float(dark_window_min),
+                        1,
+                    )
+            except Exception:
+                fit_pct = None
+
+        # --- Advisory severity rollup --------------------------------
+        adv_list = (review or {}).get("advisories") or []
+        adv_counts = {"info": 0, "warning": 0, "critical": 0}
+        for a in adv_list:
+            s = a.get("severity")
+            if s in adv_counts:
+                adv_counts[s] += 1
+
+        # --- Session active? Heuristic: execution has an active slot
+        # OR the preflight verdict says session_active.
+        session_active = bool(getattr(execution, "active_slot", None))
+        if preflight and isinstance(preflight, dict):
+            if preflight.get("session_active"):
+                session_active = True
+
+        # --- Compose ------------------------------------------------
+        return {
+            "computed_at": computed_at,
+            "situational": {
+                "verdict": (verdict.verdict if verdict else VERDICT_UNKNOWN),
+                "verdict_reason": (verdict.reason if verdict else ""),
+                "verdict_decided_at": (verdict.decided_at if verdict else None),
+                "weather_summary": (assessment.summary if assessment else None),
+                "weather_severity": (assessment.overall_severity if assessment else None),
+                "weather_assessed_at": (assessment.assessed_at if assessment else None),
+                "day_phase": day_phase_d,
+                "minutes_of_dark_remaining": minutes_dark_remaining,
+                "minutes_until_next_phase": minutes_until_next_phase,
+                "manual_control": {
+                    "engaged": manual.engaged,
+                    "reason": manual.reason if manual.engaged else None,
+                    "engaged_at": manual.engaged_at if manual.engaged else None,
+                },
+                "preflight_verdict": (preflight or {}).get("verdict") if preflight else None,
+                "preflight_reason": (preflight or {}).get("reason") if preflight else None,
+                "session_active": session_active,
+            },
+            "procedural": {
+                "active_slot": execution.active_slot,
+                "active_action": execution.active_action,
+                "active_frame": execution.active_frame,
+                "slot_progress": execution.slot_progress,
+                "next_action": execution.next_action,
+                "next_action_at": execution.next_action_at,
+                "planned_session_end": execution.planned_session_end,
+                "execution_updated_at": execution.updated_at or None,
+            },
+            "strategic": {
+                "plan_present": plan is not None,
+                "plan_built_at": (plan or {}).get("built_at"),
+                "plan_reason": (plan or {}).get("reason"),
+                "visible_target_count": len(visible_targets),
+                "considered_count": (plan or {}).get("considered_count"),
+                "scheduled_total_min": scheduled_total_min,
+                "dark_window_min": dark_window_min,
+                "fit_pct": fit_pct,
+                "active_campaigns": (plan or {}).get("active_campaigns"),
+                "advisory_count": len(adv_list),
+                "advisory_counts": adv_counts,
+                "review_phase": review_phase.get("phase"),
+                "review_phase_updated_at": review_phase.get("updated_at"),
+                "in_recovery": bool((plan or {}).get("in_recovery")),
+                "fallback_to_catalog": (plan or {}).get("fallback_to_catalog"),
+            },
+            "blocked_reason": execution.blocked_reason,
+            "pending_decisions": [pd.to_jsonable() for pd in pending],
+            # Top-line summary string — convenient for the LLM and any
+            # caller that just wants one line. Built last so it can
+            # reference the layers above.
+            "summary": _summarize_right_now(
+                verdict=verdict,
+                day_phase_d=day_phase_d,
+                execution=execution,
+                manual=manual,
+                visible_target_count=len(visible_targets),
+                plan_present=plan is not None,
+                pending_count=len(pending),
+            ),
+        }
+
+
+def _summarize_right_now(*, verdict, day_phase_d, execution, manual,
+                            visible_target_count: int, plan_present: bool,
+                            pending_count: int) -> str:
+    """One-line human summary used by ``get_right_now()['summary']``."""
+    bits: list[str] = []
+    if manual and getattr(manual, "engaged", False):
+        bits.append("MANUAL")
+    v = (verdict.verdict if verdict else VERDICT_UNKNOWN)
+    bits.append(f"verdict={v}")
+    if day_phase_d:
+        ph = day_phase_d.get("phase")
+        if ph:
+            bits.append(f"phase={ph}")
+    slot = getattr(execution, "active_slot", None)
+    if slot:
+        tgt = (slot or {}).get("target_name") or "?"
+        bits.append(f"slot={tgt}")
+        if getattr(execution, "active_action", None):
+            bits.append(f"doing={execution.active_action}")
+    elif plan_present:
+        bits.append(f"plan={visible_target_count} targets, idle")
+    else:
+        bits.append("no plan yet")
+    if pending_count:
+        bits.append(f"pending={pending_count}")
+    if getattr(execution, "blocked_reason", None):
+        bits.append(f"blocked={execution.blocked_reason}")
+    return " | ".join(bits)
 
 
 _state: _ObservatoryState | None = None

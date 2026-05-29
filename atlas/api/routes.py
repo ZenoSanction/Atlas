@@ -1290,6 +1290,31 @@ async def plan_diagnose() -> dict:
 
 
 # ============================================================================
+# Right Now — unified live snapshot (situational / procedural / strategic)
+# ============================================================================
+
+@api_router.get("/right-now")
+async def right_now() -> dict:
+    """The unified live snapshot ATLAS uses to know what's happening.
+
+    Computed on demand from existing state slots — no caching, no
+    drift. Same view ATLAS the LLM sees via its ``get_right_now``
+    tool. See docs/operational_awareness.md for the doctrine that
+    makes this *a view, not a new write target*.
+
+    Layers:
+      situational  - verdict, weather, day phase, manual control
+      procedural   - active slot, action, next thing, planned end
+      strategic    - plan fit, advisories, campaign progress
+
+    Plus blocked_reason and pending_decisions for narrated
+    deliberation. The 'summary' field at top level is a one-line
+    digest the dashboard's header can render in any tab."""
+    from atlas.agents.state import get_state
+    return get_state().get_right_now()
+
+
+# ============================================================================
 # Agent activity (post-session + research summaries)
 # ============================================================================
 
