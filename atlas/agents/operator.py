@@ -142,6 +142,62 @@ class Operator(BaseAgent):
 
     # ---- Verdict watcher: convert verdict transitions into actions -----
 
+    async def _consult_confidence_layer(self) -> None:
+        """Run Confidence Layer 1 against the current Right Now snapshot
+        and deliberate on any softer recommendation.
+
+        Doctrine path: rules -> narrator.deliberate() -> adapt_plan().
+        The deliberation appears in Pending Decisions; the human can
+        override. On timeout the verb runs (or skips, per the rule's
+        default).
+
+        Conservative scope vs the legacy NO-GO transitions:
+          - The legacy path owns hard NO-GO -> shutdown + clear-hysteresis
+            recovery. We do NOT duplicate those here.
+          - We act only on recommendations whose verb is one of the
+            *softer* adaptations: drop_slot, truncate, swap, insert.
+            (pause/resume/safe_shutdown are owned by the legacy code +
+            hard-stop pre-empt.)
+          - Skip if a deliberation is already live or a protection
+            sequence is running — don't pile up.
+        """
+        try:
+            from atlas.agents.confidence import recommend
+            from atlas.agents.narrator import deliberate, active_decisions
+        except Exception:
+            return  # confidence module optional during import
+        if self._shutdown_in_progress or self._startup_in_progress:
+            return
+        if get_state().is_manual():
+            return
+        if active_decisions():
+            return  # one deliberation at a time keeps the dashboard sane
+        rn = get_state().get_right_now()
+        rec = recommend(rn)
+        if rec is None or rec.verb in ("no_change", "pause", "resume",
+                                          "safe_shutdown"):
+            return  # legacy paths own these; nothing for us here
+        narration = (f"Considering: {rec.verb}. {rec.reason}. Watching "
+                       f"for {min(180, 60 + len(rec.reason))}s before acting. "
+                       f"Operator override available.")
+        # Background task so the watcher loop is never blocked
+        asyncio.create_task(
+            deliberate(
+                verb=rec.verb,
+                reason=rec.reason,
+                narration=narration,
+                evidence=rec.evidence,
+                decide_after_s=180.0,
+                default_action="apply",
+                confidence_layer=rec.confidence_layer,
+                severity=rec.severity,
+                verb_kwargs=rec.verb_kwargs or {},
+            ),
+            name=f"deliberate-{rec.rule_name or rec.verb}",
+        )
+        self.log.info("Confidence layer 1 -> deliberate %s (rule=%s, reason=%s)",
+                       rec.verb, rec.rule_name, rec.reason)
+
     async def _verdict_watcher_loop(self) -> None:
         """Watch OperatorVerdict transitions, fire protection + recovery.
 
@@ -228,6 +284,11 @@ class Operator(BaseAgent):
                         self._maybe_recover(verdict_reason=v.reason or ""),
                         name="operator-recovery",
                     )
+
+        # After the legacy NO-GO transitions, consult Confidence Layer 1
+        # for softer adaptations (drop expired slot, truncate near dawn,
+        # etc.). Doctrine: rules -> narrate -> adapt. Override available.
+        await self._consult_confidence_layer()
 
     async def _run_shutdown(self, *, reason: str) -> None:
         """Run SafeShutdownSequence end-to-end. Captures progress events
@@ -635,6 +696,16 @@ class Operator(BaseAgent):
             shutdown; we just stop the walk)
           - we leave the astronomical dark window
           - all slots are processed
+
+        Populates the execution snapshot at each transition so the
+        Right Now view's Procedural layer reflects what's actually
+        running:
+          active_slot           - the current slot dict
+          active_action         - human-readable phase string
+          next_action / next_action_at - the upcoming transition
+          planned_session_end   - last slot's end_utc, set once at start
+        On exit (success or early), clears the execution snapshot so
+        the dashboard returns to "no slot active" cleanly.
         """
         from atlas.db.managers import ConfigManager
         from datetime import datetime as _dt
@@ -642,6 +713,22 @@ class Operator(BaseAgent):
         site = ConfigManager.get_site()
         if site is None:
             return
+        # Set planned_session_end from the last slot once at start.
+        if slots:
+            last_end = slots[-1].get("end_utc")
+            if last_end:
+                get_state().update_execution(planned_session_end=last_end)
+        # The actual walk is done by a private coroutine wrapped in a
+        # try/finally below so every early-return path (NO-GO, dark
+        # window over, stop signal, exception) still clears the
+        # execution snapshot.
+        try:
+            await self._walk_plan_slots_inner(slots, session_id)
+        finally:
+            get_state().clear_execution()
+
+    async def _walk_plan_slots_inner(self, slots: list, session_id: int) -> None:
+        from datetime import datetime as _dt
         for idx, slot in enumerate(slots):
             if self.should_stop:
                 return
@@ -671,6 +758,16 @@ class Operator(BaseAgent):
                     slot_start = _dt.fromisoformat(start_iso.rstrip("Z"))
                     wait_s = (slot_start - _dt.utcnow()).total_seconds()
                     if wait_s > 1.0:
+                        # Populate execution snapshot with the next-action
+                        # signal so Right Now's Procedural layer shows
+                        # "Next: slew to <target> @ <ISO>" while we wait.
+                        get_state().update_execution(
+                            next_action=(
+                                f"start slot {idx+1}/{len(slots)}: "
+                                f"{slot.get('target_name') or '?'}"
+                            ),
+                            next_action_at=start_iso,
+                        )
                         self.set_task(
                             f"auto-session slot {idx+1}/{len(slots)} "
                             f"({slot.get('target_name')}) starts in "
@@ -693,6 +790,29 @@ class Operator(BaseAgent):
                     pass
             self._auto_session_active_slot_idx = idx
 
+            # Mark the slot as active in the Right Now Procedural layer.
+            # Includes target_name + workflow + start/end window so the
+            # dashboard shows "Slot: M51 (deepsky)" + the slot progress.
+            next_slot = slots[idx + 1] if idx + 1 < len(slots) else None
+            get_state().update_execution(
+                active_slot={
+                    "target_name": slot.get("target_name"),
+                    "workflow": slot.get("workflow"),
+                    "start_utc": slot.get("start_utc"),
+                    "end_utc": slot.get("end_utc"),
+                    "ra_deg": slot.get("ra_deg"),
+                    "dec_deg": slot.get("dec_deg"),
+                    "priority": slot.get("priority"),
+                },
+                active_action=f"dispatching capture sequence ({idx+1}/{len(slots)})",
+                next_action=(
+                    f"slot {idx+2}/{len(slots)}: {next_slot.get('target_name') or '?'}"
+                    if next_slot else "end of session"
+                ),
+                next_action_at=(next_slot or {}).get("start_utc"),
+                blocked_reason=None,
+            )
+
             # Fire start_capture_sequence for this slot
             self.set_task(
                 f"auto-session: capturing slot {idx+1}/{len(slots)} "
@@ -709,9 +829,15 @@ class Operator(BaseAgent):
                     "exposure_plan": slot.get("exposure_plan"),
                     "dither_every_n_frames": 1,
                 })
+                get_state().update_execution(
+                    active_action=f"capturing ({idx+1}/{len(slots)}) {slot.get('target_name') or '?'}",
+                )
             except Exception:
                 self.log.exception(
                     "auto-session: slot %d dispatch failed", idx + 1)
+                get_state().update_execution(
+                    active_action=f"slot {idx+1} dispatch failed; continuing",
+                )
                 continue
 
             # Wait until the slot's end_utc OR the capture completes
@@ -733,6 +859,8 @@ class Operator(BaseAgent):
                     pass
         self.log.info("auto-session: walked all %d slot(s) to completion",
                       len(slots))
+        # Note: the caller's try/finally clears the execution snapshot
+        # so we don't need to do it here.
 
     async def _preflight_loop(self) -> None:
         """Periodic pre-flight tick.
