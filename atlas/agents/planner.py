@@ -403,6 +403,201 @@ class Planner(BaseAgent):
                             rationale="Rebuilt plan on revision request",
                             session_id=msg.session_id)
 
+    async def build_single_target_session(self, *,
+                                                 target_name: str,
+                                                 ra_deg: float | None = None,
+                                                 dec_deg: float | None = None,
+                                                 workflow: str = "deepsky",
+                                                 reason: str | None = None,
+                                                 ) -> dict:
+        """Build a plan that dedicates the entire dark window to one target.
+
+        Used when the operator chats "dedicate tonight to NGC 7000" or
+        equivalent. Bypasses the active-campaigns walk; resolves the
+        target via SIMBAD / catalog (or trusts caller-supplied RA/Dec),
+        clips its visibility window to astronomical dark, and publishes
+        a one-slot plan that auto-starts the review chain.
+
+        Same publish + chain start as _rebuild_plan so all the downstream
+        machinery (versioning, Right Now, Critic/Operator/Oracle review,
+        Plan tab) behaves identically. Returns a small status dict for
+        the calling chat tool to summarise.
+        """
+        from atlas.agents.single_target_session import (
+            resolve_target, build_single_target_plan,
+        )
+        from atlas.agents.session_workflow import (
+            Advisory, SessionPlanState, new_review_id, STATE_READY,
+        )
+        from atlas.db.managers import ConfigManager
+        from datetime import datetime as _dt
+
+        reason = reason or "single_target_chat_request"
+        nm = (target_name or "").strip()
+
+        # ---- 1. Resolve target ------------------------------------------
+        target = await resolve_target(
+            nm, ra_deg=ra_deg, dec_deg=dec_deg,
+        )
+        if target is None:
+            await self._publish_empty_plan_with_advisory(
+                reason=f"single_target_unresolved:{nm}",
+                advisory_kind="planner_error",
+                advisory_severity="warning",
+                advisory_msg=(
+                    f"Could not resolve target {nm!r} via SIMBAD or the "
+                    f"on-disk catalog. Provide RA/Dec explicitly or check "
+                    f"the spelling (try 'NGC 7000', 'M 42', 'IC 1318', "
+                    f"etc.). Plan tab kept populated with this empty-plan "
+                    f"placeholder so the workflow never stalls."
+                ),
+            )
+            return {"ok": False, "error": "unresolved_target",
+                      "target_name": nm,
+                      "message": f"Could not resolve {nm!r}."}
+
+        # ---- 2. Site config ---------------------------------------------
+        site = ConfigManager.get_site()
+        if site is None:
+            await self._publish_empty_plan_with_advisory(
+                reason="single_target_no_site",
+                advisory_kind="config_missing",
+                advisory_severity="critical",
+                advisory_msg=("Site coordinates are not configured. "
+                                  "Set latitude/longitude in the Setup tab."),
+            )
+            return {"ok": False, "error": "no_site_config",
+                      "message": "Site coordinates not configured."}
+
+        lat = float(site.latitude); lon = float(site.longitude)
+        horizon_alt = float(getattr(site, "horizon_alt_min_deg", 25.0) or 25.0)
+
+        # ---- 3. Build the plan -------------------------------------------
+        plan = build_single_target_plan(
+            target=target, lat=lat, lon=lon,
+            horizon_alt=horizon_alt,
+            workflow=workflow,
+            reason=reason,
+        )
+
+        # ---- 4. Versioning + publish ------------------------------------
+        prev = get_state().get_tonight_plan()
+        plan = next_version(
+            prev_plan=prev, new_plan=plan,
+            reason=f"single_target: {target['target_name']}",
+            verb="single_target_session",
+        )
+        get_state().set_tonight_plan(plan)
+        # Reset the plan-hash so the review chain isn't accidentally
+        # skipped — operator chat requests must always re-run advisories.
+        get_state().set_last_plan_hash(None)
+
+        n_targets = len(plan.get("visible_targets") or [])
+        await self.bus.broadcast_event({
+            "type": "plan_update",
+            "sender": "planner",
+            "kind": "single_target_session",
+            "visible": n_targets,
+            "target_name": target["target_name"],
+            "reason": reason,
+            "sent_at": plan["built_at"],
+        })
+        self.set_task(
+            f"single-target session built: {target['target_name']} "
+            f"({plan.get('scheduled_total_min', 0):.0f} min) — "
+            f"starting review chain",
+            state="working",
+        )
+
+        # ---- 5. Build session_review + advisories -----------------------
+        review = SessionPlanState(
+            review_id=new_review_id(),
+            plan=plan,
+            started_at=plan["built_at"],
+            state=STATE_READY,
+        )
+        review.add_advisory(Advisory(
+            kind="single_target_session",
+            severity="info",
+            message=(f"Operator requested single-target session: "
+                       f"{target['target_name']} for the whole "
+                       f"astronomical dark window."),
+            source="planner",
+            at=_dt.utcnow().isoformat(timespec="seconds") + "Z",
+        ))
+        if plan.get("blocked_reason"):
+            review.add_advisory(Advisory(
+                kind="single_target_unreachable",
+                severity="warning",
+                message=plan["blocked_reason"],
+                source="planner",
+                at=_dt.utcnow().isoformat(timespec="seconds") + "Z",
+            ))
+        get_state().set_session_review(review.to_jsonable())
+
+        # ---- 6. Kick the review chain to Critic --------------------------
+        get_state().set_review_phase("critic", review_id=review.review_id)
+        try:
+            await self.bus.broadcast_event({
+                "type": "review_chain_stage",
+                "sender": "planner",
+                "stage": "1/5",
+                "agent": "planner",
+                "phase": "draft",
+                "review_id": review.review_id,
+                "n_targets": n_targets,
+                "sent_at": plan["built_at"],
+            })
+        except Exception:
+            pass
+        await self.send(
+            AgentName.CRITIC, AgentMessageKind.STATUS,
+            payload={
+                "summary": (f"Single-target session DRAFT — "
+                              f"{target['target_name']}, "
+                              f"{plan.get('scheduled_total_min', 0):.0f} "
+                              f"min dedicated. Begin Critic review."),
+                "kind": "plan_review",
+                "phase": "critic",
+                "review_id": review.review_id,
+                "review": review.to_jsonable(),
+                "from_chat": False,
+            },
+        )
+
+        self.log_decision(
+            "single_target_session_built",
+            inputs={"target_name": target["target_name"],
+                      "ra_deg": target["ra_deg"],
+                      "dec_deg": target["dec_deg"],
+                      "source": target.get("source"),
+                      "reason": reason},
+            outputs={"slot_minutes": plan.get("scheduled_total_min"),
+                       "dark_window_min": plan.get("dark_window_min"),
+                       "review_id": review.review_id},
+            rationale=("Operator-directed single-target session; chain "
+                          "started for Critic + Operator + Oracle review."),
+        )
+
+        return {
+            "ok": True,
+            "target_name": target["target_name"],
+            "ra_deg": target["ra_deg"],
+            "dec_deg": target["dec_deg"],
+            "source": target.get("source"),
+            "slot_minutes": plan.get("scheduled_total_min"),
+            "dark_window_min": plan.get("dark_window_min"),
+            "review_id": review.review_id,
+            "blocked_reason": plan.get("blocked_reason"),
+            "message": (
+                f"Built single-target session for "
+                f"{target['target_name']} "
+                f"({plan.get('scheduled_total_min', 0):.0f} min "
+                f"of {plan.get('dark_window_min') or 0:.0f} min dark). "
+                f"Chain dispatched to Critic."
+            ),
+        }
+
     # _handle_session_decision was removed in the 2026-05-21 refactor.
     # The plan is now published READY directly from _rebuild_plan; the
     # Operator only intervenes for hard-stops (storm / equipment risk),

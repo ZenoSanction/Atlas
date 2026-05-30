@@ -457,6 +457,72 @@ ADAPT_PLAN_TOOL = ToolSpec(
 )
 
 
+# ---- Single-target dedicated-night session (operator-facing) ---------------
+
+async def _build_single_target_session_op(p: dict) -> dict:
+    """Delegate to the Planner's single-target builder.
+
+    ATLAS calls this directly when the operator asks for a one-target
+    session ("dedicate tonight to NGC 7000"). Same handler the Planner
+    exposes as its own tool — single source of truth, no second hop
+    through send_to_agent.
+    """
+    from atlas.agents.planner_tools import _build_single_target_session
+    return await _build_single_target_session(p)
+
+
+BUILD_SINGLE_TARGET_TOOL = ToolSpec(
+    name="build_single_target_session",
+    description=(
+        "Dedicate the ENTIRE astronomical dark window to one target. "
+        "Use whenever the operator asks for a single-target session "
+        "('dedicate tonight to NGC 7000', 'all night on M42', "
+        "'deep integration on the Orion Nebula'). Resolves the name "
+        "via SIMBAD then the local catalog, OR pass ra_deg + dec_deg "
+        "directly. Builds a one-slot plan covering the longest "
+        "contiguous visibility span inside the dark window, publishes "
+        "it as the next plan version, and auto-starts the review "
+        "chain (Critic -> Operator -> Oracle -> Planner FINAL). "
+        "Returns the resolved coords, slot minutes, dark_window_min, "
+        "and review_id. ALWAYS publishes a plan even on error. "
+        "Use this INSTEAD of rebuild_plan whenever the operator wants "
+        "one specific target rather than the normal multi-target queue."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "target_name": {
+                "type": "string",
+                "description": "Object name (SIMBAD or catalog). "
+                                  "Required unless ra_deg + dec_deg given.",
+            },
+            "ra_deg": {
+                "type": "number",
+                "description": "J2000 RA in degrees (0-360). Optional; "
+                                  "skips name lookup when paired with dec_deg.",
+            },
+            "dec_deg": {
+                "type": "number",
+                "description": "J2000 Dec in degrees (-90 to +90).",
+            },
+            "workflow": {
+                "type": "string",
+                "description": "Workflow to apply: deepsky, photometry, "
+                                  "exoplanet, transient, planetary, astrometry. "
+                                  "Defaults to deepsky.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Short audit reason (e.g. 'operator chat: "
+                                  "single target NGC 7000'). Optional.",
+            },
+        },
+    },
+    handler=_build_single_target_session_op,
+)
+
+
 def all_operator_tools() -> list[ToolSpec]:
     """Return the full set of tools the Operator should register."""
-    return [*WEATHER_TOOLS, SYSTEM_STATUS_TOOL, CAPTURE_TOOL, ADAPT_PLAN_TOOL]
+    return [*WEATHER_TOOLS, SYSTEM_STATUS_TOOL, CAPTURE_TOOL,
+              ADAPT_PLAN_TOOL, BUILD_SINGLE_TARGET_TOOL]

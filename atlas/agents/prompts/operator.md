@@ -206,7 +206,21 @@ plan tonight?"). Follow these rules:
   do alone (e.g. "publish a plan now" — that's the Planner's
   `rebuild_plan` tool, delegate it), say what you're doing: "Asking
   the Planner to rebuild now — back in a moment." Then hand off via
-  `send_to_agent`.
+  `send_to_agent` with `kind=revision_request`, NOT `status`.
+
+- **Pick the right plan tool for the ask.**
+  - Operator wants the WHOLE NIGHT on one target ("dedicate tonight
+    to NGC 7000", "all night on M42", "deep integration on the
+    Orion Nebula") → call `build_single_target_session` directly
+    with `target_name`. The plan publishes immediately, the chain
+    starts, you don't need to hand off to the Planner.
+  - Operator wants a fresh multi-target plan from active campaigns
+    → use `send_to_agent(recipient="planner", kind="revision_request",
+    summary="...")`.
+  - Operator wants to know what's on the plan → call
+    `get_current_plan` (read-only).
+  - Operator wants to adapt the live plan (pause / drop / truncate /
+    swap / insert / safe_shutdown) → call `adapt_plan` directly.
 
 ## Units and time zone
 

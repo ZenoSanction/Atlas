@@ -134,6 +134,57 @@ async def _rebuild_plan(p: dict) -> dict:
     }
 
 
+async def _build_single_target_session(p: dict) -> dict:
+    """Tool: dedicate the entire dark window to one target.
+
+    Resolves the target name via SIMBAD then the local catalog (or
+    trusts caller-supplied RA/Dec), computes its visibility inside
+    tonight's astronomical dark window at the site horizon, and
+    publishes a one-slot plan that auto-starts the review chain to
+    the Critic. Same publish + chain machinery as rebuild_plan.
+    """
+    target_name = (p.get("target_name") or "").strip()
+    if not target_name and (p.get("ra_deg") is None or p.get("dec_deg") is None):
+        return {"error": "Provide target_name OR (ra_deg AND dec_deg)."}
+    ra_deg = p.get("ra_deg")
+    dec_deg = p.get("dec_deg")
+    workflow = (p.get("workflow") or "deepsky").strip() or "deepsky"
+    reason = (p.get("reason") or "single_target_chat_request").strip()
+    try:
+        from atlas.agents.coordinator import get_coordinator
+        from atlas.db.models import AgentName
+        planner = get_coordinator().get(AgentName.PLANNER)
+    except Exception as e:
+        return {"error": f"Planner agent not available: {e}"}
+    try:
+        return await planner.build_single_target_session(
+            target_name=target_name,
+            ra_deg=float(ra_deg) if ra_deg is not None else None,
+            dec_deg=float(dec_deg) if dec_deg is not None else None,
+            workflow=workflow,
+            reason=reason,
+        )
+    except Exception as e:
+        # Bulletproof: still try to publish something so the Plan tab
+        # never sits empty. The Planner's _publish_empty_plan_with_advisory
+        # is the last-resort safety net.
+        try:
+            await planner._publish_empty_plan_with_advisory(
+                reason=f"single_target_crashed:{target_name}",
+                advisory_kind="planner_error",
+                advisory_severity="critical",
+                advisory_msg=(
+                    f"build_single_target_session crashed: "
+                    f"{type(e).__name__}: {e}. Fallback empty plan "
+                    f"published so the Plan tab is never empty."
+                ),
+            )
+        except Exception:
+            pass
+        return {"ok": False, "error": f"{type(e).__name__}: {e}",
+                  "fallback_published": True}
+
+
 async def _cancel_session(p: dict) -> dict:
     """Look up the Planner agent at call time so this tool can live in the
     module-level PLANNER_TOOLS list (matching the other tools' pattern)
@@ -171,13 +222,47 @@ PLANNER_TOOLS: list[ToolSpec] = [
              "plan, when campaigns have changed, or when you want to "
              "incorporate new revisit candidates. ALWAYS publishes a plan "
              "even on error (fallback empty plan with the error as an "
-             "advisory). Returns the rebuilt plan's summary stats.",
+             "advisory). Returns the rebuilt plan's summary stats. "
+             "NOTE: this builds a normal multi-target plan from active "
+             "campaigns. If the operator wants the WHOLE NIGHT dedicated "
+             "to one target (\"dedicate tonight to NGC 7000\"), use "
+             "build_single_target_session instead.",
              {"type": "object",
               "properties": {
                   "reason": {"type": "string",
                               "description": "Short audit reason for this rebuild (e.g. 'operator chat request', 'new campaign added'). Optional."},
               }},
              _rebuild_plan),
+    ToolSpec("build_single_target_session",
+             "Dedicate the ENTIRE astronomical dark window to one target. "
+             "Use when the operator asks for a single-target session "
+             "(\"dedicate tonight to NGC 7000\", \"all night on M42\", "
+             "\"deep integration on the Orion Nebula\"). Resolves the name "
+             "via SIMBAD then the local catalog; or pass ra_deg + dec_deg "
+             "directly to skip the lookup. Builds a one-slot plan covering "
+             "the longest contiguous visibility span inside [dusk, dawn] "
+             "at the site horizon, publishes it as Plan v(N+1), and "
+             "auto-starts the review chain to the Critic. Returns the "
+             "resolved coords, slot minutes, and review_id. ALWAYS "
+             "publishes a plan even on error.",
+             {"type": "object",
+              "properties": {
+                  "target_name": {"type": "string",
+                                    "description": "Object name to look up "
+                                    "(SIMBAD/catalog). Required unless ra_deg+dec_deg given."},
+                  "ra_deg": {"type": "number",
+                              "description": "J2000 RA in degrees (0-360). "
+                              "Optional; skips name resolution when paired with dec_deg."},
+                  "dec_deg": {"type": "number",
+                                "description": "J2000 Dec in degrees (-90 to +90)."},
+                  "workflow": {"type": "string",
+                                "description": "Workflow to apply: deepsky, "
+                                "photometry, exoplanet, transient, planetary, "
+                                "astrometry. Defaults to deepsky."},
+                  "reason": {"type": "string",
+                              "description": "Short audit reason. Optional."},
+              }},
+             _build_single_target_session),
     ToolSpec("get_night_window",
              "Get tonight's astronomical dark window (sun below -12°) at "
              "the configured site. Returns dusk_utc, dawn_utc, and hours.",
