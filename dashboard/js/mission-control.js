@@ -15,6 +15,8 @@
 // single-utterance cutoff, so any ATLAS reply over ~10 sentences went
 // silent partway through.
 import { speak as ttsSpeak } from "/static/js/tts.js";
+// Voice-input secure-context check (LAN HTTP blocks mic in Chrome).
+import { applyVoiceSupportToButton } from "/static/js/voice-support.js";
 
 let _timer = null;
 let _historyByAgent = {};   // agent name -> array of {who, text}
@@ -272,9 +274,14 @@ function wireChatForms(api) {
 
     // Voice input — Web Speech API. Same wiring as the ATLAS-tab chat,
     // per-lane so each agent's chat input gets its own mic button.
+    // Boot-time check disables the button with an explanatory tooltip
+    // when the origin is plain HTTP from a non-localhost address
+    // (warm-room PC over LAN), so the user sees "switch to HTTPS"
+    // up front instead of a silent click-and-nothing-happens.
     if (micBtn) {
-      const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (Recog) {
+      const verdict = applyVoiceSupportToButton(micBtn);
+      if (verdict.usable) {
+        const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
         const recog = new Recog();
         recog.continuous = false;
         recog.interimResults = false;
@@ -296,11 +303,9 @@ function wireChatForms(api) {
         };
         recog.onend = () => micBtn.classList.remove("recording");
         recog.onerror = () => micBtn.classList.remove("recording");
-      } else {
-        micBtn.disabled = true;
-        micBtn.title = "Voice input not supported by this browser.";
-        micBtn.style.opacity = "0.4";
       }
+      // When !verdict.usable, applyVoiceSupportToButton already set the
+      // disabled state + tooltip, so we have nothing else to do here.
     }
 
     form.addEventListener("submit", async (ev) => {

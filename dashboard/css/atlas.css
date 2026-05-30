@@ -1487,3 +1487,25 @@ footer .muted { color: var(--text-dim); }
   color: var(--accent);
 }
 .plan-history .ph-at { float: right; font-size: 11px; }
+
+
+/* ============================================================
+   Voice-input banner — shown once when the page is loaded over
+   plain HTTP from a non-localhost origin (Chrome blocks mic).
+   ============================================================ */
+.voice-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 14px;
+  background: rgba(251, 191, 36, 0.12);
+  border-bottom: 1px solid var(--warn);
+  color: var(--text);
+  font-size: 13px;
+}
+.voice-banner .vb-icon { font-size: 16px; }
+.voice-banner .vb-text { flex: 1; line-height: 1.4; }
+.voice-banner .vb-dismiss {
+  background: transparent; color: var(--text-dim);
+  border: none; cursor: pointer; font-size: 18px;
+  padding: 0 6px;
+}
+.voice-banner .vb-dismiss:hover { color: var(--text); }

@@ -12,6 +12,7 @@ import { initChat } from "/static/js/atlas-chat.js";
 import { initSetup } from "/static/js/setup.js";
 import { initManualControl, refreshManualControl } from "/static/js/manual-control.js";
 import { initRightNow, refreshPlanHistory } from "/static/js/right-now.js";
+import { checkVoiceInputSupport } from "/static/js/voice-support.js";
 
 const api = (path, opts = {}) =>
   fetch(`/api${path}`, {
@@ -78,4 +79,27 @@ window.atlas = { api };
   // Right Now bar + Pending Decisions panel — polls /api/right-now
   // every 5 s. Visible across every tab per doctrine.
   initRightNow();
+
+  // One-time HTTPS-needed banner for warm-room access. Chrome blocks
+  // SpeechRecognition over plain HTTP on non-localhost origins, so the
+  // mic just dies silently when the user loads the dashboard from
+  // http://atlas-pc:8080. Show a single dismissable banner near the
+  // top so they know to switch to https:// (atlas serve --https).
+  // Per-chat banners + mic-button tooltips still fire on top of this.
+  const voice = checkVoiceInputSupport();
+  if (voice.reason === "insecure_origin"
+      && localStorage.getItem("atlas_voice_banner_dismissed") !== "1") {
+    const banner = document.createElement("div");
+    banner.className = "voice-banner";
+    banner.innerHTML = `
+      <span class="vb-icon">🎙</span>
+      <span class="vb-text">Voice input is blocked: ${voice.hint}</span>
+      <button class="vb-dismiss" type="button" title="Dismiss">×</button>
+    `;
+    document.body.insertBefore(banner, document.body.firstChild);
+    banner.querySelector(".vb-dismiss").addEventListener("click", () => {
+      try { localStorage.setItem("atlas_voice_banner_dismissed", "1"); } catch {}
+      banner.remove();
+    });
+  }
 })();

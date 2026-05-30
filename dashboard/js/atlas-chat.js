@@ -23,6 +23,14 @@
 // engine, making ATLAS go silent after about a minute of speech.
 import { speak } from "/static/js/tts.js";
 
+// Boot-time secure-context check. Chrome blocks SpeechRecognition over
+// plain HTTP from non-localhost origins, so the warm-room PC hitting
+// http://atlas-pc:8080 can't use voice. Detect this up front and tell
+// the user instead of letting the mic button silently fail.
+import {
+  checkVoiceInputSupport, applyVoiceSupportToButton,
+} from "/static/js/voice-support.js";
+
 export function initChat(api) {
   const form = document.getElementById("chat-form");
   const input = document.getElementById("chat-input");
@@ -53,14 +61,21 @@ export function initChat(api) {
   });
 
   // Voice input — Web Speech API -------------------------------------------
-  const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recog) {
-    voiceBtn.disabled = true;
-    voiceBtn.title =
-      "Voice input not supported by this browser. Use Chrome or Edge.";
-    voiceBtn.style.opacity = "0.4";
+  // Check secure-context + API support BEFORE constructing a recognizer
+  // so the warm-room user sees a clear "switch to https" message instead
+  // of "permission denied" after their first click. applyVoiceSupportToButton
+  // disables the button + sets a tooltip when usable is false.
+  const voiceVerdict = applyVoiceSupportToButton(voiceBtn);
+  if (!voiceVerdict.usable) {
+    // Surface the explanation in the chat history once, so the operator
+    // sees it without having to hover the mic button.
+    if (voiceVerdict.reason === "insecure_origin") {
+      appendMsg(history, "atlas", "ATLAS",
+                `Mic input is disabled: ${voiceVerdict.hint}`);
+    }
     return;
   }
+  const Recog = window.SpeechRecognition || window.webkitSpeechRecognition;
 
   // Single long-lived recognizer. Chrome's SpeechRecognition raises
   // InvalidStateError if you call start() while a previous session is
