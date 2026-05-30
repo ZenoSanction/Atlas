@@ -33,7 +33,10 @@ window.atlas = { api };
   initTabs({
     tonight: refreshMissionControl,
     weather: renderWeather,
-    plan: () => { renderPlan(); refreshPlanHistory(); },
+    // tabs.js calls handlers with window.atlas.api; forward it so
+    // renderPlan can fetch /plan/tonight. refreshPlanHistory reads
+    // window.atlas.api directly so it doesn't need the argument.
+    plan: (api) => { renderPlan(api); refreshPlanHistory(); },
     science: renderScience,
     history: renderHistory,
     atlas: () => {},
