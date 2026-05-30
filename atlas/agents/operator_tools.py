@@ -364,6 +364,99 @@ CAPTURE_TOOL = ToolSpec(
 )
 
 
+# ---- Plan adaptation (the seven verbs) -------------------------------------
+
+async def _adapt_plan_tool(p: dict) -> dict:
+    """Apply one of the seven adaptation verbs to the live plan.
+
+    Doctrine: this is how ATLAS adapts WITHIN the plan when conditions
+    materially change. The plan keeps its identity (review_id); the
+    version bumps; the diff is logged. See docs/operational_awareness.md.
+
+    Verbs:
+      pause          Hold execution. No plan change. Resume when ready.
+      resume         Pick the plan back up where it stopped.
+      drop_slot      Skip a slot (window expired, target unreachable).
+                     Pass target_name OR slot_index.
+      truncate       End the session early. Pass end_at_utc OR after_slot.
+      swap           Replace a slot's target. Pass target_name + replacement.
+      insert         Squeeze in a new slot. Pass slot + at_index.
+      safe_shutdown  Park mount, warm camera, hold execution.
+
+    Returns {ok, verb, summary, new_version, diff, error?}.
+    """
+    from atlas.agents.plan_adapter import adapt_plan
+    verb = (p.get("verb") or "").strip()
+    reason = (p.get("reason") or "").strip() or "no reason given"
+    evidence = p.get("evidence") or {}
+    kwargs = {k: v for k, v in p.items()
+              if k not in ("verb", "reason", "evidence")}
+    return adapt_plan(verb, reason=reason, evidence=evidence,
+                        **kwargs).to_jsonable()
+
+
+ADAPT_PLAN_TOOL = ToolSpec(
+    name="adapt_plan",
+    description=("Apply one of the seven adaptation verbs to the live "
+                  "plan. Use this — NOT a full rebuild — when conditions "
+                  "materially change mid-session. Verbs: pause, resume, "
+                  "drop_slot, truncate, swap, insert, safe_shutdown. "
+                  "ALWAYS provide a clear `reason`. The plan keeps its "
+                  "identity; the version increments; the diff is "
+                  "logged for the morning report."),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "verb": {
+                "type": "string",
+                "enum": ["pause", "resume", "drop_slot", "truncate",
+                          "swap", "insert", "safe_shutdown"],
+                "description": "Which adaptation verb to apply.",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Plain-English reason. Appears in the "
+                                  "audit log and morning report.",
+            },
+            "evidence": {
+                "type": "object",
+                "description": "Optional structured evidence (metrics, "
+                                  "forecast snippets) that justified the "
+                                  "verb. Free-form.",
+            },
+            "target_name": {
+                "type": "string",
+                "description": "For drop_slot/swap: which slot's target.",
+            },
+            "slot_index": {
+                "type": "integer",
+                "description": "For drop_slot/swap/insert: 0-based index.",
+            },
+            "end_at_utc": {
+                "type": "string",
+                "description": "For truncate: ISO timestamp to end at.",
+            },
+            "after_slot": {
+                "type": "string",
+                "description": "For truncate: end after this target_name.",
+            },
+            "replacement": {
+                "type": "object",
+                "description": "For swap: new slot dict (target_name, "
+                                  "workflow, ra_deg, dec_deg, priority, ...).",
+            },
+            "slot": {
+                "type": "object",
+                "description": "For insert: new slot dict (target_name, "
+                                  "start_utc, end_utc, priority, ...).",
+            },
+        },
+        "required": ["verb", "reason"],
+    },
+    handler=_adapt_plan_tool,
+)
+
+
 def all_operator_tools() -> list[ToolSpec]:
     """Return the full set of tools the Operator should register."""
-    return [*WEATHER_TOOLS, SYSTEM_STATUS_TOOL, CAPTURE_TOOL]
+    return [*WEATHER_TOOLS, SYSTEM_STATUS_TOOL, CAPTURE_TOOL, ADAPT_PLAN_TOOL]

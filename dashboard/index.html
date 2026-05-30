@@ -66,6 +66,35 @@
   </div>
 </div>
 
+<!-- RIGHT NOW — unified live snapshot. Visible across every tab.
+     Computed on demand by /api/right-now; doctrine: this is a *view*,
+     not a write-target, so it can't drift from reality. -->
+<div id="right-now-bar" class="right-now-bar" data-state="loading">
+  <div class="rn-row">
+    <span class="rn-summary" id="rn-summary">Loading Right Now…</span>
+    <button id="rn-refresh" class="btn-link" type="button" title="Refresh">↻</button>
+  </div>
+  <div class="rn-layers">
+    <div class="rn-layer" data-layer="situational">
+      <div class="rn-layer-title">Situational</div>
+      <div class="rn-layer-body" id="rn-situational">—</div>
+    </div>
+    <div class="rn-layer" data-layer="procedural">
+      <div class="rn-layer-title">Procedural</div>
+      <div class="rn-layer-body" id="rn-procedural">—</div>
+    </div>
+    <div class="rn-layer" data-layer="strategic">
+      <div class="rn-layer-title">Strategic</div>
+      <div class="rn-layer-body" id="rn-strategic">—</div>
+    </div>
+  </div>
+</div>
+
+<!-- PENDING DECISIONS — ATLAS deliberates aloud here. Each card is a
+     PendingDecision the human can Apply / Override / Cancel. Hidden
+     when no decisions are pending. -->
+<div id="pending-decisions" class="pending-decisions hidden" aria-live="polite"></div>
+
 <main>
   <!-- TONIGHT — MISSION CONTROL -->
   <section class="panel" id="tab-tonight">
@@ -398,11 +427,22 @@
   <!-- PLAN -->
   <section class="panel" id="tab-plan">
     <div class="row-spread">
-      <h2>Tonight's Targets</h2>
+      <h2>Tonight's Targets <span id="plan-version-badge" class="version-badge hidden"></span></h2>
       <span id="plan-built" class="muted">—</span>
     </div>
     <p class="hint">Targets from your active campaigns that are currently above the site horizon (alt ≥ horizon_alt_min). Highest priority first, then highest altitude. Rebuilt every 30 min and on Operator revision request.</p>
     <div id="plan-tonight">Loading…</div>
+
+    <!-- Plan version timeline: v1 -> v2 -> v3 with the diff entries
+         from version_history. Doctrine: "Adapt within the plan beats
+         rebuild the plan beats abandon the plan" — this timeline is
+         the audit trail of those adaptations. -->
+    <details class="plan-history-details" id="plan-history-wrap" open>
+      <summary class="plan-history-summary">Plan history</summary>
+      <ol class="plan-history" id="plan-history">
+        <li class="muted">No history yet.</li>
+      </ol>
+    </details>
 
     <div class="row-spread" style="margin-top:24px">
       <h2>Campaigns</h2>

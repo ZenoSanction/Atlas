@@ -1338,3 +1338,152 @@ footer .muted { color: var(--text-dim); }
   background: var(--line);
   color: var(--text-dim);
 }
+
+
+/* ============================================================
+   Right Now bar — unified live snapshot, shown across all tabs.
+   See docs/operational_awareness.md "The Three Layers of Awareness".
+   ============================================================ */
+.right-now-bar {
+  margin: 8px 16px 0 16px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.right-now-bar[data-state="error"] {
+  border-color: var(--crit);
+}
+.right-now-bar .rn-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.right-now-bar .rn-summary {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: var(--text);
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+}
+.right-now-bar .btn-link {
+  background: transparent; color: var(--text-dim);
+  border: none; cursor: pointer; padding: 2px 6px;
+}
+.right-now-bar .btn-link:hover { color: var(--text); }
+.right-now-bar .rn-layers {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+}
+.right-now-bar .rn-layer {
+  background: var(--navy-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.right-now-bar .rn-layer-title {
+  text-transform: uppercase; letter-spacing: 0.08em;
+  font-size: 10.5px; color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.right-now-bar .rn-line { margin: 2px 0; }
+.right-now-bar .mono { font-family: ui-monospace, Menlo, Consolas, monospace; }
+.right-now-bar .muted { color: var(--text-dim); }
+.right-now-bar .rn-pill {
+  display: inline-block;
+  padding: 1px 7px; border-radius: 10px;
+  font-size: 10.5px; font-weight: 600;
+  background: var(--line); color: var(--text);
+}
+.right-now-bar .rn-pill.good { background: rgba(74, 222, 128, 0.18); color: var(--ok); }
+.right-now-bar .rn-pill.warn { background: rgba(251, 191, 36, 0.18); color: var(--warn); }
+.right-now-bar .rn-pill.bad  { background: rgba(248, 113, 113, 0.18); color: var(--crit); }
+@media (max-width: 920px) {
+  .right-now-bar .rn-layers { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   Pending Decisions — ATLAS deliberates aloud here.
+   ============================================================ */
+.pending-decisions {
+  margin: 8px 16px 0 16px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.pending-decisions.hidden { display: none; }
+.pending-card {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+.pending-card[data-severity="warning"] { border-left-color: var(--warn); }
+.pending-card[data-severity="critical"] {
+  border-left-color: var(--crit);
+  background: rgba(248, 113, 113, 0.06);
+}
+.pending-card .pd-head {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.pending-card .pd-verb {
+  text-transform: uppercase; font-weight: 700;
+  background: var(--accent-2); color: white;
+  padding: 2px 8px; border-radius: 4px; font-size: 11px;
+}
+.pending-card .pd-layer { font-size: 11px; }
+.pending-card .pd-decide-by { margin-left: auto; font-size: 11px; }
+.pending-card .pd-narration {
+  margin: 6px 0;
+  color: var(--text);
+  line-height: 1.5;
+}
+.pending-card .pd-actions {
+  display: flex; gap: 8px; margin-top: 8px;
+}
+
+/* ============================================================
+   Plan version timeline + version badge.
+   ============================================================ */
+.version-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 11px; font-weight: 600;
+  background: var(--accent-2); color: white;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+.version-badge.hidden { display: none; }
+.plan-history-details {
+  margin-top: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 14px;
+}
+.plan-history-summary {
+  cursor: pointer; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px;
+  user-select: none;
+}
+.plan-history {
+  list-style: none; padding: 8px 0 4px 0; margin: 0;
+}
+.plan-history .ph-entry {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.plan-history .ph-entry:last-child { border-bottom: none; }
+.plan-history .ph-arrow {
+  display: inline-block;
+  min-width: 90px;
+  font-size: 11px;
+  color: var(--gold);
+}
+.plan-history .ph-verb {
+  font-weight: 600;
+  margin-right: 8px;
+  color: var(--accent);
+}
+.plan-history .ph-at { float: right; font-size: 11px; }

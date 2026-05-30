@@ -11,6 +11,7 @@ import { renderHistory } from "/static/js/history.js";
 import { initChat } from "/static/js/atlas-chat.js";
 import { initSetup } from "/static/js/setup.js";
 import { initManualControl, refreshManualControl } from "/static/js/manual-control.js";
+import { initRightNow, refreshPlanHistory } from "/static/js/right-now.js";
 
 const api = (path, opts = {}) =>
   fetch(`/api${path}`, {
@@ -32,7 +33,7 @@ window.atlas = { api };
   initTabs({
     tonight: refreshMissionControl,
     weather: renderWeather,
-    plan: renderPlan,
+    plan: () => { renderPlan(); refreshPlanHistory(); },
     science: renderScience,
     history: renderHistory,
     atlas: () => {},
@@ -70,4 +71,8 @@ window.atlas = { api };
   // and starts a 4s poll against /api/control/status so the audit list
   // stays current.
   initManualControl(api);
+
+  // Right Now bar + Pending Decisions panel — polls /api/right-now
+  // every 5 s. Visible across every tab per doctrine.
+  initRightNow();
 })();

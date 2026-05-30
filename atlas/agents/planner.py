@@ -54,6 +54,7 @@ from typing import Any
 
 from atlas.agents.base import BaseAgent
 from atlas.agents.state import get_state
+from atlas.agents.plan_version import init_version, next_version
 from atlas.astronomy import compute_alt_az, airmass, night_window
 from atlas.astronomy.catalog import best_now
 from atlas.db.managers import (
@@ -381,6 +382,13 @@ class Planner(BaseAgent):
             "applied_constraints": [],
             "blocked_reason": advisory_msg,
         }
+        # Versioning: preserve identity across re-publication. If the
+        # previous plan exists, bump version + append a diff entry;
+        # otherwise initialise at v1.
+        prev = get_state().get_tonight_plan()
+        plan = next_version(prev_plan=prev, new_plan=plan,
+                              reason=f"empty-advisory: {reason}",
+                              verb="republish-empty")
         get_state().set_tonight_plan(plan)
         review = SessionPlanState(
             review_id=new_review_id(),
@@ -850,6 +858,14 @@ class Planner(BaseAgent):
             "fallback_to_catalog": not visible and bool(from_catalog),
             "applied_constraints": applied_constraints,
         }
+        # Versioning: each successful rebuild increments the plan
+        # version + appends a diff entry vs the previous publication.
+        # Identity (review_id) is preserved so the dashboard can show
+        # "Plan v3" with history v1 -> v2 -> v3.
+        prev = get_state().get_tonight_plan()
+        plan = next_version(prev_plan=prev, new_plan=plan,
+                              reason=f"rebuild: {reason}",
+                              verb="republish")
         get_state().set_tonight_plan(plan)
 
         await self.bus.broadcast_event({

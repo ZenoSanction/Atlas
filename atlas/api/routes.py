@@ -1247,6 +1247,77 @@ async def plan_tonight() -> dict:
     }
 
 
+@api_router.get("/pending-decisions")
+async def pending_decisions_list() -> dict:
+    """Live deliberations ATLAS is weighing right now.
+
+    The dashboard's Pending Decisions panel polls this. Each entry
+    is a PendingDecision dict: {id, kind, narration, started_at,
+    decide_by, default_action, evidence, confidence_layer, severity}."""
+    from atlas.agents.state import get_state
+    items = [pd.to_jsonable() for pd in get_state().get_pending_decisions()]
+    return {"count": len(items), "decisions": items}
+
+
+@api_router.post("/pending-decisions/{decision_id}/resolve")
+async def pending_decisions_resolve(decision_id: str, req: dict) -> dict:
+    """Resolve a pending decision from the dashboard.
+
+    Body: {action: 'apply'|'override'|'cancel', verb?, reason?, kwargs?}
+
+      apply    - run ATLAS's proposed verb
+      override - run a different verb (provide verb + reason)
+      cancel   - dismiss without acting
+    """
+    from atlas.agents.narrator import resolve
+    action = (req.get("action") or "").strip()
+    if action not in ("apply", "override", "cancel"):
+        return {"ok": False, "error": f"invalid action: {action!r}"}
+    ok = await resolve(
+        decision_id, action=action,
+        verb=req.get("verb"), reason=req.get("reason"),
+        kwargs=req.get("kwargs"),
+    )
+    return {"ok": ok, "decision_id": decision_id, "action": action}
+
+
+@api_router.post("/plan/adapt")
+async def plan_adapt(req: dict) -> dict:
+    """Apply one of the seven adaptation verbs from the dashboard.
+
+    Body: {verb, reason, evidence?, target_name?, slot_index?,
+           end_at_utc?, after_slot?, replacement?, slot?, at_index?}
+
+    The dashboard's Pending Decisions panel invokes this for
+    operator override — the human can pause/drop/swap/etc. without
+    waiting for ATLAS's deliberation timeout."""
+    from atlas.agents.plan_adapter import adapt_plan
+    verb = (req.get("verb") or "").strip()
+    reason = (req.get("reason") or "").strip() or "operator override"
+    evidence = req.get("evidence") or {"source": "dashboard"}
+    kwargs = {k: v for k, v in req.items()
+              if k not in ("verb", "reason", "evidence")}
+    return adapt_plan(verb, reason=reason, evidence=evidence,
+                        **kwargs).to_jsonable()
+
+
+@api_router.get("/plan/history")
+async def plan_history() -> dict:
+    """The current plan's version history.
+
+    Each entry: {version, parent_version, at, reason, verb, diff}.
+    The dashboard's plan-version timeline renders this as a list.
+    Returns {plan_version, review_id, history: [...]} — empty list
+    if no plan has been published yet."""
+    from atlas.agents.state import get_state
+    plan = get_state().get_tonight_plan() or {}
+    return {
+        "plan_version": plan.get("version"),
+        "review_id": plan.get("review_id"),
+        "history": plan.get("version_history") or [],
+    }
+
+
 @api_router.get("/plan/diagnose")
 async def plan_diagnose() -> dict:
     """Observability endpoint for "why is the Plan tab empty?"
