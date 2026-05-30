@@ -90,6 +90,30 @@ MAX_TARGETS_PER_SESSION = 4
 MIN_DWELL_MINUTES = 60
 
 
+def _is_chat_plan_request(msg, payload: dict) -> bool:
+    """True if this inbound message is a chat-driven plan request
+    that should kick a fresh rebuild + review chain.
+
+    The Planner previously ignored these — they fell through to the
+    default relay handler, which only logged the message and updated
+    the lane display. ATLAS calling send_to_agent(kind='status', ...)
+    to forward an operator request ("build me a single-target session
+    for NGC 7000") would silently hang the chain forever.
+
+    Heuristic:
+      - Must carry the ``from_chat: True`` flag the relay_tools.py
+        send_to_agent helper stamps on every chat-initiated relay.
+      - Must NOT already be part of an in-flight review chain
+        (payload.kind == "plan_review" means the chain itself is
+        forwarding the plan around — don't re-fire it).
+    """
+    if not payload.get("from_chat"):
+        return False
+    if payload.get("kind") == "plan_review":
+        return False
+    return True
+
+
 class Planner(BaseAgent):
     name = AgentName.PLANNER
 
@@ -154,16 +178,17 @@ class Planner(BaseAgent):
                     break
 
                 try:
+                    payload = msg.payload or {}
                     if msg.kind == AgentMessageKind.REVISION_REQUEST:
                         await self._handle_revision(msg)
                     elif msg.kind == AgentMessageKind.CANDIDATE_TARGET:
                         # Oracle (or another agent) proposes a target.
                         self.set_task(
-                            f"received candidate target — {(msg.payload or {}).get('summary', '')[:60]}",
+                            f"received candidate target — {payload.get('summary', '')[:60]}",
                             state="working")
                         self.log_decision("candidate_received",
                                             inputs={"sender": str(msg.sender),
-                                                      "payload": msg.payload},
+                                                      "payload": payload},
                                             rationale="Phase-1 stub: log + rebuild plan",
                                             session_id=msg.session_id)
                         try:
@@ -171,11 +196,55 @@ class Planner(BaseAgent):
                         except Exception:
                             self.log.exception("Plan rebuild on candidate failed")
                     elif (msg.kind == AgentMessageKind.STATUS
-                            and (msg.payload or {}).get("kind") == "plan_review"
-                            and (msg.payload or {}).get("phase") == "finalize"):
+                            and payload.get("kind") == "plan_review"
+                            and payload.get("phase") == "finalize"):
                         # Stage 5 — chain returns from Oracle. Republish
                         # the plan as FINAL.
-                        await self._finalize_review_chain(msg.payload)
+                        await self._finalize_review_chain(payload)
+                    elif _is_chat_plan_request(msg, payload):
+                        # Chat-driven plan request relayed by ATLAS (e.g.
+                        # operator asked for a single-target session for
+                        # NGC 7000). Without this branch the message
+                        # would fall through to handle_relayed_message,
+                        # which only updates the task display — the
+                        # chain would never start and the dashboard
+                        # would sit silent. Treat it as a forced rebuild:
+                        # publish a fresh plan + auto-start the chain to
+                        # the Critic. Reason "operator_chat_request"
+                        # bypasses the plan-hash skip so even an
+                        # identical plan re-fires advisories.
+                        sender = (msg.sender.value if hasattr(msg.sender, "value")
+                                  else str(msg.sender))
+                        summary = payload.get("summary", "")[:80]
+                        self.set_task(
+                            f"chat plan request from {sender}: {summary}",
+                            state="working",
+                        )
+                        # Still surface the relay in the lane + history.
+                        await self.handle_relayed_message(msg)
+                        try:
+                            await self._rebuild_plan(
+                                reason=f"operator_chat_request:{sender}")
+                        except Exception:
+                            self.log.exception(
+                                "Chat-driven rebuild failed; publishing "
+                                "fallback empty plan with advisory")
+                            try:
+                                await self._publish_empty_plan_with_advisory(
+                                    reason=f"chat_request_failed:{sender}",
+                                    advisory_kind="planner_error",
+                                    advisory_severity="warning",
+                                    advisory_msg=(
+                                        f"Chat-driven plan request from "
+                                        f"{sender} crashed during rebuild. "
+                                        f"Fallback empty plan published "
+                                        f"so the Plan tab is never empty."
+                                    ),
+                                )
+                            except Exception:
+                                self.log.exception(
+                                    "Fallback publish also failed for "
+                                    "chat-driven request")
                     else:
                         await self.handle_relayed_message(msg)
                     self._mark_msg_handled(msg, ok=True)

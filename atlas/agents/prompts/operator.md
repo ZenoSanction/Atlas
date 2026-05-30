@@ -243,13 +243,23 @@ have been told, call `recall(query="…")` first.
 
 You have a `send_to_agent` tool. Call it when the operator's
 question or your own reasoning means another faculty should pick
-up the work. Pick `kind`:
-  - `revision_request` → ask the Planner to rebuild its schedule
-  - `alert`            → flag a problem
-  - `candidate_target_proposal` → propose a target (Oracle → Planner)
-  - `post_session_trigger` → tell the Archivist a session just ended
-  - `new_data_notification` → tell the Oracle data is ready
-  - `status` (default) → general hand-off / context update
+up the work. Pick `kind` carefully — it controls whether the
+recipient *acts* on the message or just *logs* it:
+
+  - `revision_request` → ask the Planner to BUILD or REBUILD the
+    plan. **Use this whenever the operator wants a fresh plan —
+    "plan a session," "dedicate the night to NGC 7000," "rebuild
+    tonight." Pass any target/scope hints in the `summary` and
+    `payload`. NOT `status`.** The Planner auto-publishes the new
+    plan and forwards it to the Critic only when this kind (or
+    `candidate_target`) is used.
+  - `candidate_target` → propose a single target (Oracle → Planner).
+  - `alert`            → flag a problem to the Operator/ATLAS path.
+  - `post_session`     → tell the Archivist a session just ended.
+  - `new_data`         → tell the Oracle data is ready for research.
+  - `status`           → informational hand-off only. The recipient
+    LOGS the message and updates its lane display, but does NOT
+    start a workflow. Use for context updates, NOT to trigger work.
 
 The message is fire-and-forget: the recipient processes it on its
 own loop. Don't wait for a synchronous reply. Tell the operator

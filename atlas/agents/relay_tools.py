@@ -41,15 +41,23 @@ _KIND_HINTS = {
     AgentMessageKind.ALERT.value:
         "a problem the recipient (usually Operator) must consider",
     AgentMessageKind.REVISION_REQUEST.value:
-        "ask the Planner to rebuild the plan",
+        ("ask the Planner to BUILD or REBUILD the plan. USE THIS when "
+         "the operator wants a fresh plan (any phrasing of 'plan a "
+         "session', 'dedicate the night to X', 'rebuild tonight') — "
+         "NOT 'status'. The Planner only auto-publishes + forwards "
+         "to the Critic when the kind is revision_request or when "
+         "from_chat=True is set on the relay payload."),
     AgentMessageKind.POST_SESSION.value:
         "tell the Archivist a session has just ended",
     AgentMessageKind.NEW_DATA.value:
         "tell the Oracle new frames/measurements are available",
     AgentMessageKind.CANDIDATE_TARGET.value:
-        "propose a target (typically Oracle → Planner)",
+        ("propose a single target the Planner should consider adding. "
+         "Triggers a Planner rebuild that incorporates the suggestion."),
     AgentMessageKind.STATUS.value:
-        "status update / hand-off summary (default for chat-initiated relays)",
+        ("informational hand-off / context update. The recipient logs "
+         "it but does NOT start a workflow. Do NOT use this to ask "
+         "the Planner to build a plan — use revision_request instead."),
     AgentMessageKind.DECISION.value:
         "record a decision for downstream visibility",
     AgentMessageKind.OPERATOR_COMMAND.value:
