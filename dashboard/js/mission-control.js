@@ -9,6 +9,13 @@
 //   - WebSocket pushes new events into the message-flow + animates the
 //     relevant lane when their task changes
 
+// Shared TTS module — chunks long replies into utterance-sized pieces
+// and runs a pause/resume keep-alive pump. Previously this file's local
+// speakReply sliced text to 500 chars AND hit Chrome's ~15s
+// single-utterance cutoff, so any ATLAS reply over ~10 sentences went
+// silent partway through.
+import { speak as ttsSpeak } from "/static/js/tts.js";
+
 let _timer = null;
 let _historyByAgent = {};   // agent name -> array of {who, text}
 
@@ -426,18 +433,13 @@ function esc(s) {
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Browser TTS — kept short and disabled if the user hasn't interacted with
-// the page (Chrome's autoplay policy blocks speech otherwise). Bound to a
-// "TTS replies aloud" toggle stored in localStorage.
+// Browser TTS — delegates to the shared tts.js module. The module
+// chunks on sentence boundaries (Chrome cuts off any single utterance
+// past ~200 chars / ~15s of audio) and runs a pause/resume keep-alive
+// pump so multi-paragraph replies play through to the end. Honours
+// the same localStorage key the topbar 🔊 toggle writes to.
 function speakReply(text) {
-  try {
-    if (!("speechSynthesis" in window)) return;
-    if (localStorage.getItem("atlas_tts_enabled") !== "1") return;
-    const u = new SpeechSynthesisUtterance(text.slice(0, 500));
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    window.speechSynthesis.speak(u);
-  } catch {}
+  ttsSpeak(text);
 }
 
 function gateIcon(status) {

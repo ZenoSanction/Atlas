@@ -17,6 +17,12 @@
 //      toggle in the topbar — same key as the per-lane chats — so the
 //      user has ONE place to silence the dashboard.
 
+// Shared TTS module — chunks on sentence boundaries, queues with
+// keep-alive pump. Previously a single SpeechSynthesisUtterance >
+// ~200 chars / ~15s of audio was killed mid-stream by Chrome's speech
+// engine, making ATLAS go silent after about a minute of speech.
+import { speak } from "/static/js/tts.js";
+
 export function initChat(api) {
   const form = document.getElementById("chat-form");
   const input = document.getElementById("chat-input");
@@ -155,26 +161,6 @@ function appendMsg(history, cls, who, text) {
   div.innerHTML = `<span class="who">${who}:</span><span>${esc(text)}</span>`;
   history.appendChild(div);
   history.scrollTop = history.scrollHeight;
-}
-
-// Browser TTS. Honours the 🔊 topbar toggle (same localStorage key the
-// per-lane chats use), so there's one place to silence the dashboard.
-// Failures used to be silent — we surface onerror in the console now so
-// "I clicked send and nothing spoke" can actually be diagnosed.
-function speak(text) {
-  try {
-    if (!("speechSynthesis" in window)) return;
-    if (localStorage.getItem("atlas_tts_enabled") !== "1") return;
-    if (!text) return;
-    const u = new SpeechSynthesisUtterance(String(text).slice(0, 800));
-    u.lang = "en-US";
-    u.rate = 1.05;
-    u.onerror = (ev) =>
-      console.warn("[atlas-chat] TTS error:", ev?.error || ev);
-    window.speechSynthesis.speak(u);
-  } catch (e) {
-    console.warn("[atlas-chat] TTS threw:", e);
-  }
 }
 
 function esc(s) {
