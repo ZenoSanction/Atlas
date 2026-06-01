@@ -55,6 +55,21 @@ class Operator(BaseAgent):
         self._startup_in_progress = False
         # Background tasks owned by the Operator
         self._verdict_watcher_task: asyncio.Task | None = None
+        # Strong references to fire-and-forget background tasks. Without
+        # this, asyncio only holds a weak reference and a task can be
+        # garbage-collected mid-flight; its exceptions are also swallowed
+        # until GC. We keep the ref until the task completes.
+        self._bg_tasks: set[asyncio.Task] = set()
+        # Confidence-layer consult dedup. The watcher re-runs the rule
+        # chain on every verdict tick + the 300 s fallback. Without a
+        # cooldown, a rule that keeps matching the same stale condition
+        # (e.g. an expired active_slot the executor isn't updating, or a
+        # dawn-truncate that can't apply) would spawn a fresh pending
+        # decision every few minutes forever. We remember the last
+        # acted-on recommendation signature + time and skip re-firing
+        # the identical one within the cooldown window.
+        self._last_consult_sig: str | None = None
+        self._last_consult_at: float = 0.0
         # Register chat-time tools (weather, system status). Without these,
         # the dashboard's ATLAS-tab chat could only answer from training
         # knowledge — the Operator literally had no way to fetch live state.
@@ -176,18 +191,38 @@ class Operator(BaseAgent):
         rec = recommend(rn)
         if rec is None or rec.verb in ("no_change", "pause", "resume",
                                           "safe_shutdown"):
+            # Condition cleared (or owned by a legacy path) — reset the
+            # cooldown so a genuinely new occurrence can fire immediately.
+            self._last_consult_sig = None
             return  # legacy paths own these; nothing for us here
+
+        # Cooldown dedup: skip if this exact recommendation was already
+        # deliberated within the cooldown window. Signature keys on the
+        # rule + verb + target so a *different* slot expiring still fires
+        # right away, but the same one doesn't re-spawn endlessly.
+        CONSULT_COOLDOWN_S = 900.0   # 15 min
+        DECIDE_AFTER_S = 180.0
+        target = (rec.verb_kwargs or {}).get("target_name") or ""
+        sig = f"{rec.rule_name}:{rec.verb}:{target}"
+        now_mono = asyncio.get_running_loop().time()
+        if (sig == self._last_consult_sig
+                and (now_mono - self._last_consult_at) < CONSULT_COOLDOWN_S):
+            return
+        self._last_consult_sig = sig
+        self._last_consult_at = now_mono
+
         narration = (f"Considering: {rec.verb}. {rec.reason}. Watching "
-                       f"for {min(180, 60 + len(rec.reason))}s before acting. "
+                       f"for {int(DECIDE_AFTER_S)}s before acting. "
                        f"Operator override available.")
-        # Background task so the watcher loop is never blocked
-        asyncio.create_task(
+        # Fire-and-forget, but hold a strong ref so the task can't be
+        # GC'd mid-deliberation and its exceptions surface.
+        self._spawn_bg(
             deliberate(
                 verb=rec.verb,
                 reason=rec.reason,
                 narration=narration,
                 evidence=rec.evidence,
-                decide_after_s=180.0,
+                decide_after_s=DECIDE_AFTER_S,
                 default_action="apply",
                 confidence_layer=rec.confidence_layer,
                 severity=rec.severity,
@@ -197,6 +232,27 @@ class Operator(BaseAgent):
         )
         self.log.info("Confidence layer 1 -> deliberate %s (rule=%s, reason=%s)",
                        rec.verb, rec.rule_name, rec.reason)
+
+    def _spawn_bg(self, coro, *, name: str | None = None) -> "asyncio.Task":
+        """Create a background task and hold a strong reference to it
+        until it completes. asyncio only keeps a weak reference, so an
+        un-referenced task can be garbage-collected mid-flight and its
+        exceptions are swallowed. This keeps it alive + surfaces errors."""
+        task = asyncio.create_task(coro, name=name)
+        self._bg_tasks.add(task)
+
+        def _done(t: "asyncio.Task") -> None:
+            self._bg_tasks.discard(t)
+            try:
+                exc = t.exception()
+            except (asyncio.CancelledError, Exception):
+                exc = None
+            if exc is not None:
+                self.log.error("background task %s failed: %r",
+                                 t.get_name(), exc)
+
+        task.add_done_callback(_done)
+        return task
 
     async def _verdict_watcher_loop(self) -> None:
         """Watch OperatorVerdict transitions, fire protection + recovery.

@@ -140,7 +140,7 @@ async def deliberate(*, verb: str, reason: str, narration: str,
     async with _REGISTRY_LOCK:
         _OVERRIDE_EVENTS[decision_id] = ev
 
-    started_mono = asyncio.get_event_loop().time()
+    started_mono = asyncio.get_running_loop().time()
 
     try:
         # Wait for: override, preempt, or timeout
@@ -158,7 +158,7 @@ async def deliberate(*, verb: str, reason: str, narration: str,
         except Exception:
             done = set()
 
-        elapsed = asyncio.get_event_loop().time() - started_mono
+        elapsed = asyncio.get_running_loop().time() - started_mono
 
         # ---- Resolution ----
         if preempt_event is not None and preempt_event.is_set():
